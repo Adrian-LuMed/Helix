@@ -1339,6 +1339,98 @@
     }
     
     /* ═══════════════════════════════════════════════════════════════
+       SESSION SEARCH BOX
+       ═══════════════════════════════════════════════════════════════ */
+    .session-search {
+      padding: 8px 12px;
+      position: relative;
+    }
+    
+    .session-search-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    
+    .session-search-icon {
+      position: absolute;
+      left: 10px;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      pointer-events: none;
+    }
+    
+    .session-search-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 32px 8px 32px;
+      color: var(--text);
+      font-size: 0.85rem;
+      font-family: inherit;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    
+    .session-search-input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.15);
+    }
+    
+    .session-search-input::placeholder {
+      color: var(--text-dim);
+    }
+    
+    .session-search-clear {
+      position: absolute;
+      right: 6px;
+      width: 22px;
+      height: 22px;
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      font-size: 1rem;
+      line-height: 1;
+      transition: all 0.15s;
+    }
+    
+    .session-search-clear:hover {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+    
+    .session-search-input:not(:placeholder-shown) + .session-search-clear {
+      display: flex;
+    }
+    
+    .session-search-hint {
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      text-align: right;
+      margin-top: 4px;
+      opacity: 0.7;
+    }
+    
+    .no-matches {
+      padding: 24px 16px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+    
+    .no-matches-icon {
+      font-size: 1.5rem;
+      margin-bottom: 8px;
+      opacity: 0.5;
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════
        ANIMATIONS
        ═══════════════════════════════════════════════════════════════ */
     @media (prefers-reduced-motion: no-preference) {
@@ -1420,10 +1512,11 @@
           <div class="auto-archive-setting" title="Auto-archive inactive sessions">
             <span>⏰</span>
             <select id="autoArchiveSelect" onchange="setAutoArchiveDays(this.value)">
+              <option value="0.25">6h</option>
+              <option value="0.5">12h</option>
+              <option value="1">1d</option>
               <option value="3">3d</option>
               <option value="7">7d</option>
-              <option value="14">14d</option>
-              <option value="30">30d</option>
               <option value="never">Off</option>
             </select>
           </div>
@@ -1433,6 +1526,22 @@
           </label>
           <button class="section-action" id="selectModeBtn" onclick="enterMultiSelect()" title="Select sessions">☑</button>
           <button class="section-action" onclick="refresh()" title="Refresh">↻</button>
+        </div>
+        <!-- Search Box -->
+        <div class="session-search">
+          <div class="session-search-wrapper">
+            <span class="session-search-icon">🔍</span>
+            <input 
+              type="text" 
+              class="session-search-input" 
+              id="sessionSearchInput"
+              placeholder="Search sessions..."
+              oninput="handleSearchInput(this.value)"
+              onkeydown="handleSearchKeydown(event)"
+            >
+            <button class="session-search-clear" onclick="clearSearch()" title="Clear search">×</button>
+          </div>
+          <div class="session-search-hint">⌘K to focus</div>
         </div>
         <div class="bulk-action-bar" id="bulkActionBar">
           <span class="bulk-count" id="bulkCount">0 selected</span>
@@ -1716,7 +1825,7 @@
         return;
       }
       
-      const days = parseInt(state.autoArchiveDays, 10);
+      const days = parseFloat(state.autoArchiveDays);
       if (isNaN(days) || days <= 0) return;
       
       const threshold = Date.now() - (days * 24 * 60 * 60 * 1000);
@@ -2406,6 +2515,20 @@
       if (s.key.includes(':subagent:')) return s.label || 'Sub-agent';
       if (s.key.includes(':app:')) return `App: ${s.key.split(':app:')[1]}`;
       if (s.key.startsWith('cron:')) return s.key.replace('cron:', 'Cron: ');
+      // Telegram topics: show "Topic N" or channel info
+      if (s.key.includes(':topic:')) {
+        const topicMatch = s.key.match(/:topic:(\d+)$/);
+        if (topicMatch) return `Topic ${topicMatch[1]}`;
+      }
+      // Telegram groups without topic
+      if (s.key.includes(':telegram:group:')) {
+        const groupMatch = s.key.match(/:group:(-?\d+)(?:$|:)/);
+        if (groupMatch) return `Group ${groupMatch[1].slice(-4)}`;
+      }
+      // Telegram DMs
+      if (s.key.includes(':telegram:') && !s.key.includes(':group:')) {
+        return s.displayName || 'Telegram DM';
+      }
       return s.displayName || s.key.split(':').pop();
     }
     

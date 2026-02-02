@@ -3114,13 +3114,15 @@ Response format:
       const title = goal?.title || proposal.title || 'New Goal';
       const reason = proposal.reason || '';
       const isNew = !proposal.goalId || proposal.isNew;
+      const titleClass = isNew ? 'is-new' : 'is-existing';
       
       document.getElementById('wizardProposedGoal').innerHTML = `
-        <span class="proposal-title">${isNew ? '✨ Create: ' : '🏙️ '}${escapeHtml(title)}</span>
+        <span class="proposal-title ${titleClass}">${isNew ? '✨ ' : '📁 '}${escapeHtml(title)}</span>
         <span class="proposal-reason">${escapeHtml(reason)}</span>
       `;
       
-      document.getElementById('wizardAcceptBtn').textContent = isNew ? '✓ Create & Assign' : '✓ Accept Proposal';
+      document.getElementById('wizardAcceptBtn').textContent = isNew ? '✓ Create & Assign' : '✓ Assign to Goal';
+      document.getElementById('wizardAcceptBtn').style.display = '';
     }
     
     function showWizardManualProposal() {

@@ -1669,6 +1669,14 @@
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, 'idle');
         
+        // Check if this is a categorization response (from main session)
+        if (sessionKey === 'agent:main:main' && state.suggestingSessionKey && message?.content) {
+          const text = extractText(message.content);
+          if (text && text.includes('"suggestions"')) {
+            handleCategorizationResponse(text);
+          }
+        }
+        
         if (state.currentSession?.key === sessionKey) {
           state.isThinking = false;
           updateSendButton();
@@ -2458,42 +2466,192 @@
     
     async function analyzeSesssionForGoals(sessionKey, sessionName) {
       try {
-        // Get existing goals
         const goals = state.goals || [];
-        const goalsList = goals.map(g => `"${g.title}" (id: ${g.id}, status: ${g.status})`).join(', ');
         
-        // Build prompt for AI
-        const message = `[SUGGEST-GOAL-REQUEST]
-Session: ${sessionKey}
-Name: ${sessionName}
-
-Existing goals: ${goalsList || '(none yet)'}
-
-Please analyze this session and respond with a JSON object containing goal suggestions. Look at the session key pattern and name to infer what it's about. Return format:
-{
-  "suggestions": [
-    { "goalId": "existing-goal-id", "title": "Goal Title", "reason": "Why this fits", "confidence": "high|medium|low" },
-    { "goalId": null, "title": "Suggested New Goal", "reason": "Why create this", "confidence": "medium" }
-  ]
-}
-
-If no existing goal fits well, suggest creating a new one. Include 1-3 suggestions total. Respond ONLY with the JSON, no other text.`;
-
-        // Send via WebSocket RPC
-        const response = await sendChatMessage(message);
+        // Fetch session history to understand what it's about
+        let historyContext = '';
+        try {
+          const historyResult = await rpcCall('chat.history', { sessionKey, limit: 10 });
+          if (historyResult?.messages) {
+            // Extract text from recent messages
+            historyContext = historyResult.messages
+              .filter(m => m.role === 'user' || m.role === 'assistant')
+              .slice(0, 5)
+              .map(m => {
+                const text = typeof m.content === 'string' ? m.content : 
+                  (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
+                return text.slice(0, 200);
+              })
+              .join(' ');
+          }
+        } catch (e) {
+          console.log('Could not fetch history:', e);
+        }
         
-        // The AI will respond in the chat - we'll parse it there
-        // For now, show manual options after a delay
-        setTimeout(() => {
+        // Build context string for AI analysis
+        const contextForAI = `Session: ${sessionKey}\nName: ${sessionName}\nRecent content: ${historyContext.slice(0, 500)}`;
+        
+        // If we have goals, ask AI to rank them
+        if (goals.length > 0) {
+          const goalsList = goals.map(g => `- "${g.title}" (id: ${g.id})`).join('\n');
+          
+          const message = `[CATEGORIZE-SESSION]
+Analyze this session and suggest which goal it belongs to. Respond with ONLY a JSON object, no other text.
+
+${contextForAI}
+
+Available goals:
+${goalsList}
+
+Response format:
+{"suggestions":[{"goalId":"id-here","title":"Goal Title","reason":"brief reason","confidence":"high|medium|low"}]}
+
+If none fit well, include a suggestion with goalId:null and a proposed new goal title.`;
+
+          // Send to AI and wait for response
+          document.getElementById('suggestGoalDesc').textContent = 'AI is analyzing the session...';
+          
+          try {
+            // Send request and listen for response
+            const reqId = await sendCategorizationRequest(sessionKey, message);
+            // Response will come via WebSocket event - set up listener
+            state.pendingCategorizationReqId = reqId;
+            state.pendingCategorizationSessionKey = sessionKey;
+            
+            // Timeout fallback to manual
+            setTimeout(() => {
+              if (state.suggestingSessionKey === sessionKey) {
+                showManualGoalOptions();
+              }
+            }, 8000);
+            
+          } catch (e) {
+            console.error('AI request failed:', e);
+            showManualGoalOptions();
+          }
+        } else {
+          // No goals yet - just show create option
           showManualGoalOptions();
-        }, 1500);
+        }
         
       } catch (e) {
         console.error('Analyze session error:', e);
-        document.getElementById('suggestGoalError').textContent = 'Failed to analyze: ' + e.message;
-        document.getElementById('suggestGoalError').style.display = 'block';
-        document.getElementById('suggestGoalLoading').style.display = 'none';
         showManualGoalOptions();
+      }
+    }
+    
+    async function sendCategorizationRequest(sessionKey, message) {
+      if (!state.ws || !state.connected) throw new Error('Not connected');
+      
+      const reqId = String(++state.rpcIdCounter);
+      
+      state.ws.send(JSON.stringify({
+        type: 'req',
+        id: reqId,
+        method: 'chat.send',
+        params: {
+          sessionKey: 'agent:main:main',
+          message: message,
+        }
+      }));
+      
+      return reqId;
+    }
+    
+    // Handle categorization response from AI
+    function handleCategorizationResponse(text) {
+      if (!state.suggestingSessionKey) return;
+      
+      try {
+        // Try to parse JSON from the response
+        const jsonMatch = text.match(/\{[\s\S]*"suggestions"[\s\S]*\}/);
+        if (jsonMatch) {
+          const data = JSON.parse(jsonMatch[0]);
+          if (data.suggestions && Array.isArray(data.suggestions)) {
+            showAISuggestions(data.suggestions);
+            return;
+          }
+        }
+      } catch (e) {
+        console.log('Could not parse AI response:', e);
+      }
+      
+      // Fallback to manual
+      showManualGoalOptions();
+    }
+    
+    function showAISuggestions(suggestions) {
+      const goals = state.goals || [];
+      const container = document.getElementById('goalSuggestions');
+      
+      document.getElementById('suggestGoalLoading').style.display = 'none';
+      document.getElementById('suggestGoalResults').style.display = 'block';
+      document.getElementById('suggestNewGoalSection').style.display = 'block';
+      document.getElementById('suggestGoalDesc').textContent = 'AI suggestions (click to assign):';
+      
+      const html = suggestions.map(s => {
+        const isNew = !s.goalId;
+        const confidence = s.confidence || 'medium';
+        const confidenceClass = confidence === 'high' ? 'high' : (confidence === 'low' ? 'low' : 'medium');
+        
+        if (isNew) {
+          return `
+            <div class="goal-suggestion-row new-goal" onclick="createAndAssignGoal('${escapeHtml(s.title || 'New Goal')}')">
+              <div class="suggestion-icon">✨</div>
+              <div class="suggestion-content">
+                <div class="suggestion-title">Create: ${escapeHtml(s.title || 'New Goal')}</div>
+                <div class="suggestion-reason">${escapeHtml(s.reason || 'Suggested new goal')}</div>
+              </div>
+              <div class="suggestion-confidence">${confidence}</div>
+            </div>
+          `;
+        } else {
+          const goal = goals.find(g => g.id === s.goalId);
+          const title = goal?.title || s.title || 'Unknown';
+          return `
+            <div class="goal-suggestion-row" onclick="assignSessionToGoal('${escapeHtml(s.goalId)}')">
+              <div class="suggestion-icon">🏙️</div>
+              <div class="suggestion-content">
+                <div class="suggestion-title">${escapeHtml(title)}</div>
+                <div class="suggestion-reason">${escapeHtml(s.reason || '')}</div>
+              </div>
+              <div class="suggestion-confidence">${confidence}</div>
+            </div>
+          `;
+        }
+      }).join('');
+      
+      container.innerHTML = html || '<div class="empty-state">No suggestions. Pick manually below.</div>';
+    }
+    
+    async function createAndAssignGoal(title) {
+      const sessionKey = state.suggestingSessionKey;
+      if (!sessionKey || !title) return;
+      
+      try {
+        const res = await fetch('/api/goals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title }),
+        });
+        if (!res.ok) throw new Error('Failed to create goal');
+        const data = await res.json();
+        
+        if (data?.goal?.id) {
+          await fetch(`/api/goals/${data.goal.id}/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionKey }),
+          });
+        }
+        
+        hideSuggestGoalModal();
+        await loadGoals();
+        renderSessions();
+        
+      } catch (e) {
+        document.getElementById('suggestGoalError').textContent = 'Failed: ' + e.message;
+        document.getElementById('suggestGoalError').style.display = 'block';
       }
     }
     

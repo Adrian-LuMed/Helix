@@ -4666,6 +4666,12 @@ a:focus-visible {
   transform: translateY(-2px);
 }
 
+/* Stat card accent variants */
+.stat-card.accent-blue { border-left: 3px solid var(--accent); }
+.stat-card.accent-yellow { border-left: 3px solid var(--yellow); }
+.stat-card.accent-green { border-left: 3px solid var(--green); }
+.stat-card.accent-red { border-left: 3px solid var(--red); }
+
 
 .goal-pill.pr {
   border-color: rgba(250,204,21,0.25);

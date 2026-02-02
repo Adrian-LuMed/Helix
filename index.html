@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   
-  <link rel="stylesheet" href="/styles/main.css?v=7">
+  <link rel="stylesheet" href="/styles/main.css?v=8">
   <link rel="stylesheet" href="/styles/media-upload.css">
   <link rel="stylesheet" href="/styles/voice-recorder.css">
 </head>
@@ -339,20 +339,20 @@
         <div class="overview-content">
           <!-- Stats Grid -->
           <div class="stats-grid" id="statsGrid">
-            <div class="stat-card clickable" onclick="scrollToSection('sessionsGrid')" title="View sessions">
+            <div class="stat-card clickable accent-blue" onclick="scrollToSection('sessionsGrid')" title="View sessions">
               <div class="stat-label">Active Sessions</div>
               <div class="stat-value" id="statActiveSessions">-</div>
               <div class="stat-trend" id="statSessionsTrend"></div>
             </div>
-            <div class="stat-card clickable" onclick="filterGoalsByStatus('active')" title="View pending goals">
+            <div class="stat-card clickable accent-yellow" onclick="filterGoalsByStatus('active')" title="View pending goals">
               <div class="stat-label">Pending Goals</div>
               <div class="stat-value" id="statPendingGoals">-</div>
             </div>
-            <div class="stat-card clickable" onclick="filterGoalsByStatus('done')" title="View completed goals">
+            <div class="stat-card clickable accent-green" onclick="filterGoalsByStatus('done')" title="View completed goals">
               <div class="stat-label">Completed</div>
               <div class="stat-value" id="statCompletedGoals">-</div>
             </div>
-            <div class="stat-card clickable" onclick="showErrorSessions()" title="View sessions with errors">
+            <div class="stat-card clickable accent-red" onclick="showErrorSessions()" title="View sessions with errors">
               <div class="stat-label">Errors</div>
               <div class="stat-value stat-error" id="statErrors">-</div>
             </div>

@@ -2877,6 +2877,7 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
           params: {
             sessionKey: 'agent:main:main',
             message: text,
+            idempotencyKey: crypto.randomUUID(),
           }
         }));
       });

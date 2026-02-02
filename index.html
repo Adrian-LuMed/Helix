@@ -3018,11 +3018,14 @@ Recent messages: ${lastMessages.slice(0, 300)}
 Available goals:
 ${goalsList}
 
-IMPORTANT: If no existing goal is a strong match (>70% fit), suggest creating a NEW goal with a descriptive name based on the session topic. Don't force-fit sessions into poorly matching goals.
+IMPORTANT: 
+- Goals should be HIGH-LEVEL projects/initiatives (e.g. "Dashboard Development", "Investor Outreach", "Infrastructure Setup") - NOT granular tasks
+- If no existing goal fits well, suggest a NEW high-level goal
+- Group related work under broader themes
 
 Response format:
-If existing goal fits well: {"goalId":"the-id","title":"Goal Title","reason":"why it fits","isNew":false}
-If new goal needed: {"goalId":null,"title":"Descriptive New Goal Name","reason":"why new goal is better","isNew":true}`;
+If existing goal fits: {"goalId":"the-id","title":"Goal Title","reason":"why","isNew":false}
+If new goal needed: {"goalId":null,"title":"High-Level Project Name","reason":"why new","isNew":true}`;
 
         try {
           if (!state.ws || !state.connected) {
@@ -3048,17 +3051,18 @@ If new goal needed: {"goalId":null,"title":"Descriptive New Goal Name","reason":
       } else {
         // No goals - ask AI to suggest a name for a new goal
         const message = `[WIZARD-CATEGORIZE]
-Analyze this session and suggest a NEW goal to create. Respond with ONLY JSON, no other text.
+Analyze this session and suggest a NEW high-level goal. Respond with ONLY JSON, no other text.
 
 Session: ${sessionKey}
 Name: ${sessionName}
 First messages: ${firstMessages.slice(0, 300)}
 Recent messages: ${lastMessages.slice(0, 300)}
 
-No existing goals - suggest creating one based on session topic.
+No existing goals - suggest a HIGH-LEVEL project/initiative name (e.g. "Dashboard Development", "Investor Outreach", "Infrastructure Setup").
+NOT a granular task - think broader themes that could contain multiple sessions.
 
 Response format:
-{"goalId":null,"title":"Suggested Goal Name Based On Topic","reason":"why this fits","isNew":true}`;
+{"goalId":null,"title":"High-Level Project Name","reason":"what this project covers","isNew":true}`;
 
         try {
           if (!state.ws || !state.connected) {

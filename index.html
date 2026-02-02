@@ -2468,28 +2468,39 @@
       try {
         const goals = state.goals || [];
         
-        // Fetch session history to understand what it's about
-        let historyContext = '';
+        // Fetch session history - get first 5 (topic) and last 5 (recent) messages
+        let firstMessages = '';
+        let lastMessages = '';
         try {
-          const historyResult = await rpcCall('chat.history', { sessionKey, limit: 10 });
+          const historyResult = await rpcCall('chat.history', { sessionKey, limit: 50 });
           if (historyResult?.messages) {
-            // Extract text from recent messages
-            historyContext = historyResult.messages
-              .filter(m => m.role === 'user' || m.role === 'assistant')
-              .slice(0, 5)
-              .map(m => {
-                const text = typeof m.content === 'string' ? m.content : 
-                  (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
-                return text.slice(0, 200);
-              })
-              .join(' ');
+            const userMsgs = historyResult.messages.filter(m => m.role === 'user');
+            
+            // First 5 user messages (understand the original topic)
+            const first5 = userMsgs.slice(0, 5);
+            firstMessages = first5.map(m => {
+              const text = typeof m.content === 'string' ? m.content : 
+                (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
+              return text.slice(0, 150);
+            }).join(' | ');
+            
+            // Last 5 user messages (recent context)
+            const last5 = userMsgs.slice(-5);
+            lastMessages = last5.map(m => {
+              const text = typeof m.content === 'string' ? m.content : 
+                (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
+              return text.slice(0, 150);
+            }).join(' | ');
           }
         } catch (e) {
           console.log('Could not fetch history:', e);
         }
         
         // Build context string for AI analysis
-        const contextForAI = `Session: ${sessionKey}\nName: ${sessionName}\nRecent content: ${historyContext.slice(0, 500)}`;
+        const contextForAI = `Session: ${sessionKey}
+Name: ${sessionName}
+First messages (original topic): ${firstMessages.slice(0, 400) || '(none)'}
+Recent messages: ${lastMessages.slice(0, 400) || '(none)'}`;
         
         // If we have goals, ask AI to rank them
         if (goals.length > 0) {

@@ -8,7 +8,7 @@
   <meta http-equiv="Expires" content="0">
   <meta name="theme-color" content="#0a0c10">
   <meta name="color-scheme" content="dark">
-  <title>Sharp Dashboard</title>
+  <title>ClawCondos</title>
   
   <!-- Preload fonts for performance -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -27,7 +27,7 @@
        ═══════════════════════════════════════════════════════════════ -->
   <div class="modal-overlay hidden" id="loginModal">
     <div class="modal">
-      <h2 class="modal-title">🎯 Sharp</h2>
+      <h2 class="modal-title">🏙️ ClawCondos</h2>
       <p class="modal-desc">Enter your OpenClaw gateway token to connect.</p>
       <div class="form-group">
         <label class="form-label">Token</label>
@@ -40,12 +40,59 @@
   </div>
 
   <!-- ═══════════════════════════════════════════════════════════════
+       CREATE GOAL MODAL
+       ═══════════════════════════════════════════════════════════════ -->
+  <div class="modal-overlay hidden" id="createGoalModal">
+    <div class="modal">
+      <h2 class="modal-title">New Goal</h2>
+      <p class="modal-desc">Create a new condo (goal). You can attach sessions and spawn agents inside it.</p>
+      <div class="form-group">
+        <label class="form-label">Title</label>
+        <input type="text" class="form-input" id="createGoalTitle" placeholder="e.g., Rebrand Sharp → ClawCondos" 
+               onkeypress="if(event.key==='Enter')createGoal()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Deadline (optional)</label>
+        <input type="text" class="form-input" id="createGoalDeadline" placeholder="YYYY-MM-DD or freeform">
+      </div>
+      <div style="display:flex; gap:10px; margin-top: 10px;">
+        <button class="form-btn" onclick="createGoal()">Create</button>
+        <button class="form-btn" style="background: var(--bg-input); border: 1px solid var(--border);" onclick="hideCreateGoalModal()">Cancel</button>
+      </div>
+      <div class="form-error" id="createGoalError"></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ATTACH/MOVE SESSION MODAL
+       ═══════════════════════════════════════════════════════════════ -->
+  <div class="modal-overlay hidden" id="attachSessionModal">
+    <div class="modal" style="max-width: 520px;">
+      <h2 class="modal-title">Attach session to goal</h2>
+      <p class="modal-desc">Pick a condo. This moves the session (removes it from any other condo).</p>
+      <div class="form-group">
+        <label class="form-label">Session</label>
+        <div class="session-pill" id="attachSessionPill">—</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Goal</label>
+        <div class="goal-picker" id="goalPicker"></div>
+      </div>
+      <div style="display:flex; gap:10px; margin-top: 10px;">
+        <button class="form-btn" onclick="confirmAttachSession()">Attach</button>
+        <button class="form-btn" style="background: var(--bg-input); border: 1px solid var(--border);" onclick="hideAttachSessionModal()">Cancel</button>
+      </div>
+      <div class="form-error" id="attachSessionError"></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════
        MOBILE HEADER
        ═══════════════════════════════════════════════════════════════ -->
   <header class="mobile-header" id="mobileHeader">
     <button class="menu-btn" id="menuBtn" onclick="toggleSidebar()">☰</button>
     <button class="back-btn" id="backBtn" onclick="goBack()" style="display: none;">←</button>
-    <span class="mobile-title" id="mobileTitle">Sharp</span>
+    <span class="mobile-title" id="mobileTitle">ClawCondos</span>
     <div class="mobile-actions">
       <button class="menu-btn" onclick="refresh()" title="Refresh">↻</button>
     </div>
@@ -60,14 +107,14 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header" onclick="showOverview()">
       <span class="logo">🎯</span>
-      <span class="brand">Sharp</span>
+      <span class="brand">ClawCondos</span>
     </div>
     
     <div class="sidebar-content">
       <!-- Sessions -->
       <div class="section">
         <div class="section-header">
-          <span class="section-title">Sessions</span>
+          <span class="section-title">Goals</span>
           <div class="auto-archive-setting" title="Auto-archive inactive sessions">
             <span>⏰</span>
             <select id="autoArchiveSelect" onchange="setAutoArchiveDays(this.value)">
@@ -84,10 +131,12 @@
             📦
           </label>
           <button class="section-action" id="markAllReadBtn" onclick="markAllSessionsRead()" title="Mark all read" style="display: none;">✓</button>
+          <button class="section-action" onclick="showCreateGoalModal()" title="New goal">＋</button>
           <button class="section-action" id="selectModeBtn" onclick="enterMultiSelect()" title="Select sessions">☑</button>
           <button class="section-action" onclick="refresh()" title="Refresh">↻</button>
         </div>
         <!-- Search Box -->
+        <div id="goalsList" style="padding: 8px 12px 4px 12px;"></div>
         <div class="session-search">
           <div class="session-search-wrapper">
             <span class="session-search-icon">🔍</span>
@@ -184,6 +233,15 @@
       <!-- Overview View -->
       <div class="view active" id="overviewView">
         <div class="overview-content">
+          <!-- Goals Grid -->
+          <div class="grid-section" id="goalsSection">
+            <div class="grid-header">
+              <h2 class="grid-title">🏙️ Condos (Goals)</h2>
+              <span class="grid-count" id="goalCount">0</span>
+            </div>
+            <div class="cards-grid goals-grid" id="goalsGrid"></div>
+          </div>
+
           <!-- Sessions Grid -->
           <div class="grid-section">
             <div class="grid-header">
@@ -213,6 +271,65 @@
         </div>
       </div>
       
+      <!-- Goal View -->
+      <div class="view" id="goalView">
+        <div class="goal-shell">
+          <div class="goal-hero">
+            <div class="goal-hero-top">
+              <button class="goal-back" onclick="showOverview()">← Lobby</button>
+              <div class="goal-hero-meta">
+                <div class="goal-hero-title" id="goalHeroTitle">Goal</div>
+                <div class="goal-hero-sub" id="goalHeroSub">—</div>
+              </div>
+              <div class="goal-hero-actions">
+                <button class="header-btn" id="goalMarkDoneBtn" onclick="toggleGoalDone()">Mark done</button>
+                <button class="header-btn" onclick="showAttachSessionModal(null)">Attach session</button>
+                <button class="header-btn" style="background: var(--bg-input); border: 1px solid var(--border);" onclick="promptDeleteGoal()">Delete</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="goal-columns">
+            <section class="goal-panel">
+              <div class="panel-title">Tasks</div>
+              <div class="goal-tasks" id="goalTasks"></div>
+              <div class="goal-task-new">
+                <input class="form-input" id="goalNewTaskInput" placeholder="Add a task…" onkeypress="if(event.key==='Enter')addGoalTask()">
+                <button class="form-btn" onclick="addGoalTask()">Add</button>
+              </div>
+            </section>
+
+            <section class="goal-panel">
+              <div class="panel-title">Notes</div>
+              <textarea class="goal-notes" id="goalNotes" placeholder="Working notes, links, decisions…" oninput="debouncedSaveGoal()"></textarea>
+              <div class="goal-meta-row">
+                <div class="goal-meta-card">
+                  <div class="meta-label">Deadline</div>
+                  <input class="form-input" id="goalDeadlineInput" placeholder="YYYY-MM-DD or freeform" oninput="debouncedSaveGoal()">
+                </div>
+                <div class="goal-meta-card">
+                  <div class="meta-label">Priority</div>
+                  <select class="form-input" id="goalPriorityInput" onchange="saveGoalNow()">
+                    <option value="">—</option>
+                    <option value="P0">P0</option>
+                    <option value="P1">P1</option>
+                    <option value="P2">P2</option>
+                    <option value="P3">P3</option>
+                  </select>
+                </div>
+              </div>
+              <div class="goal-save-hint" id="goalSaveHint">Saved</div>
+            </section>
+
+            <section class="goal-panel">
+              <div class="panel-title">Attached sessions</div>
+              <div class="goal-sessions" id="goalSessions"></div>
+              <div class="goal-sessions-hint">Tip: move sessions between condos from any session card’s ⛓ button.</div>
+            </section>
+          </div>
+        </div>
+      </div>
+
       <!-- Chat View -->
       <div class="view" id="chatView">
         <div class="session-info" id="sessionInfo">
@@ -312,6 +429,11 @@
       sessions: [],
       apps: [],
       agents: [],
+      goals: [],
+      currentGoalId: 'all',
+      currentGoalOpenId: null,
+      attachSessionKey: null,
+      attachGoalId: null,
       
       // UI
       currentView: 'overview',
@@ -1187,7 +1309,7 @@
         minProtocol: WS_PROTOCOL_VERSION,
         maxProtocol: WS_PROTOCOL_VERSION,
         client: {
-          id: 'sharp-dashboard',
+          id: 'openclaw-control-ui',
           displayName: 'Sharp Dashboard',
           mode: 'ui',
           version: '2.0.0',
@@ -1195,10 +1317,10 @@
         }
       };
       
-      // Only include auth if we have a token (Caddy proxy handles auth otherwise)
-      // NOTE: OpenClaw Gateway expects bearer/API tokens via auth.token (preferred).
+      // Only include auth if we have a token/password
+      // NOTE: OpenClaw Gateway can use token or password auth depending on config.
       if (state.token) {
-        connectParams.auth = { token: state.token };
+        connectParams.auth = { password: state.token };
       }
       
       const connectFrame = {
@@ -1870,7 +1992,7 @@
         console.log('[Sharp] About to call syncActiveRunsFromServer...');
         await syncActiveRunsFromServer();
         console.log('[Sharp] syncActiveRunsFromServer completed');
-        await Promise.all([loadSessions(), loadApps(), loadAgents()]);
+        await Promise.all([loadGoals(), loadSessions(), loadApps(), loadAgents()]);
         updateOverview();
         
         // Restore previous session if any
@@ -1922,6 +2044,372 @@
       }
     }
     
+    async function loadGoals() {
+      try {
+        const res = await fetch('/api/goals');
+        if (!res.ok) return;
+        const data = await res.json();
+        state.goals = data.goals || [];
+        renderGoals();
+        renderGoalsGrid();
+      } catch (err) {
+        console.error('[ClawCondos] Failed to load goals:', err);
+      }
+    }
+
+    function renderGoals() {
+      const container = document.getElementById('goalsList');
+      if (!container) return;
+
+      const allActive = state.currentGoalId === 'all' ? 'active' : '';
+
+      const rows = [];
+      rows.push(`
+        <div class="goal-chip ${allActive}" onclick="setCurrentGoal('all')">
+          <span class="goal-chip-dot"></span>
+          <span class="goal-chip-title">All</span>
+          <span class="goal-chip-count">${state.sessions.length}</span>
+        </div>
+      `);
+
+      for (const g of state.goals) {
+        const isActive = state.currentGoalId === g.id ? 'active' : '';
+        const count = Array.isArray(g.sessions) ? g.sessions.length : 0;
+        const status = g.status || 'active';
+        rows.push(`
+          <div class="goal-chip ${isActive}" onclick="setCurrentGoal('${escapeHtml(g.id)}')" title="${escapeHtml(g.title || '')}">
+            <span class="goal-chip-dot ${status === 'done' ? 'done' : ''}"></span>
+            <span class="goal-chip-title">${escapeHtml(g.title || 'Untitled goal')}</span>
+            <span class="goal-chip-count">${count}</span>
+          </div>
+        `);
+      }
+
+      container.innerHTML = rows.join('');
+    }
+
+    function setCurrentGoal(goalId) {
+      state.currentGoalId = goalId;
+      renderGoals();
+      renderSessions();
+      renderSessionsGrid();
+      updateOverview();
+    }
+
+
+    function goalTaskStats(goal) {
+      const tasks = Array.isArray(goal?.tasks) ? goal.tasks : [];
+      let done = 0;
+      let total = 0;
+      for (const t of tasks) {
+        if (!t) continue;
+        total++;
+        if (t.done) done++;
+      }
+      return { done, total };
+    }
+
+    function getGoalForSession(sessionKey) {
+      for (const g of state.goals) {
+        if (Array.isArray(g.sessions) && g.sessions.includes(sessionKey)) return g;
+      }
+      return null;
+    }
+
+    function openGoal(goalId) {
+      const goal = state.goals.find(g => g.id === goalId);
+      if (!goal) return;
+
+      state.currentView = 'goal';
+      state.currentGoalOpenId = goalId;
+
+      document.getElementById('overviewView').classList.remove('active');
+      document.getElementById('chatView').classList.remove('active');
+      document.getElementById('goalView').classList.add('active');
+
+      document.getElementById('mainTitle').textContent = 'Goal';
+      document.getElementById('mainSubtitle').textContent = '';
+      document.getElementById('headerAction').style.display = 'none';
+      document.getElementById('headerStatusIndicator').style.display = 'none';
+
+      renderGoalView();
+      updateMobileHeader();
+      closeSidebar();
+    }
+
+    function renderGoalView() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+
+      const status = goal.status || 'active';
+      const pr = goal.priority || '';
+      const deadline = goal.deadline || '';
+      const { done, total } = goalTaskStats(goal);
+
+      document.getElementById('goalHeroTitle').textContent = goal.title || 'Untitled goal';
+      document.getElementById('goalHeroSub').textContent = `${status.toUpperCase()}${pr ? ` · ${pr}` : ''}${deadline ? ` · due ${deadline}` : ''} · ${done}/${total} tasks`;
+
+      const btn = document.getElementById('goalMarkDoneBtn');
+      btn.textContent = status === 'done' ? 'Mark active' : 'Mark done';
+
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+      const tasksEl = document.getElementById('goalTasks');
+      if (!tasks.length) {
+        tasksEl.innerHTML = `<div class="empty-state">No tasks yet. Add the next physical step.</div>`;
+      } else {
+        tasksEl.innerHTML = tasks.map((t, idx) => {
+          const id = escapeHtml(t.id || String(idx));
+          const checked = t.done ? 'checked' : '';
+          return `
+            <div class="goal-task ${t.done ? 'done' : ''}">
+              <label class="goal-task-check">
+                <input type="checkbox" ${checked} onchange="toggleGoalTask('${id}')">
+                <span class="goal-task-text">${escapeHtml(t.text || '')}</span>
+              </label>
+              <button class="goal-task-del" onclick="deleteGoalTask('${id}')" title="Delete">×</button>
+            </div>
+          `;
+        }).join('');
+      }
+
+      document.getElementById('goalNotes').value = goal.notes || '';
+      document.getElementById('goalDeadlineInput').value = goal.deadline || '';
+      document.getElementById('goalPriorityInput').value = goal.priority || '';
+
+      const sess = Array.isArray(goal.sessions) ? goal.sessions : [];
+      const sessEl = document.getElementById('goalSessions');
+      if (!sess.length) {
+        sessEl.innerHTML = `<div class="empty-state">No sessions attached. Attach one to keep the work located.</div>`;
+      } else {
+        const byKey = new Map(state.sessions.map(s => [s.key, s]));
+        sessEl.innerHTML = sess.map(k => {
+          const s = byKey.get(k);
+          const name = s ? getSessionName(s) : k;
+          const meta = s ? getSessionMeta(s) : 'unknown';
+          return `
+            <div class="goal-session-row" onclick="openSession('${escapeHtml(k)}')">
+              <div class="goal-session-icon">${s ? getSessionIcon(s) : '💬'}</div>
+              <div class="goal-session-main">
+                <div class="goal-session-name">${escapeHtml(name)}</div>
+                <div class="goal-session-meta">${escapeHtml(meta)}</div>
+              </div>
+              <button class="goal-session-move" onclick="event.stopPropagation(); showAttachSessionModal('${escapeHtml(k)}')" title="Move">⛓</button>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
+    async function toggleGoalDone() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      const next = goal.status === 'done' ? 'active' : 'done';
+      await updateGoal(goal.id, { status: next });
+    }
+
+    async function updateGoal(goalId, patch) {
+      try {
+        const res = await fetch(`/api/goals/${encodeURIComponent(goalId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+        if (!res.ok) throw new Error('Failed');
+        const data = await res.json();
+        const idx = state.goals.findIndex(g => g.id === goalId);
+        if (idx !== -1 && data?.goal) state.goals[idx] = data.goal;
+        renderGoals();
+        renderGoalsGrid();
+        renderGoalView();
+      } catch (e) {
+        showToast('Failed to save goal', 'error');
+      }
+    }
+
+    function uid(prefix='id') {
+      return `${prefix}_${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+    }
+
+    async function addGoalTask() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      const input = document.getElementById('goalNewTaskInput');
+      const text = (input.value || '').trim();
+      if (!text) return;
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks.slice() : [];
+      tasks.unshift({ id: uid('task'), text, done: false });
+      input.value = '';
+      await updateGoal(goal.id, { tasks });
+    }
+
+    async function toggleGoalTask(taskId) {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks.map(t => ({...t})) : [];
+      const idx = tasks.findIndex(t => String(t.id) === String(taskId));
+      if (idx === -1) return;
+      tasks[idx].done = !tasks[idx].done;
+      await updateGoal(goal.id, { tasks });
+    }
+
+    async function deleteGoalTask(taskId) {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks.filter(t => String(t.id) != String(taskId)) : [];
+      await updateGoal(goal.id, { tasks });
+    }
+
+    let goalSaveTimer = null;
+    function debouncedSaveGoal() {
+      clearTimeout(goalSaveTimer);
+      goalSaveTimer = setTimeout(saveGoalNow, 450);
+      const hint = document.getElementById('goalSaveHint');
+      if (hint) {
+        hint.textContent = 'Saving…';
+        hint.classList.add('saving');
+      }
+    }
+
+    async function saveGoalNow() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      const notes = document.getElementById('goalNotes').value;
+      const deadline = document.getElementById('goalDeadlineInput').value.trim();
+      const priority = document.getElementById('goalPriorityInput').value || null;
+      await updateGoal(goal.id, { notes, deadline: deadline || null, priority });
+      const hint = document.getElementById('goalSaveHint');
+      if (hint) {
+        hint.textContent = 'Saved';
+        hint.classList.remove('saving');
+      }
+    }
+
+    async function promptDeleteGoal() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      if (!confirm(`Delete goal "${goal.title}"? This does not delete sessions.`)) return;
+      try {
+        const res = await fetch(`/api/goals/${encodeURIComponent(goal.id)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed');
+        await loadGoals();
+        showOverview();
+      } catch {
+        showToast('Failed to delete goal', 'error');
+      }
+    }
+
+    // Attach session modal
+    function showAttachSessionModal(sessionKey) {
+      const modal = document.getElementById('attachSessionModal');
+      const errEl = document.getElementById('attachSessionError');
+      errEl.style.display = 'none';
+      modal.classList.remove('hidden');
+
+      const key = sessionKey || state.currentSession?.key || null;
+      state.attachSessionKey = key;
+      document.getElementById('attachSessionPill').textContent = key ? key : 'No session selected';
+
+      if (!state.attachGoalId && state.currentGoalOpenId) state.attachGoalId = state.currentGoalOpenId;
+      if (!state.attachGoalId && state.goals[0]) state.attachGoalId = state.goals[0].id;
+
+      const picker = document.getElementById('goalPicker');
+      const rows = state.goals.map(g => {
+        const active = state.attachGoalId === g.id ? 'active' : '';
+        const { done, total } = goalTaskStats(g);
+        const due = g.deadline ? `<span class="goal-picker-due">due ${escapeHtml(g.deadline)}</span>` : '';
+        return `
+          <div class="goal-picker-row ${active}" onclick="selectAttachGoal('${escapeHtml(g.id)}')">
+            <div class="goal-picker-title">${escapeHtml(g.title || 'Untitled goal')}</div>
+            <div class="goal-picker-meta">${g.status === 'done' ? 'done' : 'active'} · ${done}/${total} tasks ${due}</div>
+          </div>
+        `;
+      }).join('');
+      picker.innerHTML = rows || `<div class="empty-state">No goals yet. Create one first.</div>`;
+    }
+
+    function selectAttachGoal(goalId) {
+      state.attachGoalId = goalId;
+      // re-render picker active state
+      showAttachSessionModal(state.attachSessionKey);
+    }
+
+    function hideAttachSessionModal() {
+      document.getElementById('attachSessionModal').classList.add('hidden');
+    }
+
+    async function confirmAttachSession() {
+      const errEl = document.getElementById('attachSessionError');
+      errEl.style.display = 'none';
+      const goalId = state.attachGoalId;
+      const sessionKey = state.attachSessionKey;
+      if (!goalId) {
+        errEl.textContent = 'Pick a goal';
+        errEl.style.display = 'block';
+        return;
+      }
+      if (!sessionKey) {
+        errEl.textContent = 'No session selected';
+        errEl.style.display = 'block';
+        return;
+      }
+      try {
+        const res = await fetch(`/api/goals/${encodeURIComponent(goalId)}/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionKey }),
+        });
+        if (!res.ok) throw new Error('Failed');
+        hideAttachSessionModal();
+        await loadGoals();
+        renderSessions();
+        updateOverview();
+        if (state.currentView === 'goal') renderGoalView();
+        showToast('Session attached', 'success');
+      } catch {
+        errEl.textContent = 'Failed to attach session';
+        errEl.style.display = 'block';
+      }
+    }
+
+
+    function showCreateGoalModal() {
+      document.getElementById('createGoalModal').classList.remove('hidden');
+      document.getElementById('createGoalTitle').value = '';
+      document.getElementById('createGoalDeadline').value = '';
+      document.getElementById('createGoalError').style.display = 'none';
+      setTimeout(() => document.getElementById('createGoalTitle')?.focus(), 0);
+    }
+
+    function hideCreateGoalModal() {
+      document.getElementById('createGoalModal').classList.add('hidden');
+    }
+
+    async function createGoal() {
+      const title = document.getElementById('createGoalTitle').value.trim();
+      const deadline = document.getElementById('createGoalDeadline').value.trim();
+      const errEl = document.getElementById('createGoalError');
+      if (!title) {
+        errEl.textContent = 'Title is required';
+        errEl.style.display = 'block';
+        return;
+      }
+      try {
+        const res = await fetch('/api/goals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, deadline: deadline || null }),
+        });
+        if (!res.ok) throw new Error('Failed to create goal');
+        const data = await res.json();
+        hideCreateGoalModal();
+        await loadGoals();
+        if (data?.goal?.id) setCurrentGoal(data.goal.id);
+      } catch (e) {
+        errEl.textContent = 'Failed to create goal';
+        errEl.style.display = 'block';
+      }
+    }
+
     async function refresh() {
       if (!state.connected) return;
       
@@ -1964,6 +2452,8 @@
         console.log('[Sharp] Sessions result:', result);
         if (result?.sessions) {
           state.sessions = result.sessions;
+          // Goals chips depend on total session count
+          renderGoals();
           // Initialize/update status for sessions
           for (const s of state.sessions) {
             // Active runs take priority (restored from localStorage or from WebSocket events)
@@ -2163,6 +2653,14 @@
     // SESSIONS UI
     // ═══════════════════════════════════════════════════════════════
     
+
+    function renderSessionGoalBadge(sessionKey) {
+      const g = getGoalForSession(sessionKey);
+      if (!g) return '';
+      const due = g.deadline ? ` · due ${escapeHtml(g.deadline)}` : '';
+      return `<div class="session-goal-badge" onclick="event.stopPropagation(); openGoal('${escapeHtml(g.id)}')" title="Open goal">🏙️ ${escapeHtml(g.title || 'Goal')}${due}</div>`;
+    }
+
     function renderSessionItem(s, isNested = false) {
       const isActive = state.currentSession && state.currentSession.key === s.key;
       const isSelected = state.selectedSessions.has(s.key);
@@ -2189,6 +2687,7 @@
           <div class="item-content">
             <div class="item-name ${isGenerating ? 'title-generating' : ''}">${escapeHtml(displayName)}</div>
             <div class="item-meta">${escapeHtml(getSessionMeta(s))}</div>
+            ${renderSessionGoalBadge(s.key)}
             ${renderSessionStatusLine(s.key)}
           </div>
           <div class="session-actions">
@@ -2313,8 +2812,12 @@
       }
       
       // Filter sessions
+      const goal = state.currentGoalId !== 'all' ? state.goals.find(g => g.id === state.currentGoalId) : null;
+      const goalSessionSet = goal?.sessions ? new Set(goal.sessions) : null;
+
       let displaySessions = state.sessions.filter(s => {
         if (isSessionArchived(s.key) && !state.showArchived) return false;
+        if (goalSessionSet && !goalSessionSet.has(s.key)) return false;
         if (!matchesSearch(s)) return false;
         return true;
       });
@@ -2592,6 +3095,11 @@
         menuBtn.style.display = 'none';
         backBtn.style.display = 'flex';
         mobileTitle.textContent = document.getElementById('mainTitle').textContent;
+      } else if (state.currentView === 'goal') {
+        menuBtn.style.display = 'none';
+        backBtn.style.display = 'flex';
+        const g = state.goals.find(x => x.id === state.currentGoalOpenId);
+        mobileTitle.textContent = g ? g.title : 'Goal';
       } else {
         menuBtn.style.display = 'flex';
         backBtn.style.display = 'none';
@@ -2613,6 +3121,7 @@
       
       document.getElementById('overviewView').classList.add('active');
       document.getElementById('chatView').classList.remove('active');
+      document.getElementById('goalView').classList.remove('active');
       document.getElementById('mainTitle').textContent = 'Dashboard';
       document.getElementById('mainSubtitle').textContent = '';
       document.getElementById('headerAction').style.display = 'none';
@@ -3398,13 +3907,71 @@
     // OVERVIEW
     // ═══════════════════════════════════════════════════════════════
     function updateOverview() {
+      renderGoalsGrid();
       renderSessionsGrid();
       renderAppsGrid();
       renderSubagentsGrid();
     }
     
+
+    function renderGoalsGrid() {
+      const container = document.getElementById('goalsGrid');
+      const countEl = document.getElementById('goalCount');
+      if (!container || !countEl) return;
+
+      const goals = Array.isArray(state.goals) ? state.goals : [];
+      countEl.textContent = goals.length;
+
+      if (!goals.length) {
+        container.innerHTML = `
+          <div class="goal-card empty" onclick="showCreateGoalModal()">
+            <div class="goal-card-top">
+              <div class="goal-card-icon">＋</div>
+              <div class="goal-card-title">Create your first condo</div>
+            </div>
+            <div class="goal-card-sub">Goals keep sessions, tasks, notes, and deadlines in one place.</div>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = goals.map(g => {
+        const { done, total } = goalTaskStats(g);
+        const pct = total ? Math.round((done/total)*100) : 0;
+        const status = g.status || 'active';
+        const due = g.deadline ? `<span class="goal-pill">due ${escapeHtml(g.deadline)}</span>` : '';
+        const pr = g.priority ? `<span class="goal-pill pr">${escapeHtml(g.priority)}</span>` : '';
+        const sessions = Array.isArray(g.sessions) ? g.sessions.length : 0;
+        return `
+          <div class="goal-card ${status === 'done' ? 'done' : ''}" onclick="openGoal('${escapeHtml(g.id)}')">
+            <div class="goal-card-top">
+              <div class="goal-card-icon">🏙️</div>
+              <div>
+                <div class="goal-card-title">${escapeHtml(g.title || 'Untitled goal')}</div>
+                <div class="goal-card-sub">${status === 'done' ? 'Completed' : 'In progress'} · ${sessions} sessions</div>
+              </div>
+            </div>
+            <div class="goal-card-pills">
+              ${pr}
+              ${due}
+              <span class="goal-pill">${done}/${total} tasks</span>
+            </div>
+            <div class="goal-progress">
+              <div class="goal-progress-bar" style="width:${pct}%;"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
     function renderSessionsGrid() {
-      const mainSessions = state.sessions.filter(s => !s.key.includes(':subagent:'));
+      const goal = state.currentGoalId !== 'all' ? state.goals.find(g => g.id === state.currentGoalId) : null;
+      const goalSessionSet = goal?.sessions ? new Set(goal.sessions) : null;
+      const mainSessions = state.sessions.filter(s => {
+        if (s.key.includes(':subagent:')) return false;
+        if (goalSessionSet && !goalSessionSet.has(s.key)) return false;
+        return true;
+      });
       const container = document.getElementById('sessionsGrid');
       document.getElementById('sessionCount').textContent = mainSessions.length;
       
@@ -3427,6 +3994,8 @@
         const preview = getMessagePreview(s);
         const agentStatus = getAgentStatus(s.key);
         const tooltip = getStatusTooltip(agentStatus);
+        const g = getGoalForSession(s.key);
+        const goalPill = g ? `<span class="card-badge goal" onclick="event.stopPropagation(); openGoal('${escapeHtml(g.id)}')">🏙️ ${escapeHtml(g.title || 'Goal')}</span>` : '';
         return `
           <div class="session-card" onclick="openSession('${escapeHtml(s.key)}')">
             <div class="card-top">
@@ -3440,7 +4009,7 @@
             ${preview ? `<div class="card-preview">${escapeHtml(preview)}</div>` : ''}
             <div class="card-footer">
               <span>${timeAgo(s.updatedAt)}</span>
-              <span class="card-badge">${(s.totalTokens || 0).toLocaleString()} tokens</span>
+              <span class="card-footer-right">${goalPill}<span class="card-badge">${(s.totalTokens || 0).toLocaleString()} tokens</span></span>
             </div>
           </div>
         `;

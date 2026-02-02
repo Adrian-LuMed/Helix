@@ -570,6 +570,7 @@
       chatHistory: [],
       isThinking: false,
       messageQueue: [],  // Queued messages when agent is busy
+      goalStatusFilter: null, // 'active' | 'done' | null
       
       // Audio recording
       mediaRecorder: null,
@@ -2266,12 +2267,20 @@
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
-    // Filter goals grid by status (pending/done)
+    // Filter goals grid by status (pending/done). Click again to clear.
     function filterGoalsByStatus(status) {
       const goalsSection = document.getElementById('goalsSection');
       if (goalsSection) goalsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      // TODO: Add actual filtering UI (highlight matching goals)
-      showToast(`Showing ${status === 'done' ? 'completed' : 'pending'} goals`, 'info');
+
+      // Toggle filter
+      state.goalStatusFilter = (state.goalStatusFilter === status) ? null : status;
+      updateOverview();
+
+      if (!state.goalStatusFilter) {
+        showToast('Showing all goals', 'info');
+      } else {
+        showToast(`Filtered: ${status === 'done' ? 'completed' : 'pending'} goals`, 'info');
+      }
     }
 
     // Show sessions with errors
@@ -5038,9 +5047,15 @@ Response format:
       if (!container || !countEl) return;
 
       const goals = Array.isArray(state.goals) ? state.goals : [];
-      countEl.textContent = goals.length;
+      const filteredGoals = state.goalStatusFilter
+        ? goals.filter(g => (g.status || 'active') === state.goalStatusFilter)
+        : goals;
 
-      if (!goals.length) {
+      countEl.textContent = state.goalStatusFilter
+        ? `${filteredGoals.length}/${goals.length}`
+        : goals.length;
+
+      if (!filteredGoals.length) {
         container.innerHTML = `
           <div class="goal-card empty" onclick="showCreateGoalModal()">
             <div class="goal-card-top">
@@ -5053,7 +5068,7 @@ Response format:
         return;
       }
 
-      container.innerHTML = goals.map(g => {
+      container.innerHTML = filteredGoals.map(g => {
         const { done, total } = goalTaskStats(g);
         const pct = total ? Math.round((done/total)*100) : 0;
         const status = g.status || 'active';

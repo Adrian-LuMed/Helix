@@ -1457,15 +1457,15 @@ body {
    ORGANIZE WIZARD - Two Column Layout
    ═══════════════════════════════════════════════════════════════ */
 .modal.organize-wizard {
-  width: 800px;
-  max-width: 95vw;
+  width: 800px !important;
+  max-width: 95vw !important;
   max-height: 90vh;
   background: var(--bg-elevated);
   border-radius: 16px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  padding: 0; /* Override .modal padding */
+  padding: 0 !important; /* Override .modal padding */
 }
 
 /* Header */

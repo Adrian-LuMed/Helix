@@ -119,6 +119,76 @@
   </div>
 
   <!-- ═══════════════════════════════════════════════════════════════
+       ORGANIZE WIZARD (Sequential session triage)
+       ═══════════════════════════════════════════════════════════════ -->
+  <div class="modal-overlay hidden" id="organizeWizardModal">
+    <div class="modal organize-wizard" style="max-width: 640px;">
+      <div class="wizard-header">
+        <h2 class="modal-title">📂 Organize Sessions</h2>
+        <div class="wizard-progress">
+          <span id="wizardProgress">1 of 10</span>
+          <div class="progress-bar"><div class="progress-fill" id="wizardProgressBar" style="width: 10%"></div></div>
+        </div>
+      </div>
+      
+      <div class="wizard-content" id="wizardContent">
+        <!-- Current session being organized -->
+        <div class="wizard-session" id="wizardSession">
+          <div class="wizard-session-header">
+            <div class="wizard-session-icon" id="wizardSessionIcon">💬</div>
+            <div class="wizard-session-info">
+              <div class="wizard-session-title" id="wizardSessionTitle">Session Title</div>
+              <div class="wizard-session-key" id="wizardSessionKey">agent:main:...</div>
+            </div>
+          </div>
+          <div class="wizard-summary" id="wizardSummary">
+            <div class="summary-loading">Loading summary...</div>
+          </div>
+        </div>
+        
+        <!-- AI Proposal -->
+        <div class="wizard-proposal" id="wizardProposal">
+          <div class="proposal-label">🤖 Proposed Goal:</div>
+          <div class="proposal-goal" id="wizardProposedGoal">
+            <span class="proposal-title">Loading...</span>
+            <span class="proposal-reason"></span>
+          </div>
+        </div>
+        
+        <!-- Actions -->
+        <div class="wizard-actions">
+          <button class="wizard-btn primary" id="wizardAcceptBtn" onclick="acceptWizardProposal()">
+            ✓ Accept Proposal
+          </button>
+          <button class="wizard-btn secondary" onclick="showWizardGoalPicker()">
+            Choose Different Goal
+          </button>
+          <button class="wizard-btn ghost" onclick="skipWizardSession()">
+            Skip (Keep Uncategorized)
+          </button>
+        </div>
+        
+        <!-- Goal picker (hidden by default) -->
+        <div class="wizard-goal-picker hidden" id="wizardGoalPicker">
+          <div class="form-label">Pick a goal or create new:</div>
+          <div class="goal-picker" id="wizardGoalList"></div>
+          <div style="margin-top: 10px;">
+            <input type="text" class="form-input" id="wizardNewGoalTitle" placeholder="Or create new goal...">
+            <button class="form-btn" style="margin-top: 8px;" onclick="createGoalInWizard()">Create & Assign</button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="wizard-footer">
+        <button class="form-btn" style="background: var(--bg-input); border: 1px solid var(--border);" onclick="closeOrganizeWizard()">
+          Close
+        </button>
+        <span class="wizard-stats" id="wizardStats">0 organized, 0 skipped</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════
        MOBILE HEADER
        ═══════════════════════════════════════════════════════════════ -->
   <header class="mobile-header" id="mobileHeader">
@@ -280,6 +350,9 @@
             <div class="grid-header">
               <h2 class="grid-title">💬 Sessions</h2>
               <span class="grid-count" id="sessionCount">0</span>
+              <button class="organize-btn" onclick="openOrganizeWizard()" title="Organize uncategorized sessions one by one">
+                📂 Organize
+              </button>
             </div>
             <div class="cards-grid" id="sessionsGrid"></div>
           </div>
@@ -1669,11 +1742,18 @@
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, 'idle');
         
-        // Check if this is a categorization response (from main session)
-        if (sessionKey === 'agent:main:main' && state.suggestingSessionKey && message?.content) {
+        // Check if this is a categorization/wizard response (from main session)
+        if (sessionKey === 'agent:main:main' && message?.content) {
           const text = extractText(message.content);
-          if (text && text.includes('"suggestions"')) {
-            handleCategorizationResponse(text);
+          if (text) {
+            // Check wizard first
+            if (state.wizardPendingSessionKey && text.includes('"goalId"')) {
+              handleWizardResponse(text);
+            }
+            // Check single-session categorization
+            else if (state.suggestingSessionKey && text.includes('"suggestions"')) {
+              handleCategorizationResponse(text);
+            }
           }
         }
         
@@ -2800,6 +2880,338 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
           }
         }));
       });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ORGANIZE WIZARD (Sequential triage)
+    // ═══════════════════════════════════════════════════════════════
+    
+    state.wizardSessions = [];
+    state.wizardIndex = 0;
+    state.wizardOrganized = 0;
+    state.wizardSkipped = 0;
+    state.wizardCurrentProposal = null;
+    
+    function openOrganizeWizard() {
+      const sessions = (state.sessions || []).filter(s => !s.key.includes(':subagent:'));
+      const goals = state.goals || [];
+      
+      // Find uncategorized sessions
+      const assignedSessions = new Set();
+      goals.forEach(g => (g.sessions || []).forEach(s => assignedSessions.add(s)));
+      const uncategorized = sessions.filter(s => !assignedSessions.has(s.key));
+      
+      if (uncategorized.length === 0) {
+        alert('All sessions are already categorized! 🎉');
+        return;
+      }
+      
+      // Initialize wizard state
+      state.wizardSessions = uncategorized;
+      state.wizardIndex = 0;
+      state.wizardOrganized = 0;
+      state.wizardSkipped = 0;
+      state.wizardCurrentProposal = null;
+      
+      // Show modal
+      document.getElementById('organizeWizardModal').classList.remove('hidden');
+      document.getElementById('wizardGoalPicker').classList.add('hidden');
+      
+      // Load first session
+      loadWizardSession();
+    }
+    
+    function closeOrganizeWizard() {
+      document.getElementById('organizeWizardModal').classList.add('hidden');
+      // Refresh data
+      loadGoals();
+      renderSessions();
+    }
+    
+    async function loadWizardSession() {
+      const sessions = state.wizardSessions;
+      const idx = state.wizardIndex;
+      
+      if (idx >= sessions.length) {
+        // Done!
+        document.getElementById('wizardContent').innerHTML = `
+          <div style="text-align: center; padding: 40px;">
+            <div style="font-size: 3rem; margin-bottom: 16px;">🎉</div>
+            <h3>All done!</h3>
+            <p style="color: var(--text-dim);">
+              Organized: ${state.wizardOrganized} sessions<br>
+              Skipped: ${state.wizardSkipped} sessions
+            </p>
+          </div>
+        `;
+        document.getElementById('wizardAcceptBtn')?.remove();
+        return;
+      }
+      
+      const session = sessions[idx];
+      const sessionName = session.displayName || session.label || session.key.split(':').pop();
+      
+      // Update progress
+      document.getElementById('wizardProgress').textContent = `${idx + 1} of ${sessions.length}`;
+      document.getElementById('wizardProgressBar').style.width = `${((idx + 1) / sessions.length) * 100}%`;
+      document.getElementById('wizardStats').textContent = `${state.wizardOrganized} organized, ${state.wizardSkipped} skipped`;
+      
+      // Update session info
+      document.getElementById('wizardSessionIcon').textContent = getSessionIcon(session);
+      document.getElementById('wizardSessionTitle').textContent = sessionName;
+      document.getElementById('wizardSessionKey').textContent = session.key;
+      document.getElementById('wizardSummary').innerHTML = '<div class="summary-loading">Loading summary...</div>';
+      document.getElementById('wizardProposedGoal').innerHTML = '<span class="proposal-title">Analyzing...</span>';
+      document.getElementById('wizardGoalPicker').classList.add('hidden');
+      
+      // Fetch history and generate summary + proposal
+      await analyzeForWizard(session);
+    }
+    
+    async function analyzeForWizard(session) {
+      const goals = state.goals || [];
+      const sessionKey = session.key;
+      const sessionName = session.displayName || session.label || session.key.split(':').pop();
+      
+      // Fetch history
+      let firstMessages = '';
+      let lastMessages = '';
+      try {
+        const historyResult = await rpcCall('chat.history', { sessionKey, limit: 50 });
+        if (historyResult?.messages) {
+          const userMsgs = historyResult.messages.filter(m => m.role === 'user');
+          
+          const first5 = userMsgs.slice(0, 5);
+          firstMessages = first5.map(m => {
+            const text = typeof m.content === 'string' ? m.content : 
+              (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
+            return text.slice(0, 150);
+          }).join(' | ');
+          
+          const last5 = userMsgs.slice(-5);
+          lastMessages = last5.map(m => {
+            const text = typeof m.content === 'string' ? m.content : 
+              (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : '');
+            return text.slice(0, 150);
+          }).join(' | ');
+        }
+      } catch (e) {
+        console.log('Could not fetch history:', e);
+      }
+      
+      // Show summary
+      const summaryText = firstMessages || lastMessages || 'No messages found';
+      document.getElementById('wizardSummary').innerHTML = `<strong>Topic:</strong> ${escapeHtml(summaryText.slice(0, 300))}${summaryText.length > 300 ? '...' : ''}`;
+      
+      // Request AI proposal
+      if (goals.length > 0) {
+        const goalsList = goals.map(g => `- "${g.title}" (id: ${g.id})`).join('\n');
+        
+        const message = `[WIZARD-CATEGORIZE]
+Analyze this session and suggest ONE best goal. Respond with ONLY JSON, no other text.
+
+Session: ${sessionKey}
+Name: ${sessionName}
+First messages: ${firstMessages.slice(0, 300)}
+Recent messages: ${lastMessages.slice(0, 300)}
+
+Available goals:
+${goalsList}
+
+Response format (pick the BEST single match, or suggest new):
+{"goalId":"id-or-null","title":"Goal Title","reason":"brief reason","isNew":false}`;
+
+        try {
+          state.wizardPendingSessionKey = sessionKey;
+          await sendChatMessage(message);
+          
+          // Wait for response (timeout to manual)
+          setTimeout(() => {
+            if (state.wizardPendingSessionKey === sessionKey && !state.wizardCurrentProposal) {
+              showWizardManualProposal();
+            }
+          }, 10000);
+          
+        } catch (e) {
+          showWizardManualProposal();
+        }
+      } else {
+        // No goals - suggest creating one
+        state.wizardCurrentProposal = { goalId: null, title: 'New Goal', reason: 'No goals exist yet', isNew: true };
+        showWizardProposal(state.wizardCurrentProposal);
+      }
+    }
+    
+    function handleWizardResponse(text) {
+      if (!state.wizardPendingSessionKey) return false;
+      
+      try {
+        const jsonMatch = text.match(/\{[\s\S]*"goalId"[\s\S]*\}/);
+        if (jsonMatch) {
+          const data = JSON.parse(jsonMatch[0]);
+          state.wizardCurrentProposal = data;
+          showWizardProposal(data);
+          state.wizardPendingSessionKey = null;
+          return true;
+        }
+      } catch (e) {
+        console.log('Could not parse wizard response:', e);
+      }
+      
+      return false;
+    }
+    
+    function showWizardProposal(proposal) {
+      const goals = state.goals || [];
+      const goal = proposal.goalId ? goals.find(g => g.id === proposal.goalId) : null;
+      const title = goal?.title || proposal.title || 'New Goal';
+      const reason = proposal.reason || '';
+      const isNew = !proposal.goalId || proposal.isNew;
+      
+      document.getElementById('wizardProposedGoal').innerHTML = `
+        <span class="proposal-title">${isNew ? '✨ Create: ' : '🏙️ '}${escapeHtml(title)}</span>
+        <span class="proposal-reason">${escapeHtml(reason)}</span>
+      `;
+      
+      document.getElementById('wizardAcceptBtn').textContent = isNew ? '✓ Create & Assign' : '✓ Accept Proposal';
+    }
+    
+    function showWizardManualProposal() {
+      state.wizardCurrentProposal = null;
+      document.getElementById('wizardProposedGoal').innerHTML = `
+        <span class="proposal-title" style="color: var(--text-dim);">Could not determine best match</span>
+        <span class="proposal-reason">Choose manually below</span>
+      `;
+      document.getElementById('wizardAcceptBtn').style.display = 'none';
+      showWizardGoalPicker();
+    }
+    
+    function showWizardGoalPicker() {
+      const goals = state.goals || [];
+      const container = document.getElementById('wizardGoalList');
+      
+      if (goals.length === 0) {
+        container.innerHTML = '<div class="empty-state">No goals yet</div>';
+      } else {
+        container.innerHTML = goals.map(g => `
+          <div class="goal-picker-row" onclick="assignWizardGoal('${escapeHtml(g.id)}')">
+            <div class="goal-picker-title">🏙️ ${escapeHtml(g.title)}</div>
+            <div class="goal-picker-meta">${g.sessions?.length || 0} sessions</div>
+          </div>
+        `).join('');
+      }
+      
+      document.getElementById('wizardGoalPicker').classList.remove('hidden');
+    }
+    
+    async function acceptWizardProposal() {
+      const proposal = state.wizardCurrentProposal;
+      if (!proposal) {
+        showWizardGoalPicker();
+        return;
+      }
+      
+      const sessionKey = state.wizardSessions[state.wizardIndex]?.key;
+      if (!sessionKey) return;
+      
+      try {
+        if (proposal.goalId && !proposal.isNew) {
+          // Assign to existing goal
+          await fetch(`/api/goals/${proposal.goalId}/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionKey }),
+          });
+        } else {
+          // Create new goal and assign
+          const res = await fetch('/api/goals', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: proposal.title || 'New Goal' }),
+          });
+          const data = await res.json();
+          if (data?.goal?.id) {
+            await fetch(`/api/goals/${data.goal.id}/sessions`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessionKey }),
+            });
+            // Refresh goals
+            await loadGoals();
+          }
+        }
+        
+        state.wizardOrganized++;
+        nextWizardSession();
+        
+      } catch (e) {
+        console.error('Failed to assign:', e);
+        alert('Failed to assign: ' + e.message);
+      }
+    }
+    
+    async function assignWizardGoal(goalId) {
+      const sessionKey = state.wizardSessions[state.wizardIndex]?.key;
+      if (!sessionKey) return;
+      
+      try {
+        await fetch(`/api/goals/${goalId}/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionKey }),
+        });
+        
+        state.wizardOrganized++;
+        nextWizardSession();
+        
+      } catch (e) {
+        alert('Failed to assign: ' + e.message);
+      }
+    }
+    
+    async function createGoalInWizard() {
+      const title = document.getElementById('wizardNewGoalTitle').value.trim();
+      if (!title) return;
+      
+      const sessionKey = state.wizardSessions[state.wizardIndex]?.key;
+      if (!sessionKey) return;
+      
+      try {
+        const res = await fetch('/api/goals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title }),
+        });
+        const data = await res.json();
+        
+        if (data?.goal?.id) {
+          await fetch(`/api/goals/${data.goal.id}/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionKey }),
+          });
+          await loadGoals();
+        }
+        
+        document.getElementById('wizardNewGoalTitle').value = '';
+        state.wizardOrganized++;
+        nextWizardSession();
+        
+      } catch (e) {
+        alert('Failed: ' + e.message);
+      }
+    }
+    
+    function skipWizardSession() {
+      state.wizardSkipped++;
+      nextWizardSession();
+    }
+    
+    function nextWizardSession() {
+      state.wizardIndex++;
+      state.wizardCurrentProposal = null;
+      state.wizardPendingSessionKey = null;
+      loadWizardSession();
     }
 
     function showCreateGoalModal() {

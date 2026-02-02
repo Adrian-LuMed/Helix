@@ -1153,6 +1153,213 @@ body {
   display: none;
 }
 
+/* Organize button */
+.organize-btn {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.8) 0%, rgba(147, 51, 234, 0.8) 100%);
+  border: none;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+.organize-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+/* Organize Wizard Modal */
+.organize-wizard {
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+}
+
+.wizard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+
+.wizard-progress {
+  text-align: right;
+}
+
+.wizard-progress span {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.progress-bar {
+  width: 120px;
+  height: 4px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 2px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-purple), var(--accent-teal));
+  transition: width 0.3s ease;
+}
+
+.wizard-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.wizard-session {
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.wizard-session-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.wizard-session-icon {
+  font-size: 2rem;
+}
+
+.wizard-session-title {
+  font-weight: 600;
+  font-size: 1.1rem;
+}
+
+.wizard-session-key {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+
+.wizard-summary {
+  background: rgba(0,0,0,0.2);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.wizard-summary .summary-loading {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.wizard-proposal {
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.15) 0%, rgba(45, 212, 191, 0.1) 100%);
+  border: 1px solid rgba(147, 51, 234, 0.3);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.proposal-label {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.proposal-goal .proposal-title {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: rgba(192, 132, 252, 1);
+}
+
+.proposal-goal .proposal-reason {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.wizard-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.wizard-btn {
+  padding: 12px 20px;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: none;
+}
+
+.wizard-btn.primary {
+  background: linear-gradient(135deg, var(--accent-purple) 0%, var(--accent-teal) 100%);
+  color: white;
+}
+
+.wizard-btn.primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(147, 51, 234, 0.4);
+}
+
+.wizard-btn.secondary {
+  background: rgba(255,255,255,0.08);
+  color: var(--text);
+  border: 1px solid rgba(255,255,255,0.15);
+}
+
+.wizard-btn.secondary:hover {
+  background: rgba(255,255,255,0.12);
+}
+
+.wizard-btn.ghost {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.wizard-btn.ghost:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.05);
+}
+
+.wizard-goal-picker {
+  background: rgba(0,0,0,0.2);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+
+.wizard-goal-picker.hidden {
+  display: none;
+}
+
+.wizard-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+.wizard-stats {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
 .cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));

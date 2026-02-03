@@ -41,16 +41,18 @@
       chatHistory: [],
       isThinking: false,
       messageQueue: [],  // Queued messages when agent is busy
+
+      // Chat UX
+      chatAutoScroll: true,          // user is at bottom (or near-bottom)
+      chatUnseenCount: 0,            // new messages while scrolled up
+      streamingBuffers: new Map(),   // Map<runId, string>
+      streamingRaf: new Map()        // Map<runId, rafId>
       
       // Audio recording
       mediaRecorder: null,
       audioChunks: [],
       recordingStartTime: null,
       recordingTimerInterval: null,
-      
-      // Multi-select
-      multiSelectMode: false,
-      selectedSessions: new Set(),
       
       // Auth - loaded from config or localStorage
       // Token should be set via config.json or login modal, NOT hardcoded
@@ -767,10 +769,93 @@
     function setAutoArchiveDays(value) {
       state.autoArchiveDays = value;
       localStorage.setItem('sharp_auto_archive_days', value);
-      console.log('[ClawCondos] Auto-archive set to:', value);
+      console.log('[Sharp] Auto-archive set to:', value);
+      // Apply immediately so the sidebar updates without requiring a manual refresh.
+      if (state.sessions && state.sessions.length) {
+        checkAutoArchive();
+        renderSessions();
+        renderSessionsGrid();
+      }
     }
     
-    function initAutoArchiveUI() {
+    
+
+    // ═══════════════════════════════════════════════════════════════
+    // ACTIVITY WINDOW PRESET (Albert)
+    // Collapse all condos except those with goals modified in the last X.
+    // X comes from the preset dropdown.
+
+    function parseDaysValue(v) {
+      if (v == null) return null;
+      if (v === 'never') return null;
+      const n = parseFloat(String(v));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }
+
+    function goalLastActivityMs(goal) {
+      let t = 0;
+      if (goal?.updatedAtMs) t = Math.max(t, Number(goal.updatedAtMs) || 0);
+      if (goal?.createdAtMs) t = Math.max(t, Number(goal.createdAtMs) || 0);
+      // Also consider the most recently updated session inside the goal.
+      if (goal?.sessions && Array.isArray(goal.sessions) && state.sessions && state.sessions.length) {
+        for (const k of goal.sessions) {
+          const s = state.sessions.find(ss => ss.key === k);
+          if (s?.updatedAt) t = Math.max(t, Number(s.updatedAt) || 0);
+        }
+      }
+      return t;
+    }
+
+    function isGoalBlocked(goal) {
+      if (!goal) return false;
+      if (goal.status === 'blocked' || goal.blocked === true) return true;
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+      if (!tasks.length) return false;
+      const next = tasks.find(t => !(t?.done === true || t?.completed === true));
+      if (!next) return false;
+      return next.blocked === true || next.status === 'blocked' || next.state === 'blocked';
+    }
+
+    function applyActivityWindowPreset() {
+      const days = parseDaysValue(state.activityWindowDays);
+      if (!days) return;
+
+      const threshold = Date.now() - (days * 24 * 60 * 60 * 1000);
+
+      // Build condo -> goals mapping (pending goals only)
+      const recentCondos = new Set();
+      for (const g of (state.goals || [])) {
+        if (!g || isGoalCompleted(g)) continue;
+        const last = goalLastActivityMs(g);
+        if (last && last >= threshold) {
+          const condoId = g.condoId || 'misc:default';
+          recentCondos.add(condoId);
+        }
+      }
+
+      // Collapse everything except recent condos
+      const nextExpanded = {};
+      // Keep explicit expansion for current condo if it has recent activity, otherwise collapse it too.
+      // (Albert preference: collapse all except recent)
+      for (const condoId of Object.keys(state.expandedCondos || {})) {
+        nextExpanded[condoId] = false;
+      }
+      for (const condoId of recentCondos) {
+        nextExpanded[condoId] = true;
+      }
+      state.expandedCondos = nextExpanded;
+      localStorage.setItem('sharp_expanded_condos', JSON.stringify(state.expandedCondos));
+
+      renderGoals();
+    }
+
+    function setActivityWindowDays(value) {
+      state.activityWindowDays = value;
+      localStorage.setItem('sharp_activity_window_days', String(value));
+      // Apply immediately
+      applyActivityWindowPreset();
+    }
+function initAutoArchiveUI() {
       const select = document.getElementById('autoArchiveSelect');
       if (select) {
         select.value = state.autoArchiveDays;
@@ -1389,23 +1474,36 @@
     function updateStreamingMessage(runId, text) {
       // Hide typing indicator when content arrives
       hideTypingIndicator(runId);
-      
-      let el = document.getElementById(`streaming-${runId}`);
-      if (!el) {
-        // Remove old thinking indicator
-        const thinking = document.querySelector('.message.thinking');
-        if (thinking) thinking.remove();
-        
-        // Create streaming message element
-        const container = document.getElementById('chatMessages');
-        el = document.createElement('div');
-        el.id = `streaming-${runId}`;
-        el.className = 'message assistant streaming';
-        el.dataset.startTime = Date.now();
-        container.appendChild(el);
-      }
-      el.innerHTML = `<div class="message-content">${formatMessage(text)}<span class="streaming-cursor">▊</span></div>`;
-      scrollChatToBottom();
+
+      // Buffer streaming text and render at most once per animation frame.
+      state.streamingBuffers.set(runId, text);
+      if (state.streamingRaf.has(runId)) return;
+
+      const raf = requestAnimationFrame(() => {
+        state.streamingRaf.delete(runId);
+        const latest = state.streamingBuffers.get(runId) || '';
+
+        let el = document.getElementById(`streaming-${runId}`);
+        if (!el) {
+          // Remove old thinking indicator
+          const thinking = document.querySelector('.message.thinking');
+          if (thinking) thinking.remove();
+
+          // Create streaming message element
+          const container = document.getElementById('chatMessages');
+          if (!container) return;
+          el = document.createElement('div');
+          el.id = `streaming-${runId}`;
+          el.className = 'message assistant streaming';
+          el.dataset.startTime = Date.now();
+          container.appendChild(el);
+        }
+
+        el.innerHTML = `<div class="message-content">${formatMessage(latest)}<span class="streaming-cursor">▊</span></div>`;
+        scrollChatToBottom();
+      });
+
+      state.streamingRaf.set(runId, raf);
     }
     
     function finalizeStreamingMessage(runId, text) {
@@ -2026,6 +2124,27 @@
 
       container.innerHTML = html;
     }
+
+    function renderGoalDot(goal, sessionsForGoal) {
+      // Purple if blocked
+      if (isGoalBlocked(goal)) {
+        return `<span class="goal-dot blocked" title="Blocked (next task)"></span>`;
+      }
+
+      // Use the newest session in this goal to determine status
+      let newest = null;
+      for (const key of (sessionsForGoal || [])) {
+        const s = state.sessions.find(ss => ss.key === key);
+        if (!s) continue;
+        if (!newest || (s.updatedAt || 0) > (newest.updatedAt || 0)) newest = s;
+      }
+      const sessionKey = newest?.key;
+      const st = sessionKey ? getAgentStatus(sessionKey) : 'offline';
+      const cls = st || 'offline';
+      const title = cls === 'thinking' ? 'Thinking' : cls === 'idle' ? 'Idle' : cls === 'error' ? 'Error' : 'Offline';
+      return `<span class="goal-dot ${cls}" title="${title}"></span>`;
+    }
+
 
     function renderCondoGoals(condo, sessionToGoal, goalById) {
       const goals = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g));
@@ -3452,15 +3571,11 @@ Response format:
 
     function renderSessionItem(s, isNested = false) {
       const isActive = state.currentSession && state.currentSession.key === s.key;
-      const isSelected = state.selectedSessions.has(s.key);
       const agentStatus = getAgentStatus(s.key);
       const tooltip = getStatusTooltip(agentStatus);
       const isPinned = isSessionPinned(s.key);
       const isArchived = isSessionArchived(s.key);
-      const clickHandler = state.multiSelectMode 
-        ? `toggleSessionSelection('${escapeHtml(s.key)}')`
-        : `openSession('${escapeHtml(s.key)}')`;
-      
+        const clickHandler = `openSession('${escapeHtml(s.key)}')`;
       const isGenerating = state.generatingTitles.has(s.key);
       const sessionName = getSessionName(s, true);  // This triggers auto-generation
       const hasUnread = !isActive && isSessionUnread(s.key);
@@ -3471,7 +3586,6 @@ Response format:
       
       return `
         <div class="item ${isActive ? 'active' : ''} ${isArchived ? 'archived-session' : ''} ${hasUnread ? 'unread' : ''} ${isNested ? 'nested-item' : ''}" data-session-key="${escapeHtml(s.key)}" onclick="${clickHandler}">
-          <div class="session-checkbox ${isSelected ? 'checked' : ''}" data-key="${escapeHtml(s.key)}" onclick="toggleSessionSelection('${escapeHtml(s.key)}', event)"></div>
           <div class="item-icon">${isNested ? '💬' : getSessionIcon(s)}${s.compactionCount > 0 ? '<span class="compaction-badge" title="Compacted ' + s.compactionCount + 'x">📜</span>' : ''}</div>
           <div class="item-content">
             <div class="item-name ${isGenerating ? 'title-generating' : ''}">${escapeHtml(displayName)}</div>
@@ -4912,6 +5026,13 @@ Response format:
       msg.innerHTML = `<div class="message-content">${contentHtml}</div><div class="message-time">${timeStr}</div>`;
       
       container.appendChild(msg);
+
+      // If user is scrolled up, track unseen count.
+      if (!state.chatAutoScroll && !isNearChatBottom(container)) {
+        state.chatUnseenCount = (state.chatUnseenCount || 0) + 1;
+        setJumpToLatestVisible(true);
+      }
+
       scrollChatToBottom();
       return msg;
     }
@@ -4934,14 +5055,42 @@ Response format:
       }
     }
     
-    function scrollChatToBottom() {
-      const container = document.getElementById('chatMessages');
-      if (container) {
-        // Use requestAnimationFrame for reliable scrolling after DOM update
-        requestAnimationFrame(() => {
-          container.scrollTop = container.scrollHeight;
-        });
+    function isNearChatBottom(container) {
+      if (!container) return true;
+      const threshold = 120; // px
+      return (container.scrollHeight - (container.scrollTop + container.clientHeight)) <= threshold;
+    }
+
+    function setJumpToLatestVisible(visible) {
+      const btn = document.getElementById('jumpToLatest');
+      const badge = document.getElementById('jumpToLatestCount');
+      if (!btn) return;
+
+      btn.classList.toggle('visible', !!visible);
+      if (badge) {
+        const n = state.chatUnseenCount || 0;
+        badge.textContent = n > 9 ? '9+' : String(n);
+        badge.style.display = n > 0 ? 'inline-flex' : 'none';
       }
+    }
+
+    function scrollChatToBottom(force = false) {
+      const container = document.getElementById('chatMessages');
+      if (!container) return;
+
+      const should = force || state.chatAutoScroll || isNearChatBottom(container);
+      if (!should) {
+        // User is reading above; just surface the jump button.
+        setJumpToLatestVisible(true);
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+        state.chatAutoScroll = true;
+        state.chatUnseenCount = 0;
+        setJumpToLatestVisible(false);
+      });
     }
     
     const AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.webm', '.m4a', '.mp4'];
@@ -5196,137 +5345,6 @@ Response format:
           sendMessage('/new');
         }
       }
-    }
-    
-    // ═══════════════════════════════════════════════════════════════
-    // MULTI-SELECT MODE
-    // ═══════════════════════════════════════════════════════════════
-    function enterMultiSelect() {
-      state.multiSelectMode = true;
-      state.selectedSessions.clear();
-      document.getElementById('sessionsList').classList.add('multi-select-mode');
-      document.getElementById('selectModeBtn').style.display = 'none';
-      updateBulkActionBar();
-      renderSessions();
-    }
-    
-    function exitMultiSelect() {
-      state.multiSelectMode = false;
-      state.selectedSessions.clear();
-      document.getElementById('sessionsList').classList.remove('multi-select-mode');
-      document.getElementById('selectModeBtn').style.display = '';
-      document.getElementById('bulkActionBar').classList.remove('visible');
-      renderSessions();
-    }
-    
-    function toggleSessionSelection(key, event) {
-      if (event) {
-        event.stopPropagation();
-      }
-      
-      if (state.selectedSessions.has(key)) {
-        state.selectedSessions.delete(key);
-      } else {
-        state.selectedSessions.add(key);
-      }
-      
-      updateBulkActionBar();
-      updateCheckboxStates();
-    }
-    
-    function toggleSelectAll() {
-      const mainSessions = state.sessions.filter(s => !s.key.includes(':subagent:'));
-      
-      if (state.selectedSessions.size === mainSessions.length) {
-        // Deselect all
-        state.selectedSessions.clear();
-      } else {
-        // Select all
-        mainSessions.forEach(s => state.selectedSessions.add(s.key));
-      }
-      
-      updateBulkActionBar();
-      updateCheckboxStates();
-    }
-    
-    function updateBulkActionBar() {
-      const bar = document.getElementById('bulkActionBar');
-      const count = state.selectedSessions.size;
-      
-      if (count > 0) {
-        bar.classList.add('visible');
-        document.getElementById('bulkCount').textContent = `${count} selected`;
-      } else {
-        bar.classList.remove('visible');
-      }
-    }
-    
-    function updateCheckboxStates() {
-      // Update individual checkboxes
-      document.querySelectorAll('.session-checkbox[data-key]').forEach(checkbox => {
-        const key = checkbox.dataset.key;
-        if (state.selectedSessions.has(key)) {
-          checkbox.classList.add('checked');
-        } else {
-          checkbox.classList.remove('checked');
-        }
-      });
-      
-      // Update select all checkbox
-      const mainSessions = state.sessions.filter(s => !s.key.includes(':subagent:'));
-      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-      if (selectAllCheckbox) {
-        if (mainSessions.length > 0 && state.selectedSessions.size === mainSessions.length) {
-          selectAllCheckbox.classList.add('checked');
-        } else {
-          selectAllCheckbox.classList.remove('checked');
-        }
-      }
-    }
-    
-    async function bulkArchive() {
-      if (state.selectedSessions.size === 0) return;
-      
-      const count = state.selectedSessions.size;
-      if (!confirm(`Archive ${count} session${count > 1 ? 's' : ''}?`)) return;
-      
-      const keys = [...state.selectedSessions];
-      let archived = 0;
-      
-      for (const key of keys) {
-        try {
-          await rpcCall('sessions.archive', { sessionKey: key });
-          archived++;
-        } catch (err) {
-          console.error(`Failed to archive ${key}:`, err);
-        }
-      }
-      
-      exitMultiSelect();
-      await refresh();
-      
-      console.log(`[ClawCondos] Archived ${archived}/${count} sessions`);
-    }
-    
-    async function bulkPin() {
-      if (state.selectedSessions.size === 0) return;
-      
-      const keys = [...state.selectedSessions];
-      let pinned = 0;
-      
-      for (const key of keys) {
-        try {
-          await rpcCall('sessions.pin', { sessionKey: key, pinned: true });
-          pinned++;
-        } catch (err) {
-          console.error(`Failed to pin ${key}:`, err);
-        }
-      }
-      
-      exitMultiSelect();
-      await refresh();
-      
-      console.log(`[ClawCondos] Pinned ${pinned}/${keys.length} sessions`);
     }
     
     // ═══════════════════════════════════════════════════════════════
@@ -5638,7 +5656,7 @@ Response format:
     // ═══════════════════════════════════════════════════════════════
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (state.multiSelectMode) {
+        if (false) {
           exitMultiSelect();
         } else if (state.currentView === 'chat') {
           navigateTo('dashboard');
@@ -5649,13 +5667,47 @@ Response format:
     // ═══════════════════════════════════════════════════════════════
     // INIT
     // ═══════════════════════════════════════════════════════════════
+    function initChatUX() {
+      const container = document.getElementById('chatMessages');
+      if (container && !container.dataset.scrollListenerAttached) {
+        container.dataset.scrollListenerAttached = '1';
+        container.addEventListener('scroll', () => {
+          const nearBottom = isNearChatBottom(container);
+          state.chatAutoScroll = nearBottom;
+          if (nearBottom) {
+            state.chatUnseenCount = 0;
+            setJumpToLatestVisible(false);
+          }
+        }, { passive: true });
+      }
+
+      const jumpBtn = document.getElementById('jumpToLatest');
+      if (jumpBtn && !jumpBtn.dataset.clickAttached) {
+        jumpBtn.dataset.clickAttached = '1';
+        jumpBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          state.chatAutoScroll = true;
+          state.chatUnseenCount = 0;
+          scrollChatToBottom(true);
+        });
+      }
+
+      // Compat for shared modules
+      if (typeof window.showNotification !== 'function' && typeof window.showToast === 'function') {
+        window.showNotification = (msg, type) => window.showToast(msg, type || 'info', 4000);
+      }
+    }
+
     function init() {
       // Restore active runs from localStorage (before connecting)
       restoreActiveRuns();
-      
+
       // Initialize auto-archive dropdown UI
       initAutoArchiveUI();
-      
+
+      // Attach chat UX listeners (safe to call early)
+      initChatUX();
+
       // If no stored token, prompt for gateway token before attempting WS auth
       if (!state.token) {
         setConnectionStatus('error');
@@ -5665,9 +5717,13 @@ Response format:
       }
 
       // Hash-router: rely on hashchange (popstate can double-fire on back/forward in some browsers)
-      window.addEventListener('hashchange', handleRoute);
+      window.addEventListener('hashchange', () => {
+        handleRoute();
+        // Route changes can swap views; re-attach if needed
+        initChatUX();
+      });
       handleRoute();
-      
+
       // Auto-refresh sessions every 30s
       setInterval(() => {
         if (state.connected) {

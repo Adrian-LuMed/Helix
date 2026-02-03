@@ -1897,6 +1897,11 @@
         return true;
       });
 
+      // NOTE: Condos should still appear even if they only have completed goals.
+      // We build condos from sessions AND from ALL goals (pending + completed),
+      // but we still only render pending goals inside the condo.
+      // (Albert preference: show condos with completed goals.)
+
       const goalById = new Map(state.goals.map(g => [g.id, g]));
       const sessionToGoal = new Map();
       for (const g of state.goals) {

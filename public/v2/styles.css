@@ -87,6 +87,14 @@ body {
   font-size: 22px;
 }
 
+.brand-logo {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+  flex-shrink: 0;
+  filter: drop-shadow(0 6px 14px rgba(0,0,0,0.35));
+}
+
 .condos-section {
   flex: 1;
   overflow-y: auto;

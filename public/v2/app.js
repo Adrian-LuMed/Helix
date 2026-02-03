@@ -1769,8 +1769,9 @@
       
       if (elActive) elActive.textContent = activeSessions;
       if (elTrend) {
-        const totalSessions = sessions.filter(s => !s.key.includes(':subagent:')).length;
-        elTrend.textContent = totalSessions > 0 ? `${totalSessions} total` : '';
+        // Prototype uses a small trend line (e.g. "↑ 3 today").
+        // We don't have reliable "today" deltas yet, so keep it empty for now.
+        elTrend.textContent = '';
       }
       if (elPending) elPending.textContent = pendingGoals;
       if (elCompleted) elCompleted.textContent = completedGoals;
@@ -4976,53 +4977,112 @@ Response format:
 
     function renderGoalsGrid() {
       const container = document.getElementById('goalsGrid');
-      const countEl = document.getElementById('goalCount');
-      if (!container || !countEl) return;
+      if (!container) return;
+
+      // Dashboard "Condos Overview" (prototype): render condos with a few goal rows inside each card.
+      const visibleSessions = (state.sessions || []).filter(s => !s.key.includes(':subagent:'));
+
+      const condos = new Map();
+      for (const s of visibleSessions) {
+        const condoId = getSessionCondoId(s);
+        if (!condos.has(condoId)) {
+          condos.set(condoId, {
+            id: condoId,
+            name: getSessionCondoName(s),
+            sessions: [],
+            goals: [],
+            latest: 0,
+          });
+        }
+        const c = condos.get(condoId);
+        c.sessions.push(s);
+        c.latest = Math.max(c.latest, s.updatedAt || 0);
+      }
 
       const goals = Array.isArray(state.goals) ? state.goals : [];
-      countEl.textContent = goals.length;
+      for (const g of goals) {
+        const condoId = g.condoId || 'misc:default';
+        if (!condos.has(condoId)) {
+          condos.set(condoId, {
+            id: condoId,
+            name: g.condoName || (condoId.includes(':') ? condoId.split(':').pop() : condoId),
+            sessions: [],
+            goals: [],
+            latest: g.updatedAtMs || 0,
+          });
+        }
+        condos.get(condoId).goals.push(g);
+      }
 
-      if (!goals.length) {
+      const sorted = Array.from(condos.values()).sort((a, b) => (b.latest || 0) - (a.latest || 0));
+
+      if (!sorted.length) {
         container.innerHTML = `
-          <div class="goal-card empty" onclick="showCreateGoalModal()">
-            <div class="goal-card-top">
-              <div class="goal-card-icon">＋</div>
-              <div class="goal-card-title">Create your first condo</div>
+          <div class="condo-card" style="opacity:.7">
+            <div class="condo-card-header">
+              <span style="font-size:18px">🏢</span>
+              <span class="condo-card-title">No condos yet</span>
             </div>
-            <div class="goal-card-sub">Goals keep sessions, tasks, notes, and deadlines in one place.</div>
+            <div class="condo-card-goals">
+              <div class="condo-goal-row">
+                <div class="condo-goal-status pending"></div>
+                <span class="condo-goal-name">Create a goal to get started</span>
+                <span class="condo-goal-meta">+</span>
+              </div>
+            </div>
           </div>
         `;
         return;
       }
 
-      container.innerHTML = goals.map(g => {
-        const { done, total } = goalTaskStats(g);
-        const pct = total ? Math.round((done/total)*100) : 0;
-        const completed = isGoalCompleted(g);
-        const status = completed ? 'done' : (g.status || 'active');
-        const due = g.deadline ? `<span class="goal-pill">due ${escapeHtml(g.deadline)}</span>` : '';
-        const pr = g.priority ? `<span class="goal-pill pr">${escapeHtml(g.priority)}</span>` : '';
-        const sessions = Array.isArray(g.sessions) ? g.sessions.length : 0;
+      // Prototype shows a tight grid; start with up to 8 cards.
+      const maxCards = 8;
+      const cards = sorted.slice(0, maxCards).map(condo => {
+        const condoUnread = condo.sessions.filter(s => isSessionUnread(s.key)).length;
+        const condoErrors = condo.sessions.filter(s => s.lastError).length;
+        const badge = condoUnread > 0
+          ? `<span class="badge unread">${condoUnread}</span>`
+          : condoErrors > 0 ? `<span class="badge error">${condoErrors}</span>` : '';
+
+        // Pick up to 3 non-completed goals (prototype shows a few rows)
+        const goalsForCondo = (condo.goals || []).filter(g => !isGoalCompleted(g)).slice(0, 3);
+        const rows = goalsForCondo.map(g => {
+          const sessionCount = Array.isArray(g.sessions) ? g.sessions.length : 0;
+          const meta = sessionCount ? `${sessionCount} session${sessionCount === 1 ? '' : 's'}` : '';
+          return `
+            <div class="condo-goal-row" onclick="openGoal('${escapeHtml(g.id)}')">
+              <div class="condo-goal-status pending"></div>
+              <span class="condo-goal-name">${escapeHtml(g.title || 'Untitled goal')}</span>
+              <span class="condo-goal-meta">${escapeHtml(meta || '—')}</span>
+            </div>
+          `;
+        }).join('');
+
+        const fallback = !rows
+          ? `
+            <div class="condo-goal-row" onclick="openNewGoal('${escapeHtml(condo.id)}')">
+              <div class="condo-goal-status pending"></div>
+              <span class="condo-goal-name">New goal…</span>
+              <span class="condo-goal-meta">+</span>
+            </div>
+          `
+          : '';
+
         return `
-          <div class="goal-card ${completed ? 'done' : ''}" onclick="openGoal('${escapeHtml(g.id)}')">
-            <div class="goal-card-top">
-              <div class="goal-card-icon">🏙️</div>
-              <div>
-                <div class="goal-card-title">${escapeHtml(g.title || 'Untitled goal')}</div>
-                <div class="goal-card-sub">${completed ? 'Completed' : 'In progress'} · ${sessions} sessions</div>
-              </div>
+          <div class="condo-card" onclick="selectCondo('${escapeHtml(condo.id)}')">
+            <div class="condo-card-header">
+              <span style="font-size:18px">🏢</span>
+              <span class="condo-card-title">${escapeHtml(condo.name || 'Condo')}</span>
+              ${badge}
             </div>
-            <div class="goal-card-pills">
-              ${pr}
-              ${due}
-              <span class="goal-pill">${done}/${total} tasks</span>
-            </div>
-            <div class="goal-progress">
-              <div class="goal-progress-bar" style="width:${pct}%;"></div>
+            <div class="condo-card-goals">
+              ${rows || fallback}
             </div>
           </div>
         `;
       }).join('');
+
+      container.innerHTML = `<div class="condos-grid">${cards}</div>`;
     }
 
     function renderSessionsGrid() {

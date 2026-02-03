@@ -1137,6 +1137,31 @@ body {
   min-height: 0;
 }
 
+/* Remove "inset" look: top & bottom bars should touch the wrapper edges */
+#chatArea.chat-shell {
+  padding: 0 !important;
+}
+
+#chatArea .session-info,
+#chatArea .chat-input-area {
+  margin: 0 !important;
+  border-radius: 0 !important;
+}
+
+/* Keep the nice inner spacing but avoid extra outer gaps */
+#chatArea .session-info {
+  padding-left: 16px !important;
+  padding-right: 16px !important;
+}
+
+#chatArea .chat-input-area {
+  padding: 14px 16px !important;
+}
+
+#chatArea .chat-messages {
+  padding: 16px !important;
+}
+
 /* Grid cards (Apps/Recurring) */
 .grid {
   display: grid;

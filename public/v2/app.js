@@ -3773,11 +3773,19 @@ Response format:
     }
 
     function navigateTo(path, replace = false) {
-      const url = `#/${path}`;
+      const clean = String(path || '').replace(/^#\/?/, '').replace(/^\//, '');
+      const url = `#/${clean}`;
+
+      // Avoid double-pushing identical entries (breaks reliable Back behavior)
+      if (window.location.hash === url) {
+        handleRoute();
+        return;
+      }
+
       if (replace) {
-        history.replaceState({ path }, '', url);
+        history.replaceState({ path: clean }, '', url);
       } else {
-        history.pushState({ path }, '', url);
+        history.pushState({ path: clean }, '', url);
       }
       handleRoute();
     }

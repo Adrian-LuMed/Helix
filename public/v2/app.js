@@ -117,6 +117,9 @@
       // Track which session groups are expanded (for nested view)
       expandedGroups: JSON.parse(localStorage.getItem('sharp_expanded_groups') || '{}'),
 
+      // Track which condos are expanded/collapsed in sidebar
+      expandedCondos: JSON.parse(localStorage.getItem('sharp_expanded_condos') || '{}'),
+
       // Track which agent nodes are expanded in sidebar (Agents > Sessions/Subsessions)
       expandedAgents: JSON.parse(localStorage.getItem('sharp_expanded_agents') || '{}'),
       
@@ -223,6 +226,17 @@
     function isGroupExpanded(groupKey) {
       // Default to expanded
       return state.expandedGroups[groupKey] !== false;
+    }
+
+    function toggleCondoExpanded(condoId) {
+      state.expandedCondos[condoId] = !isCondoExpanded(condoId);
+      localStorage.setItem('sharp_expanded_condos', JSON.stringify(state.expandedCondos));
+      renderCondos();
+    }
+
+    function isCondoExpanded(condoId) {
+      // Default: expanded unless explicitly set false
+      return state.expandedCondos[condoId] !== false;
     }
 
     function toggleAgentExpanded(agentId) {
@@ -1816,6 +1830,11 @@
       renderSidebar();
     }
 
+    // Back-compat alias (some helper functions call renderCondos)
+    function renderCondos() {
+      renderSidebar();
+    }
+
     function setCurrentGoal(goalId, condoId = null) {
       state.currentGoalId = goalId;
       if (condoId) state.currentCondoId = condoId;
@@ -1907,20 +1926,33 @@
           : condoErrors > 0 ? `<span class=\"badge error\">${condoErrors}</span>` : '';
         const activeCondo = state.currentCondoId === condo.id ? 'active' : '';
 
+        // Only pending goals should be displayed in sidebar
+        const pendingGoalsCount = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g)).length;
+
+        // Default collapse condos with no pending goals unless user explicitly expanded them before
+        if (pendingGoalsCount === 0 && state.expandedCondos[condo.id] === undefined) {
+          state.expandedCondos[condo.id] = false;
+        }
+
+        const isExpanded = isCondoExpanded(condo.id);
+        const toggleIcon = isExpanded ? '▾' : '▸';
+
         html += `
           <div class=\"condo-item\">
             <div class=\"condo-header ${activeCondo}\" onclick=\"selectCondo('${escapeHtml(condo.id)}')\">
+              <span class=\"condo-toggle\" title=\"${isExpanded ? 'Collapse' : 'Expand'}\" onclick=\"event.stopPropagation(); toggleCondoExpanded('${escapeHtml(condo.id)}')\">${toggleIcon}</span>
               <span class=\"condo-icon\">🏢</span>
               <span class=\"condo-name\">${escapeHtml(condo.name || 'Condo')}</span>
               ${badge}
               <span class=\"condo-add\" title=\"New session\" onclick=\"event.stopPropagation(); openNewSession('${escapeHtml(condo.id)}')\">+</span>
             </div>
-            <div class=\"condo-goals\">
-              ${renderCondoGoals(condo, sessionToGoal, goalById)}
-            </div>
+            ${isExpanded ? `<div class=\"condo-goals\">${renderCondoGoals(condo, sessionToGoal, goalById)}</div>` : ''}
           </div>
         `;
       }
+
+      // persist any new default-collapse decisions
+      localStorage.setItem('sharp_expanded_condos', JSON.stringify(state.expandedCondos));
 
       container.innerHTML = html;
     }

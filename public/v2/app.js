@@ -6238,10 +6238,20 @@ Response format:
       } catch {}
     }
 
-    function init() {
+    async function init() {
       // Prevent browser from restoring scroll positions between hash routes.
       // ClawCondos manages its own scroll behavior per-view.
       try { if ('scrollRestoration' in history) history.scrollRestoration = 'manual'; } catch {}
+
+      // Best-effort: load config.json (async) and allow it to provide an auth token for localhost.
+      try {
+        if (window.ClawCondosConfig?.initConfig) {
+          const cfg = await window.ClawCondosConfig.initConfig();
+          const tok = cfg?.authToken || cfg?.gatewayToken || cfg?.token || null;
+          if (!state.token && tok) state.token = tok;
+          if (cfg?.gatewayWsUrl) state.gatewayUrl = cfg.gatewayWsUrl;
+        }
+      } catch {}
 
       // Restore active runs from localStorage (before connecting)
       restoreActiveRuns();
@@ -6283,4 +6293,4 @@ Response format:
       }, 30000);
     }
     
-    init();
+    init().catch((e) => console.error('[init] failed', e));

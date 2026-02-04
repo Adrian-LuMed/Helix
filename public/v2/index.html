@@ -537,12 +537,7 @@
 
   <script src="/clawcondos-lib/config.js"></script>
   <script>
-    // If no stored gateway token, show login immediately (so the UI doesn't sit on "Connecting...")
-    try {
-      if (!localStorage.getItem('sharp_token')) {
-        document.getElementById('loginModal')?.classList.remove('hidden');
-      }
-    } catch {}
+    // Login modal is managed by app.js (it may auto-load token from config.json on localhost).
   </script>
   <script src="/v2/app.js"></script>
   <script src="/js/media-upload.js"></script>

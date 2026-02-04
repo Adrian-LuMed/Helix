@@ -5839,7 +5839,7 @@ Response format:
                 <path d="M20 11.5 12.6 18.9a5 5 0 0 1-7.1-7.1l8.5-8.5a3.5 3.5 0 1 1 5 5l-8.5 8.5a2 2 0 0 1-2.8-2.8l7.8-7.8"/>
               </svg>
             </button>
-            <textarea class="chat-input" id="${inputId}" placeholder="Type a message..." rows="1"></textarea>
+            <textarea class="chat-input" id="${inputId}" placeholder="Type a message..." rows="1" onkeydown="${prefix ? "if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendGoalChatMessage();} if(event.key==='Escape' && state.isThinking){event.preventDefault(); stopAgent(null,'goal');}" : "handleChatKey(event)"}" oninput="autoResize(this)"></textarea>
             <button class="stop-btn" id="${stopId}" onclick="stopAgent(null, '${prefix || ''}')" disabled title="Stop">⏹</button>
             <button class="voice-btn" id="${voiceId}" title="Record voice" aria-pressed="false">
               <svg viewBox="0 0 24 24" fill="currentColor">
@@ -5848,7 +5848,7 @@ Response format:
               <span class="voice-btn-text">Rec</span>
               <span class="recording-timer" id="${timerId}">0:00</span>
             </button>
-            <button class="send-btn" id="${sendId}">Send</button>
+            <button class="send-btn" id="${sendId}" onclick="${prefix ? 'sendGoalChatMessage()' : 'sendMessage()'}">Send</button>
           </div>
 
           <div class="drop-overlay" id="${dropId}">

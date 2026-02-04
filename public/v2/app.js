@@ -5564,7 +5564,11 @@ Response format:
       if (!container) return null;
 
       const msg = document.createElement('div');
-      msg.className = `message ${role}`;
+      // Normalize role strings like "user queued" → classes: message user queued
+      const parts = String(role || '').split(/\s+/).filter(Boolean);
+      const base = parts[0] || 'system';
+      const extra = parts.slice(1);
+      msg.className = `message ${base}${extra.length ? ' ' + extra.join(' ') : ''}`;
 
       // Format content
       let contentHtml;

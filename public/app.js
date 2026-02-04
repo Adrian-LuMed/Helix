@@ -60,6 +60,9 @@
       pendingRouteNewSession: null,
       pendingRouteNewGoalCondoId: null,
       chatHistory: [],
+      // Cache last loaded history per session so UI doesn't go blank on transient disconnects.
+      sessionHistoryCache: new Map(), // Map<sessionKey, messages[]>
+      sessionHistoryLoadSeq: 0,
       isThinking: false,
       messageQueue: [],  // Queued messages when agent is busy
 
@@ -1157,6 +1160,11 @@ function initAutoArchiveUI() {
           hideLoginModal();
           startKeepalive();
           loadInitialData();
+
+          // If user is currently viewing a session, reload history now that we are connected.
+          if (state.currentView === 'chat' && state.currentSession?.key) {
+            loadSessionHistory(state.currentSession.key, { preserve: true });
+          }
         },
         reject: (err) => {
           console.error('[WS] Connect failed:', err);
@@ -6566,6 +6574,13 @@ Response format:
       if (sessionGoal) state.currentGoalId = sessionGoal.id;
       state.chatHistory = [];
       state.isThinking = state.activeRuns.has(key);
+
+      // If we have cached history (e.g. from a previous view), render it immediately
+      // to avoid the "history disappeared" feeling while we fetch fresh data.
+      const cached = state.sessionHistoryCache.get(key);
+      if (cached && Array.isArray(cached) && cached.length) {
+        renderChatHistory(cached);
+      }
       
       // Initialize session status if not set
       if (!state.sessionAgentStatus[key]) {
@@ -6608,20 +6623,50 @@ Response format:
       }
     }
     
-    async function loadSessionHistory(key) {
+    async function loadSessionHistory(key, opts = {}) {
       const container = document.getElementById('chatMessages');
-      container.innerHTML = '<div class="message system">Loading history...</div>';
-      
+      if (!container) return;
+
+      // Guard against races: if user switches sessions quickly, late responses should not clobber the UI.
+      const seq = ++state.sessionHistoryLoadSeq;
+
+      // Only show the loading placeholder if we don't already have something to show.
+      const hasExisting = container.children && container.children.length > 0;
+      if (!opts.preserve && !hasExisting) {
+        container.innerHTML = '<div class="message system">Loading history...</div>';
+      }
+
       try {
-        const result = await rpcCall('chat.history', { sessionKey: key, limit: 50 });
+        const result = await rpcCall('chat.history', { sessionKey: key, limit: 200 });
+        if (seq !== state.sessionHistoryLoadSeq) return;
+        if (state.currentSession?.key !== key) return;
+
         const messages = result?.messages || [];
-        
+        // Cache so transient disconnects or re-renders don't blank the chat.
+        state.sessionHistoryCache.set(key, messages);
+
         if (messages.length > 0) {
           renderChatHistory(messages);
         } else {
           container.innerHTML = '<div class="message system">No messages yet</div>';
         }
       } catch (err) {
+        if (seq !== state.sessionHistoryLoadSeq) return;
+        if (state.currentSession?.key !== key) return;
+
+        const cached = state.sessionHistoryCache.get(key);
+        if (opts.preserve && cached && cached.length) {
+          // Keep whatever was shown.
+          showToast(`History load failed (showing cached): ${err.message}`, 'error', 5000);
+          return;
+        }
+
+        if (cached && cached.length) {
+          renderChatHistory(cached);
+          showToast(`History load failed (showing cached): ${err.message}`, 'error', 5000);
+          return;
+        }
+
         container.innerHTML = `<div class="message system">Error loading history: ${escapeHtml(err.message)}</div>`;
       }
     }

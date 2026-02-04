@@ -5573,7 +5573,10 @@ Response format:
       let contentHtml;
       const features = (config && config.features) ? config.features : {};
       const formatUserMessages = features.formatUserMessages === true;
-      const shouldFormat = role.startsWith('assistant') || (formatUserMessages && role.startsWith('user'));
+      const baseRole = base;
+      // Always format assistant messages.
+      // Format user messages only if enabled OR if they contain attachment markers (so they render as pills/players).
+      const shouldFormat = baseRole === 'assistant' || (baseRole === 'user' && (formatUserMessages || /\[attachment:/i.test(String(content||''))));
       if (shouldFormat && !role.includes('thinking')) {
         contentHtml = formatMessage(content);
       } else {

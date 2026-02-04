@@ -235,29 +235,44 @@ body {
   box-shadow: 0 0 0 0 rgba(0,0,0,0);
 }
 
-.goal-dot.idle {
-  background: var(--accent-green);
-  box-shadow: 0 0 6px rgba(34, 197, 94, 0.35);
+.goal-dot.blinker {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+  cursor: help;
 }
 
-.goal-dot.thinking {
-  background: var(--accent-yellow);
-  animation: goalPulseYellow 1.2s ease-in-out infinite;
+.goal-dot.blink-offline {
+  background: #0b0b0b;
+  opacity: 0.75;
 }
 
-.goal-dot.error {
+.goal-dot.blink-error {
   background: var(--accent-red);
-  box-shadow: 0 0 6px rgba(239, 68, 68, 0.35);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.35);
 }
 
-.goal-dot.offline {
-  background: var(--text-muted);
-  opacity: 0.6;
-}
-
-.goal-dot.blocked {
+.goal-dot.blink-blocked {
   background: #a855f7; /* purple */
   animation: goalPulsePurple 1.2s ease-in-out infinite;
+}
+
+.goal-dot.blink-needs-user {
+  background: var(--accent-green);
+  animation: goalPulseGreen 1.2s ease-in-out infinite;
+}
+
+.goal-dot.blink-queued {
+  background: #c2410c; /* dark orange */
+  animation: goalPulseOrange 1.4s ease-in-out infinite;
+}
+
+.goal-dot.blink-running {
+  background: #f59e0b;
+  animation: goalPulseOrange 1.2s ease-in-out infinite;
+}
+
+.goal-dot.blink-idle {
+  background: #3b82f6;
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.35);
 }
 
 @keyframes goalPulseYellow {
@@ -265,11 +280,41 @@ body {
   50% { opacity: 0.85; box-shadow: 0 0 10px 3px rgba(250, 204, 21, 0.25); transform: scale(1.2); }
 }
 
+@keyframes goalPulseOrange {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.35); transform: scale(1); }
+  50% { opacity: 0.85; box-shadow: 0 0 10px 3px rgba(245, 158, 11, 0.25); transform: scale(1.2); }
+}
+
 @keyframes goalPulsePurple {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.35); transform: scale(1); }
   50% { opacity: 0.85; box-shadow: 0 0 10px 3px rgba(168, 85, 247, 0.25); transform: scale(1.2); }
 }
 
+@keyframes goalPulseGreen {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.35); transform: scale(1); }
+  50% { opacity: 0.85; box-shadow: 0 0 10px 3px rgba(34, 197, 94, 0.25); transform: scale(1.2); }
+}
+
+.goal-history {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 8px;
+}
+
+.goal-history-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.goal-history-select {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
 
 .goal-name {
   flex: 1;
@@ -1844,4 +1889,3 @@ body {
 .item.status-thinking { background: rgba(245, 158, 11, 0.06); }
 .item.status-error { background: rgba(248, 113, 113, 0.06); }
 .item.status-offline { background: rgba(148, 163, 184, 0.04); }
-

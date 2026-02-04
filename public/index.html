@@ -428,6 +428,10 @@
                     <div class="goal-chat-meta" id="goalChatMeta" style="min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</div>
                   </div>
                   <div style="display:flex; gap:8px; align-items:center;">
+                    <div class="goal-history" id="goalHistoryWrap" style="display:none;">
+                      <span class="goal-history-label">History</span>
+                      <select class="goal-history-select" id="goalHistorySelect" onchange="handleGoalHistoryChange(this.value)"></select>
+                    </div>
                     <button class="ghost-btn" id="goalNewSessionBtn" onclick="openNewSession(state.currentCondoId, state.currentGoalOpenId)">＋ New</button>
                     <button class="ghost-btn" id="goalAttachBtn" onclick="showAttachSessionModal(null)">⛓</button>
                     <button class="ghost-btn" id="goalOpenBtn" onclick="openGoalChatInFull()">Open →</button>
@@ -603,6 +607,6 @@
   <!-- Load shared modules BEFORE app.js so it can mount them dynamically -->
   <script src="/js/media-upload.js"></script>
   <script src="/js/voice-recorder.js"></script>
-  <script src="/app.js?v=16"></script>
+  <script src="/app.js?v=19"></script>
 </body>
 </html>

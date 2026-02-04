@@ -12,7 +12,23 @@
     
     // Get configuration (from config.js)
     const config = window.ClawCondosConfig ? window.ClawCondosConfig.getConfig() : {};
-    
+
+    // localStorage keys (migrate from legacy "sharp_*" keys)
+    const LS_PREFIX = 'clawcondos_';
+    function lsGet(key, fallback = null) {
+      const v = localStorage.getItem(LS_PREFIX + key);
+      if (v != null) return v;
+      const legacy = localStorage.getItem('sharp_' + key);
+      if (legacy != null) return legacy;
+      return fallback;
+    }
+    function lsSet(key, value) {
+      localStorage.setItem(LS_PREFIX + key, value);
+    }
+    function lsRemove(key) {
+      localStorage.removeItem(LS_PREFIX + key);
+    }
+
     const state = {
       // Data
       sessions: [],
@@ -58,15 +74,17 @@
       
       // Auth - loaded from config or localStorage
       // Token should be set via config.json or login modal, NOT hardcoded
-      token: localStorage.getItem('sharp_token') || null,
+      token: lsGet('token', null),
       gatewayUrl: (() => {
         // Priority: localStorage > config > auto-detect
-        const saved = localStorage.getItem('sharp_gateway');
+        const saved = lsGet('gateway', null);
         if (saved && !saved.includes(':18789')) {
           return saved;
         }
         // Clear invalid old URLs
         if (saved && saved.includes(':18789') && window.location.hostname !== 'localhost') {
+          lsRemove('gateway');
+          // Also clear legacy if present
           localStorage.removeItem('sharp_gateway');
         }
         // Use config if available
@@ -102,16 +120,16 @@
       
       // Streaming
       activeRuns: new Map(),
-      activeRunsStore: JSON.parse(localStorage.getItem('sharp_active_runs') || '{}'),  // Persisted: { sessionKey: { runId, startedAt } }
+      activeRunsStore: JSON.parse(lsGet('active_runs', '{}') || '{}'),  // Persisted: { sessionKey: { runId, startedAt } }
       sessionInputReady: new Map(),
       
       // Pin & Archive
-      pinnedSessions: JSON.parse(localStorage.getItem('sharp_pinned_sessions') || '[]'),
-      archivedSessions: JSON.parse(localStorage.getItem('sharp_archived_sessions') || '[]'),
+      pinnedSessions: JSON.parse(lsGet('pinned_sessions', '[]') || '[]'),
+      archivedSessions: JSON.parse(lsGet('archived_sessions', '[]') || '[]'),
       showArchived: false,
       
       // Custom session names
-      sessionNames: JSON.parse(localStorage.getItem('sharp_session_names') || '{}'),
+      sessionNames: JSON.parse(lsGet('session_names', '{}') || '{}'),
       
       // Search & Filters
       searchQuery: '',
@@ -123,27 +141,27 @@
       attemptedTitles: new Set(),   // Already tried (avoid retries)
       
       // Auto-archive: 'never' or number of days
-      autoArchiveDays: localStorage.getItem('sharp_auto_archive_days') || '7',
+      autoArchiveDays: lsGet('auto_archive_days', '7') || '7',
       
       // Track when sessions were last viewed (for unread indicator)
-      lastViewedAt: JSON.parse(localStorage.getItem('sharp_last_viewed') || '{}'),
+      lastViewedAt: JSON.parse(lsGet('last_viewed', '{}') || '{}'),
       
       // Track which session groups are expanded (for nested view)
-      expandedGroups: JSON.parse(localStorage.getItem('sharp_expanded_groups') || '{}'),
+      expandedGroups: JSON.parse(lsGet('expanded_groups', '{}') || '{}'),
 
       // Track which condos are expanded/collapsed in sidebar
-      expandedCondos: JSON.parse(localStorage.getItem('sharp_expanded_condos') || '{}'),
+      expandedCondos: JSON.parse(lsGet('expanded_condos', '{}') || '{}'),
 
       // Track which agent nodes are expanded in sidebar (Agents > Sessions/Subsessions)
-      expandedAgents: JSON.parse(localStorage.getItem('sharp_expanded_agents') || '{}'),
+      expandedAgents: JSON.parse(lsGet('expanded_agents', '{}') || '{}'),
       
       // Session status (two separate concepts)
       // 1) Brief current state (LLM-generated text)
-      sessionBriefStatus: JSON.parse(localStorage.getItem('sharp_session_brief_status') || '{}'),
+      sessionBriefStatus: JSON.parse(lsGet('session_brief_status', '{}') || '{}'),
       generatingStatus: new Set(),
 
       // 2) Agent lifecycle status (idle/thinking/offline/error)
-      sessionAgentStatus: JSON.parse(localStorage.getItem('sharp_session_agent_status') || '{}'),
+      sessionAgentStatus: JSON.parse(lsGet('session_agent_status', '{}') || '{}'),
       
       // Tool activity tracking (for compact indicator)
       activeTools: new Map(),  // Map<toolCallId, { name, args, output, startedAt, status }>
@@ -233,7 +251,7 @@
     
     function toggleGroupExpanded(groupKey) {
       state.expandedGroups[groupKey] = !state.expandedGroups[groupKey];
-      localStorage.setItem('sharp_expanded_groups', JSON.stringify(state.expandedGroups));
+      lsSet('expanded_groups', JSON.stringify(state.expandedGroups));
       renderSessions();
     }
     
@@ -244,7 +262,7 @@
 
     function toggleCondoExpanded(condoId) {
       state.expandedCondos[condoId] = !isCondoExpanded(condoId);
-      localStorage.setItem('sharp_expanded_condos', JSON.stringify(state.expandedCondos));
+      lsSet('expanded_condos', JSON.stringify(state.expandedCondos));
       renderCondos();
     }
 
@@ -255,7 +273,7 @@
 
     function toggleAgentExpanded(agentId) {
       state.expandedAgents[agentId] = !isAgentExpanded(agentId);
-      localStorage.setItem('sharp_expanded_agents', JSON.stringify(state.expandedAgents));
+      lsSet('expanded_agents', JSON.stringify(state.expandedAgents));
       renderAgents();
     }
 
@@ -334,7 +352,7 @@
           const status = data.choices?.[0]?.message?.content?.trim();
           if (status && status.length < 80) {
             state.sessionBriefStatus[key] = { text: status, updatedAt: Date.now() };
-            localStorage.setItem('sharp_session_brief_status', JSON.stringify(state.sessionBriefStatus));
+            lsSet('session_brief_status', JSON.stringify(state.sessionBriefStatus));
           }
         }
       } catch (err) {
@@ -392,14 +410,14 @@
     
     function markSessionRead(key) {
       state.lastViewedAt[key] = Date.now();
-      localStorage.setItem('sharp_last_viewed', JSON.stringify(state.lastViewedAt));
+      lsSet('last_viewed', JSON.stringify(state.lastViewedAt));
     }
     
     function markSessionUnread(key, event) {
       if (event) event.stopPropagation();
       // Set lastViewed to 0 so it appears unread
       state.lastViewedAt[key] = 0;
-      localStorage.setItem('sharp_last_viewed', JSON.stringify(state.lastViewedAt));
+      lsSet('last_viewed', JSON.stringify(state.lastViewedAt));
       renderSessions();
       renderSessionsGrid();
     }
@@ -409,7 +427,7 @@
       state.sessions.forEach(s => {
         state.lastViewedAt[s.key] = now;
       });
-      localStorage.setItem('sharp_last_viewed', JSON.stringify(state.lastViewedAt));
+      lsSet('last_viewed', JSON.stringify(state.lastViewedAt));
       renderSessions();
       renderSessionsGrid();
       showToast('All sessions marked as read');
@@ -426,7 +444,7 @@
       } else {
         state.pinnedSessions.push(key);
       }
-      localStorage.setItem('sharp_pinned_sessions', JSON.stringify(state.pinnedSessions));
+      lsSet('pinned_sessions', JSON.stringify(state.pinnedSessions));
       renderSessions();
       renderSessionsGrid();
     }
@@ -441,10 +459,10 @@
         const pinIdx = state.pinnedSessions.indexOf(key);
         if (pinIdx >= 0) {
           state.pinnedSessions.splice(pinIdx, 1);
-          localStorage.setItem('sharp_pinned_sessions', JSON.stringify(state.pinnedSessions));
+          lsSet('pinned_sessions', JSON.stringify(state.pinnedSessions));
         }
       }
-      localStorage.setItem('sharp_archived_sessions', JSON.stringify(state.archivedSessions));
+      lsSet('archived_sessions', JSON.stringify(state.archivedSessions));
       renderSessions();
       renderSessionsGrid();
     }
@@ -467,7 +485,7 @@
       } else {
         delete state.sessionNames[key];
       }
-      localStorage.setItem('sharp_session_names', JSON.stringify(state.sessionNames));
+      lsSet('session_names', JSON.stringify(state.sessionNames));
       renderSessions();
       renderSessionsGrid();
     }
@@ -774,8 +792,8 @@
     // ═══════════════════════════════════════════════════════════════
     function setAutoArchiveDays(value) {
       state.autoArchiveDays = value;
-      localStorage.setItem('sharp_auto_archive_days', value);
-      console.log('[Sharp] Auto-archive set to:', value);
+      lsSet('auto_archive_days', value);
+      console.log('[ClawCondos] Auto-archive set to:', value);
       // Apply immediately so the sidebar updates without requiring a manual refresh.
       if (state.sessions && state.sessions.length) {
         checkAutoArchive();
@@ -850,14 +868,14 @@
         nextExpanded[condoId] = true;
       }
       state.expandedCondos = nextExpanded;
-      localStorage.setItem('sharp_expanded_condos', JSON.stringify(state.expandedCondos));
+      lsSet('expanded_condos', JSON.stringify(state.expandedCondos));
 
       renderGoals();
     }
 
     function setActivityWindowDays(value) {
       state.activityWindowDays = value;
-      localStorage.setItem('sharp_activity_window_days', String(value));
+      lsSet('activity_window_days', String(value));
       // Apply immediately
       applyActivityWindowPreset();
     }
@@ -900,7 +918,7 @@ function initAutoArchiveUI() {
       
       // Save if any were archived
       if (autoArchivedCount > 0) {
-        localStorage.setItem('sharp_archived_sessions', JSON.stringify(state.archivedSessions));
+        lsSet('archived_sessions', JSON.stringify(state.archivedSessions));
         showToast(`Auto-archived ${autoArchivedCount} inactive session${autoArchivedCount > 1 ? 's' : ''}`, 'info');
         renderSessions();
         renderSessionsGrid();
@@ -997,6 +1015,8 @@ function initAutoArchiveUI() {
         if (event?.code === 1008 && /unauthorized|password mismatch|device identity required|invalid connect params/i.test(event?.reason || '')) {
           // Clear stored token to prevent infinite reconnect spam with a bad secret.
           state.token = null;
+          lsRemove('token');
+          // Legacy cleanup
           localStorage.removeItem('sharp_token');
           localStorage.removeItem('sharp_gateway_token');
 
@@ -1715,7 +1735,7 @@ function initAutoArchiveUI() {
       for (const [key, data] of Object.entries(state.activeRunsStore)) {
         obj[key] = data;
       }
-      localStorage.setItem('sharp_active_runs', JSON.stringify(obj));
+      lsSet('active_runs', JSON.stringify(obj));
     }
     
     function restoreActiveRuns() {
@@ -1786,6 +1806,27 @@ function initAutoArchiveUI() {
     
     function getAgentStatus(key) {
       return state.sessionAgentStatus[key] || 'idle';
+    }
+
+    function deriveSessionBlinker(sessionKey, opts = {}) {
+      const goalId = opts?.goalId || null;
+      const agentStatus = sessionKey ? getAgentStatus(sessionKey) : 'offline';
+      const isDisconnected = state.connectionStatus === 'error' || agentStatus === 'offline';
+      const hasQueue = !!(sessionKey && state.messageQueue?.some?.(m => m.sessionKey === sessionKey));
+      const isRunning = !!(sessionKey && (state.activeRuns?.has?.(sessionKey) || agentStatus === 'thinking' || agentStatus === 'running'));
+      const isError = agentStatus === 'error' || agentStatus === 'rate_limited';
+      const isNeedsUser = agentStatus === 'needs_user';
+      const isBlocked = !!(goalId && isGoalBlocked(state.goals?.find(g => g.id === goalId)));
+      const isIdle = ['idle', 'ready', 'canceled', 'sent'].includes(agentStatus);
+
+      if (isDisconnected) return { state: 'offline', label: 'Disconnected', colorClass: 'blink-offline' };
+      if (isError) return { state: agentStatus, label: agentStatus === 'rate_limited' ? 'Rate limited' : 'Error', colorClass: 'blink-error' };
+      if (isBlocked) return { state: 'blocked', label: 'Blocked', colorClass: 'blink-blocked' };
+      if (isNeedsUser) return { state: 'needs_user', label: 'Needs input', colorClass: 'blink-needs-user' };
+      if (hasQueue) return { state: 'queued', label: 'Queued', colorClass: 'blink-queued' };
+      if (isRunning) return { state: agentStatus === 'thinking' ? 'thinking' : 'running', label: agentStatus === 'thinking' ? 'Thinking' : 'Running', colorClass: 'blink-running' };
+      if (isIdle) return { state: agentStatus, label: agentStatus === 'canceled' ? 'Canceled' : agentStatus === 'ready' ? 'Ready' : 'Idle', colorClass: 'blink-idle' };
+      return { state: agentStatus || 'idle', label: agentStatus || 'Idle', colorClass: 'blink-idle' };
     }
     
     function getStatusTooltip(status) {
@@ -2175,14 +2216,10 @@ function initAutoArchiveUI() {
         return true;
       });
 
-      // NOTE: Condos should still appear even if they only have completed goals.
-      // We build condos from sessions AND from ALL goals (pending + completed),
-      // but we still only render pending goals inside the condo.
-      // (Albert preference: show condos with completed goals.)
-
-      const goalById = new Map(state.goals.map(g => [g.id, g]));
+      const activeGoals = (state.goals || []).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0);
+      const goalById = new Map(activeGoals.map(g => [g.id, g]));
       const sessionToGoal = new Map();
-      for (const g of state.goals) {
+      for (const g of activeGoals) {
         (g.sessions || []).forEach(s => sessionToGoal.set(s, g.id));
       }
 
@@ -2199,49 +2236,36 @@ function initAutoArchiveUI() {
         return fallbackSession ? getSessionCondoName(fallbackSession) : 'Condo';
       };
 
-      for (const s of visibleSessions) {
-        // Prefer condo assignment via goal (product-level condos)
-        let condoId = null;
-        const goalId = sessionToGoal.get(s.key);
-        if (goalId) {
-          const goal = goalById.get(goalId);
-          condoId = goal?.condoId || null;
-        }
-        if (!condoId) condoId = getSessionCondoId(s);
-
-        if (!condos.has(condoId)) {
-          condos.set(condoId, {
-            id: condoId,
-            name: condoNameForId(condoId, s),
-            sessions: [],
-            goals: new Map(),
-            latest: 0,
-          });
-        }
-        const condo = condos.get(condoId);
-        condo.sessions.push(s);
-        condo.latest = Math.max(condo.latest, s.updatedAt || 0);
-      }
-
-      for (const g of state.goals) {
+      const sessionByKey = new Map((state.sessions || []).map(s => [s.key, s]));
+      for (const g of activeGoals) {
         const condoId = g.condoId || 'misc:default';
         if (!condos.has(condoId)) {
           condos.set(condoId, {
             id: condoId,
-            name: g.condoName || (condoId && condoId.includes(':') ? condoId.split(':').pop() : 'Condo'),
+            name: g.condoName || condoNameForId(condoId, null),
             sessions: [],
             goals: new Map(),
             latest: g.updatedAtMs || 0,
+            sessionKeySet: new Set(),
           });
         }
         const condo = condos.get(condoId);
         condo.goals.set(g.id, g);
+        condo.latest = Math.max(condo.latest, goalLastActivityMs(g));
+        for (const key of (g.sessions || [])) {
+          if (condo.sessionKeySet.has(key)) continue;
+          const s = sessionByKey.get(key);
+          if (s) {
+            condo.sessions.push(s);
+            condo.sessionKeySet.add(key);
+          }
+        }
       }
 
       const sortedCondos = Array.from(condos.values()).sort((a, b) => (b.latest || 0) - (a.latest || 0));
 
       if (sortedCondos.length === 0) {
-        container.innerHTML = `<div style=\"padding: 16px; color: var(--text-dim); font-size: 0.85rem;\">${state.showArchived ? 'No sessions' : 'No active sessions'}</div>`;
+        container.innerHTML = `<div style=\"padding: 16px; color: var(--text-dim); font-size: 0.85rem;\">No active goals yet</div>`;
         return;
       }
 
@@ -2258,13 +2282,13 @@ function initAutoArchiveUI() {
           : condoErrors > 0 ? `<span class=\"badge error\">${condoErrors}</span>` : '';
         const activeCondo = state.currentCondoId === condo.id ? 'active' : '';
 
-        // Only pending goals should be displayed in sidebar
-        const pendingGoalsCount = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g)).length;
+        // Only active + started goals should be displayed in sidebar
+        const pendingGoalsCount = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0).length;
 
         // Default collapse condos that have "nothing happening" unless user explicitly expanded them before.
         // Heuristic: no pending goals OR no sessions attached to any pending goal and no unassigned sessions.
         if (state.expandedCondos[condo.id] === undefined) {
-          const pendingGoals = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g));
+          const pendingGoals = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0);
           const pendingGoalsSessionsCount = pendingGoals.reduce((acc, g) => acc + (Array.isArray(g.sessions) ? g.sessions.length : 0), 0);
           const hasAnySessions = (condo.sessions?.length || 0) > 0;
           const shouldCollapse = pendingGoals.length === 0 || (!hasAnySessions && pendingGoalsSessionsCount === 0);
@@ -2295,12 +2319,6 @@ function initAutoArchiveUI() {
     }
 
     function renderGoalDot(goal, sessionsForGoal) {
-      // Purple if blocked
-      if (isGoalBlocked(goal)) {
-        return `<span class="goal-dot blocked" title="Blocked (next task)"></span>`;
-      }
-
-      // Use the newest session in this goal to determine status
       let newest = null;
       for (const key of (sessionsForGoal || [])) {
         const s = state.sessions.find(ss => ss.key === key);
@@ -2308,15 +2326,15 @@ function initAutoArchiveUI() {
         if (!newest || (s.updatedAt || 0) > (newest.updatedAt || 0)) newest = s;
       }
       const sessionKey = newest?.key;
-      const st = sessionKey ? getAgentStatus(sessionKey) : 'offline';
-      const cls = st || 'offline';
-      const title = cls === 'thinking' ? 'Thinking' : cls === 'idle' ? 'Idle' : cls === 'error' ? 'Error' : 'Offline';
-      return `<span class="goal-dot ${cls}" title="${title}"></span>`;
+      const blinker = deriveSessionBlinker(sessionKey, { goalId: goal?.id });
+      const title = blinker?.label || 'Status';
+      const cls = blinker?.colorClass || 'blink-idle';
+      return `<span class="goal-dot blinker ${cls}" title="${escapeHtml(title)}"></span>`;
     }
 
 
     function renderCondoGoals(condo, sessionToGoal, goalById) {
-      const goals = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g));
+      const goals = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0);
       const goalRows = [];
 
       for (const goal of goals) {
@@ -2324,25 +2342,11 @@ function initAutoArchiveUI() {
         const sessKeys = Array.isArray(goal.sessions) ? goal.sessions : [];
         const sessionsForGoal = sessKeys.map(k => state.sessions.find(s => s.key === k)).filter(Boolean);
         sessionsForGoal.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        const dot = renderGoalDot(goal, sessKeys);
         goalRows.push(`
-          <div class=\"goal-item ${isActive}\" onclick=\"openGoal('${escapeHtml(goal.id)}')\">\n            <div class=\"goal-checkbox\"></div>\n            <span class=\"goal-name\">${escapeHtml(goal.title || 'Untitled goal')}</span>\n            <span class=\"goal-count\">${sessionsForGoal.length}</span>\n            <span class=\"goal-add\" title=\"New session for this goal\" onclick=\"event.stopPropagation(); openNewSession('${escapeHtml(condo.id)}','${escapeHtml(goal.id)}')\">+</span>\n          </div>
-          <div class=\"sessions-list\">\n            ${sessionsForGoal.map(s => renderSidebarSession(s)).join('')}\n          </div>
+          <div class=\"goal-item ${isActive}\" onclick=\"openGoal('${escapeHtml(goal.id)}')\">\n            ${dot}\n            <div class=\"goal-checkbox\"></div>\n            <span class=\"goal-name\">${escapeHtml(goal.title || 'Untitled goal')}</span>\n            <span class=\"goal-count\">${sessionsForGoal.length}</span>\n            <span class=\"goal-add\" title=\"New session for this goal\" onclick=\"event.stopPropagation(); openNewSession('${escapeHtml(condo.id)}','${escapeHtml(goal.id)}')\">+</span>\n          </div>
         `);
       }
-
-      const unassigned = condo.sessions.filter(s => !sessionToGoal.has(s.key));
-      unassigned.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      if (unassigned.length > 0) {
-        const isActive = state.currentGoalId === 'unassigned' ? 'active' : '';
-        goalRows.push(`
-          <div class=\"goal-item ${isActive}\" onclick=\"setCurrentGoal('unassigned', '${escapeHtml(condo.id)}')\">\n            <div class=\"goal-checkbox\"></div>\n            <span class=\"goal-name\">Unassigned</span>\n            <span class=\"goal-count\">${unassigned.length}</span>\n          </div>
-          <div class=\"sessions-list\">\n            ${unassigned.map(s => renderSidebarSession(s)).join('')}\n          </div>
-        `);
-      }
-
-      goalRows.push(`
-        <div class=\"goal-item add-goal\" style=\"color: var(--text-muted); border: 1px dashed var(--border); margin-top: 4px;\" onclick=\"openNewGoal('${escapeHtml(condo.id)}')\">\n          <span style=\"font-size: 14px;\">+</span>\n          <span class=\"goal-name\">New goal...</span>\n        </div>
-      `);
 
       return goalRows.join('');
     }
@@ -2397,6 +2401,18 @@ function initAutoArchiveUI() {
       document.getElementById('headerStatusIndicator').style.display = 'none';
 
       renderGoalView();
+
+      // If we explicitly requested a fresh goal session (via + New inside a goal),
+      // clear the selected goal chat session so the kickoff overlay is shown.
+      if (state.forceNewGoalSessionGoalId === goalId) {
+        state.forceNewGoalSessionGoalId = null;
+        state.goalChatSessionKey = null;
+        setGoalChatLocked(true);
+        const chatMetaEl = document.getElementById('goalChatMeta');
+        if (chatMetaEl) chatMetaEl.textContent = 'New session not started';
+        renderGoalChat();
+      }
+
       renderDetailPanel();
       updateMobileHeader();
       closeSidebar();
@@ -2564,20 +2580,17 @@ function initAutoArchiveUI() {
         defDisplay.innerHTML = notes ? `${escapeHtml(notes)} <small>(click to edit)</small>` : `Click to add a definition… <small>(click to edit)</small>`;
       }
 
-      // Goal chat should load the latest session for this goal
+      // Goal chat should load the latest session for this goal (unless user chose a history entry)
       const sess = Array.isArray(goal.sessions) ? goal.sessions : [];
       const latestKey = getLatestGoalSessionKey(goal);
-      state.goalChatSessionKey = latestKey;
-      setGoalChatLocked(!latestKey);
-
-      const chatMetaEl = document.getElementById('goalChatMeta');
-      if (chatMetaEl) {
-        if (!latestKey) chatMetaEl.textContent = 'No session yet';
-        else {
-          const s = (state.sessions || []).find(x => x.key === latestKey);
-          chatMetaEl.textContent = s ? `${getSessionName(s)} · ${getSessionMeta(s)}` : latestKey;
-        }
+      const hasSelection = state.goalChatSessionKey && sess.includes(state.goalChatSessionKey);
+      if (!hasSelection) {
+        state.goalChatSessionKey = latestKey;
       }
+      setGoalChatLocked(!state.goalChatSessionKey);
+
+      updateGoalChatMeta(state.goalChatSessionKey);
+      renderGoalHistoryPicker(goal);
 
       renderGoalChat();
 
@@ -2598,6 +2611,50 @@ function initAutoArchiveUI() {
       });
       scored.sort((a, b) => (b.t || 0) - (a.t || 0));
       return scored[0]?.k || keys[0];
+    }
+
+    function updateGoalChatMeta(sessionKey) {
+      const chatMetaEl = document.getElementById('goalChatMeta');
+      if (!chatMetaEl) return;
+      if (!sessionKey) {
+        chatMetaEl.textContent = 'No session yet';
+        return;
+      }
+      const s = (state.sessions || []).find(x => x.key === sessionKey);
+      chatMetaEl.textContent = s ? `${getSessionName(s)} · ${getSessionMeta(s)}` : sessionKey;
+    }
+
+    function renderGoalHistoryPicker(goal) {
+      const wrap = document.getElementById('goalHistoryWrap');
+      const select = document.getElementById('goalHistorySelect');
+      if (!wrap || !select) return;
+      const sess = Array.isArray(goal?.sessions) ? goal.sessions.slice() : [];
+      if (!sess.length) {
+        wrap.style.display = 'none';
+        return;
+      }
+
+      const byKey = new Map((state.sessions || []).map(s => [s.key, s]));
+      const rows = sess.map(key => {
+        const s = byKey.get(key);
+        const updatedAt = Number(s?.updatedAt || s?.updatedAtMs || 0);
+        const label = s ? `${getSessionName(s)} · ${getSessionMeta(s)}` : key;
+        return { key, label, updatedAt };
+      }).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+      select.innerHTML = rows.map(r => `<option value="${escapeHtml(r.key)}">${escapeHtml(r.label)}</option>`).join('');
+      const current = state.goalChatSessionKey && sess.includes(state.goalChatSessionKey) ? state.goalChatSessionKey : rows[0]?.key;
+      if (current) select.value = current;
+
+      wrap.style.display = rows.length > 1 ? 'flex' : 'none';
+    }
+
+    function handleGoalHistoryChange(value) {
+      if (!value || value === state.goalChatSessionKey) return;
+      state.goalChatSessionKey = value;
+      setGoalChatLocked(false);
+      updateGoalChatMeta(value);
+      renderGoalChat();
     }
 
     async function renderGoalChat() {
@@ -2736,7 +2793,7 @@ function initAutoArchiveUI() {
               const transcriptText = transcripts.filter(Boolean).join('\n\n');
               const voiceBlock = [transcriptText || '', ...lines].filter(Boolean).join('\n\n');
               queuedText = queuedText ? [queuedText, voiceBlock].filter(Boolean).join('\n\n') : voiceBlock;
-              queuedAttachments = undefined;
+              queuedAttachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
               MediaUpload.clearFiles();
             } catch (err) {
               MediaUpload.clearFiles();
@@ -2808,7 +2865,7 @@ function initAutoArchiveUI() {
             if (!finalMessage) finalMessage = voiceBlock;
             else finalMessage = [finalMessage, voiceBlock].filter(Boolean).join('\n\n');
 
-            attachments = undefined;
+            attachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
             MediaUpload.clearFiles();
           } catch (err) {
             MediaUpload.clearFiles();
@@ -5271,7 +5328,17 @@ Response format:
     function openNewSession(condoId, goalId = null) {
       const c = condoId || state.currentCondoId || '';
       const g = goalId || '';
-      const path = g ? `new-session/${encodeURIComponent(c)}/${encodeURIComponent(g)}` : `new-session/${encodeURIComponent(c)}`;
+
+      // If we're creating a session from within a goal context, don't show the New Session modal.
+      // Instead: open the goal view in a "not started" state so the user can click "Kick Off Goal"
+      // to create the first message and begin.
+      if (g) {
+        state.forceNewGoalSessionGoalId = g;
+        navigateTo(`goal/${encodeURIComponent(g)}`);
+        return;
+      }
+
+      const path = `new-session/${encodeURIComponent(c)}`;
       navigateTo(path);
     }
 
@@ -6240,8 +6307,8 @@ Response format:
               if (!queuedText) queuedText = voiceBlock;
               else queuedText = [queuedText, voiceBlock].filter(Boolean).join('\n\n');
 
-              // Voice path produces a pure-text queued message (no gateway attachments)
-              queuedAttachments = undefined;
+              // A+B: include the audio as a real gateway attachment so it can forward to Telegram/etc
+              queuedAttachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
               MediaUpload.clearFiles();
             } catch (err) {
               MediaUpload.clearFiles();
@@ -6287,7 +6354,7 @@ Response format:
         const files = MediaUpload.getPendingFiles();
         const hasAudio = files.some(f => f.fileType === 'audio');
 
-        // If any audio is present: upload to Sharp first, transcribe locally, then send transcript + link.
+        // If any audio is present: upload to ClawCondos first, transcribe locally, then send transcript + link.
         if (hasAudio) {
           // Give immediate user feedback (upload/transcribe can take time, esp. first run while Whisper model downloads)
           state.isThinking = true;
@@ -6326,6 +6393,9 @@ Response format:
               // append attachments + transcript under user text
               finalMessage = [finalMessage, transcriptText, ...lines].filter(Boolean).join('\n\n');
             }
+
+            // A+B: attach audio bytes to the outgoing gateway message
+            attachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
 
             MediaUpload.clearFiles();
           } catch (err) {

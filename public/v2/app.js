@@ -2329,20 +2329,21 @@ function initAutoArchiveUI() {
     }
 
     async function renderGoalChat() {
-      const box = document.getElementById('goalChatMessages');
+      const box = document.getElementById('goal_chatMessages');
       if (!box) return;
 
       const key = state.goalChatSessionKey;
       if (!key) {
-        box.innerHTML = `<div class="empty-state">No sessions for this goal yet. Start a new one with “＋ New”.</div>`;
+        box.innerHTML = `<div class="message system">No sessions for this goal yet. Start a new one with “＋ New”.</div>`;
         return;
       }
 
-      box.innerHTML = `<div class="message system">Loading latest session…</div>`;
+      box.innerHTML = `<div class="message system">Loading history…</div>`;
       try {
         const result = await rpcCall('chat.history', { sessionKey: key, limit: 50 });
         const messages = result?.messages || [];
         renderChatHistoryInto(box, messages);
+        scrollChatPanelToBottom('goal');
       } catch (err) {
         box.innerHTML = `<div class="message system">Error loading: ${escapeHtml(err.message)}</div>`;
       }
@@ -2373,9 +2374,19 @@ function initAutoArchiveUI() {
         }
         return '';
       }).filter(Boolean).join('');
+    }
 
-      // scroll
-      container.scrollTop = container.scrollHeight;
+    function scrollChatPanelToBottom(prefix, force = true) {
+      const id = prefix ? `${prefix}_chatMessages` : 'chatMessages';
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+
+      // hide jump button
+      const jump = document.getElementById(prefix ? `${prefix}_jumpToLatest` : 'jumpToLatest');
+      if (jump) jump.style.display = 'none';
+      const cnt = document.getElementById(prefix ? `${prefix}_jumpToLatestCount` : 'jumpToLatestCount');
+      if (cnt) cnt.style.display = 'none';
     }
 
     function handleGoalChatKey(event) {
@@ -6221,6 +6232,7 @@ Response format:
     // INIT
     // ═══════════════════════════════════════════════════════════════
     function initChatUX() {
+      // Main session chat
       const container = document.getElementById('chatMessages');
       if (container && !container.dataset.scrollListenerAttached) {
         container.dataset.scrollListenerAttached = '1';
@@ -6242,6 +6254,34 @@ Response format:
           state.chatAutoScroll = true;
           state.chatUnseenCount = 0;
           scrollChatToBottom(true);
+        });
+      }
+
+      // Goal chat (reuse same UX)
+      const g = document.getElementById('goal_chatMessages');
+      if (g && !g.dataset.scrollListenerAttached) {
+        g.dataset.scrollListenerAttached = '1';
+        g.addEventListener('scroll', () => {
+          const nearBottom = isNearChatBottom(g);
+          state.goalChatAutoScroll = nearBottom;
+          if (nearBottom) {
+            state.goalChatUnseenCount = 0;
+            const jump = document.getElementById('goal_jumpToLatest');
+            if (jump) jump.style.display = 'none';
+            const cnt = document.getElementById('goal_jumpToLatestCount');
+            if (cnt) cnt.style.display = 'none';
+          }
+        }, { passive: true });
+      }
+
+      const gj = document.getElementById('goal_jumpToLatest');
+      if (gj && !gj.dataset.clickAttached) {
+        gj.dataset.clickAttached = '1';
+        gj.addEventListener('click', (e) => {
+          e.preventDefault();
+          state.goalChatAutoScroll = true;
+          state.goalChatUnseenCount = 0;
+          scrollChatPanelToBottom('goal', true);
         });
       }
 

@@ -392,7 +392,21 @@
                   </div>
                 </div>
 
-                <div class="goal-chat-body" id="goalChatMessages"></div>
+                <div class="goal-chat-body" style="padding:0; display:flex; flex-direction:column; min-height:0;">
+                  <div class="chat-messages" id="goal_chatMessages"></div>
+                  <button class="jump-to-latest" id="goal_jumpToLatest" title="Jump to latest" style="right: 14px; bottom: 92px;">
+                    <span class="jump-to-latest-label">Jump to latest</span>
+                    <span class="jump-to-latest-count" id="goal_jumpToLatestCount" style="display:none;">0</span>
+                  </button>
+
+                  <div class="drop-overlay" id="goal_dropOverlay">
+                    <div class="drop-overlay-content">
+                      <div class="drop-overlay-icon">📎</div>
+                      <div class="drop-overlay-text">Drop files here</div>
+                      <div class="drop-overlay-hint">Images and audio supported</div>
+                    </div>
+                  </div>
+                </div>
 
                 <div id="composerMountGoal"></div>
               </section>

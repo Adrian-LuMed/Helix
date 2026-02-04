@@ -1390,9 +1390,11 @@ body {
 }
 
 /* Ensure message list can actually scroll inside flex column */
-#chatMessages.chat-messages {
+#chatMessages.chat-messages,
+#goal_chatMessages.chat-messages {
   flex: 1;
   min-height: 0;
+  overflow: auto;
 }
 
 /* Remove "inset" look: top & bottom bars should touch the wrapper edges */
@@ -1418,6 +1420,14 @@ body {
 
 #chatArea .chat-messages {
   padding: 16px !important;
+  position: relative;
+  scroll-behavior: smooth;
+  overscroll-behavior: contain;
+}
+
+/* Goal chat uses the same message list component (but outside #chatArea) */
+#goal_chatMessages.chat-messages {
+  padding: 16px;
   position: relative;
   scroll-behavior: smooth;
   overscroll-behavior: contain;

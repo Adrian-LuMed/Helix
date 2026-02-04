@@ -1,7 +1,7 @@
 /**
  * Sharp Media Upload Module
  * Handles image and audio uploads for chat
- * 
+ *
  * Architecture:
  * - MediaUploader: Core upload logic
  * - MediaPreview: UI for showing pending attachments
@@ -79,7 +79,7 @@ const MediaUpload = (() => {
 
     const id = generateId();
     const previewUrl = validation.fileType === 'image' ? URL.createObjectURL(file) : null;
-    
+
     const fileEntry = {
       id,
       file,
@@ -93,7 +93,7 @@ const MediaUpload = (() => {
     pendingFiles.push(fileEntry);
     renderPreview();
     emit('filesChanged', { files: pendingFiles });
-    
+
     return fileEntry;
   }
 
@@ -136,7 +136,7 @@ const MediaUpload = (() => {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       const formData = new FormData();
-      
+
       formData.append('file', fileEntry.file);
       formData.append('sessionKey', sessionKey || 'unknown');
 
@@ -254,37 +254,37 @@ const MediaUpload = (() => {
   // ═══════════════════════════════════════════════════════════════
   // UI RENDERING
   // ═══════════════════════════════════════════════════════════════
+  // Multiple mounts can render the same pendingFiles into different preview containers.
+  const mounts = []; // { viewEl, inputEl, fileInputEl, previewEl, dropOverlayEl, dropVisible }
+
   function renderPreview() {
-    let container = document.getElementById('mediaPreviewContainer');
-    
-    if (pendingFiles.length === 0) {
-      if (container) container.innerHTML = '';
-      return;
-    }
+    for (const m of mounts) {
+      const container = m.previewEl;
+      if (!container) continue;
 
-    if (!container) {
-      console.warn('Media preview container not found');
-      return;
-    }
+      if (pendingFiles.length === 0) {
+        container.innerHTML = '';
+        continue;
+      }
 
-    container.innerHTML = pendingFiles.map(f => {
-      const isImage = f.fileType === 'image';
-      const statusClass = f.status;
-      const progressBar = f.status === 'uploading' 
-        ? `<div class="media-progress"><div class="media-progress-bar" style="width: ${f.progress}%"></div></div>`
-        : '';
+      container.innerHTML = pendingFiles.map(f => {
+        const isImage = f.fileType === 'image';
+        const statusClass = f.status;
+        const progressBar = f.status === 'uploading'
+          ? `<div class="media-progress"><div class="media-progress-bar" style="width: ${f.progress}%"></div></div>`
+          : '';
 
-      if (isImage && f.previewUrl) {
-        return `
-          <div class="media-preview-item ${statusClass}" data-id="${f.id}">
-            <img src="${f.previewUrl}" alt="${escapeHtml(f.file.name)}">
-            <button class="media-remove-btn" onclick="MediaUpload.removeFile('${f.id}')" title="Remove">×</button>
-            ${progressBar}
-            ${f.status === 'error' ? '<div class="media-error">!</div>' : ''}
-          </div>
-        `;
-      } else {
-        // Audio file
+        if (isImage && f.previewUrl) {
+          return `
+            <div class="media-preview-item ${statusClass}" data-id="${f.id}">
+              <img src="${f.previewUrl}" alt="${escapeHtml(f.file.name)}">
+              <button class="media-remove-btn" onclick="MediaUpload.removeFile('${f.id}')" title="Remove">×</button>
+              ${progressBar}
+              ${f.status === 'error' ? '<div class="media-error">!</div>' : ''}
+            </div>
+          `;
+        }
+
         const icon = f.fileType === 'audio' ? '🎵' : '📎';
         return `
           <div class="media-preview-item audio ${statusClass}" data-id="${f.id}">
@@ -295,16 +295,12 @@ const MediaUpload = (() => {
             ${f.status === 'error' ? '<div class="media-error">!</div>' : ''}
           </div>
         `;
-      }
-    }).join('');
+      }).join('');
+    }
   }
 
-  function showDropOverlay(show) {
-    const overlay = document.getElementById('dropOverlay');
-    if (overlay) {
-      overlay.classList.toggle('visible', show);
-    }
-    dropOverlayVisible = show;
+  function showDropOverlay(overlayEl, show) {
+    if (overlayEl) overlayEl.classList.toggle('visible', show);
   }
 
   function showError(message) {
@@ -322,44 +318,70 @@ const MediaUpload = (() => {
   function handleFileSelect(event) {
     const files = event.target.files;
     if (!files) return;
-    
+
     for (const file of files) {
       addFile(file);
     }
-    
+
     // Reset input so same file can be selected again
     event.target.value = '';
   }
 
-  function handleDragOver(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!dropOverlayVisible) showDropOverlay(true);
-  }
+  function mount({ viewId, inputId, fileInputId, previewContainerId, dropOverlayId }) {
+    const viewEl = document.getElementById(viewId);
+    const inputEl = document.getElementById(inputId);
+    const fileInputEl = document.getElementById(fileInputId);
+    const previewEl = document.getElementById(previewContainerId);
+    const dropOverlayEl = document.getElementById(dropOverlayId);
 
-  function handleDragLeave(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    // Only hide if leaving the chat area entirely
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = event.clientX;
-    const y = event.clientY;
-    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
-      showDropOverlay(false);
+    if (!viewEl || !inputEl || !fileInputEl || !previewEl || !dropOverlayEl) {
+      console.warn('[MediaUpload] mount missing elements', { viewId, inputId, fileInputId, previewContainerId, dropOverlayId });
+      return;
     }
-  }
 
-  function handleDrop(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    showDropOverlay(false);
-
-    const files = event.dataTransfer?.files;
-    if (!files) return;
-
-    for (const file of files) {
-      addFile(file);
+    // dedupe
+    if (mounts.find(m => m.viewEl === viewEl && m.inputEl === inputEl)) {
+      renderPreview();
+      return;
     }
+
+    const m = { viewEl, inputEl, fileInputEl, previewEl, dropOverlayEl };
+    mounts.push(m);
+
+    // drag & drop
+    viewEl.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showDropOverlay(dropOverlayEl, true);
+    });
+
+    viewEl.addEventListener('dragleave', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = event.currentTarget.getBoundingClientRect();
+      const x = event.clientX;
+      const y = event.clientY;
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+        showDropOverlay(dropOverlayEl, false);
+      }
+    });
+
+    viewEl.addEventListener('drop', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showDropOverlay(dropOverlayEl, false);
+      const files = event.dataTransfer?.files;
+      if (!files) return;
+      for (const file of files) addFile(file);
+    });
+
+    // paste
+    inputEl.addEventListener('paste', handlePaste);
+
+    // file input
+    fileInputEl.addEventListener('change', handleFileSelect);
+
+    renderPreview();
   }
 
   function handlePaste(event) {
@@ -401,25 +423,14 @@ const MediaUpload = (() => {
   // INITIALIZATION
   // ═══════════════════════════════════════════════════════════════
   function init() {
-    // Set up drag & drop on chat view
-    const chatView = document.getElementById('chatView');
-    if (chatView) {
-      chatView.addEventListener('dragover', handleDragOver);
-      chatView.addEventListener('dragleave', handleDragLeave);
-      chatView.addEventListener('drop', handleDrop);
-    }
-
-    // Set up paste handler on chat input
-    const chatInput = document.getElementById('chatInput');
-    if (chatInput) {
-      chatInput.addEventListener('paste', handlePaste);
-    }
-
-    // Set up file input
-    const fileInput = document.getElementById('mediaFileInput');
-    if (fileInput) {
-      fileInput.addEventListener('change', handleFileSelect);
-    }
+    // default mount for main chat composer
+    mount({
+      viewId: 'chatView',
+      inputId: 'chatInput',
+      fileInputId: 'mediaFileInput',
+      previewContainerId: 'mediaPreviewContainer',
+      dropOverlayId: 'dropOverlay',
+    });
 
     console.log('[MediaUpload] Initialized');
   }
@@ -438,6 +449,7 @@ const MediaUpload = (() => {
     uploadAllPending,
     getUploadedUrls,
     showDropOverlay,
+    mount,
     on,
     off,
     // Expose config for debugging

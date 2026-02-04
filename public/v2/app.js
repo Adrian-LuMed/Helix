@@ -2357,6 +2357,7 @@ function initAutoArchiveUI() {
     }
 
     function handleGoalChatKey(event) {
+      // Deprecated: goal chat composer is now mounted via mountComposer.
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         sendGoalChatMessage();
@@ -2370,27 +2371,50 @@ function initAutoArchiveUI() {
     }
 
     async function sendGoalChatMessage() {
-      const input = document.getElementById('goalChatInput');
+      const input = document.getElementById('goal_chatInput');
       const box = document.getElementById('goalChatMessages');
       const key = state.goalChatSessionKey;
       if (!input || !box || !key) return;
 
       const text = (input.value || '').trim();
-      if (!text) return;
+      const hasMedia = typeof MediaUpload !== 'undefined' && MediaUpload.hasPendingFiles && MediaUpload.hasPendingFiles();
+
+      if (!text && !hasMedia) return;
 
       input.value = '';
+      autoResize(input);
+
+      let finalMessage = text;
+      let attachments = undefined;
+
+      if (hasMedia) {
+        try {
+          attachments = await MediaUpload.buildGatewayAttachments();
+          if (!finalMessage) {
+            const files = MediaUpload.getPendingFiles();
+            finalMessage = files.map(f => `[attachment: ${f.file.name}]`).join('\n');
+          }
+          MediaUpload.clearFiles();
+        } catch (err) {
+          box.insertAdjacentHTML('beforeend', `<div class="message system">Attachment prep error: ${escapeHtml(err.message)}</div>`);
+          box.scrollTop = box.scrollHeight;
+          return;
+        }
+      }
 
       // optimistic render
-      box.insertAdjacentHTML('beforeend', `<div class="message user"><div class="message-content">${formatMessage(escapeHtml(text))}</div></div>`);
-      box.scrollTop = box.scrollHeight;
+      if (finalMessage) {
+        box.insertAdjacentHTML('beforeend', `<div class="message user"><div class="message-content">${formatMessage(escapeHtml(finalMessage))}</div></div>`);
+        box.scrollTop = box.scrollHeight;
+      }
 
       try {
         await rpcCall('chat.send', {
           sessionKey: key,
-          message: text,
+          message: finalMessage || '',
+          attachments,
           idempotencyKey: `goalmsg-${key}-${Date.now()}`,
         }, 130000);
-        // refresh view so assistant reply shows
         renderGoalChat();
       } catch (err) {
         box.insertAdjacentHTML('beforeend', `<div class="message system">Error: ${escapeHtml(err.message)}</div>`);
@@ -2610,17 +2634,91 @@ function initAutoArchiveUI() {
       }
     }
 
-    async function promptDeleteGoal() {
+    function isGoalDropped(goal) {
+      return !!(goal && (goal.dropped || goal.status === 'dropped' || goal.deleted === true));
+    }
+
+    function showArchivedGoalsModal() {
+      const modal = document.getElementById('archivedGoalsModal');
+      if (!modal) return;
+      modal.classList.remove('hidden');
+      if (!state.archivedTab) state.archivedTab = 'done';
+      renderArchivedGoals();
+    }
+
+    function hideArchivedGoalsModal() {
+      const modal = document.getElementById('archivedGoalsModal');
+      if (!modal) return;
+      modal.classList.add('hidden');
+    }
+
+    function setArchivedTab(tab) {
+      state.archivedTab = tab;
+      renderArchivedGoals();
+    }
+
+    function renderArchivedGoals() {
+      const list = document.getElementById('archivedGoalsList');
+      if (!list) return;
+
+      const doneBtn = document.getElementById('archTabDone');
+      const dropBtn = document.getElementById('archTabDropped');
+      if (doneBtn) doneBtn.classList.toggle('active', state.archivedTab === 'done');
+      if (dropBtn) dropBtn.classList.toggle('active', state.archivedTab === 'dropped');
+
+      const condoId = state.currentCondoId;
+      const all = (state.goals || []).filter(g => (g.condoId || 'misc:default') === condoId);
+      const items = (state.archivedTab === 'dropped')
+        ? all.filter(g => isGoalDropped(g))
+        : all.filter(g => isGoalCompleted(g) && !isGoalDropped(g));
+
+      if (!items.length) {
+        list.innerHTML = `<div class="empty-state">Nothing here yet.</div>`;
+        return;
+      }
+
+      list.innerHTML = items
+        .sort((a, b) => Number(b.updatedAtMs || b.updatedAt || 0) - Number(a.updatedAtMs || a.updatedAt || 0))
+        .map(g => {
+          const updated = formatTimestamp(g.updatedAtMs || g.updatedAt || g.createdAtMs || Date.now());
+          const pill = state.archivedTab === 'dropped' ? 'dropped' : 'done';
+          return `
+            <div class="goal-picker-row" style="cursor:pointer" onclick="openGoal('${escapeHtml(g.id)}')">
+              <div class="goal-picker-title">${escapeHtml(g.title || 'Untitled goal')}</div>
+              <div class="goal-picker-meta">${pill} · updated ${escapeHtml(updated)}</div>
+              <div style="margin-top:8px; display:flex; gap:8px;">
+                ${state.archivedTab === 'dropped' ? `<button class=\"ghost-btn\" onclick=\"event.stopPropagation(); restoreGoal('${escapeHtml(g.id)}')\">Restore</button>` : ''}
+                ${state.archivedTab === 'done' ? `<button class=\"ghost-btn\" onclick=\"event.stopPropagation(); markGoalActive('${escapeHtml(g.id)}')\">Mark active</button>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+    }
+
+    async function restoreGoal(goalId) {
+      await updateGoal(goalId, { dropped: false, status: 'active' });
+      await loadGoals();
+      renderCondoView();
+      renderArchivedGoals();
+    }
+
+    async function markGoalActive(goalId) {
+      await updateGoal(goalId, { completed: false, status: 'active' });
+      await loadGoals();
+      renderCondoView();
+      renderArchivedGoals();
+    }
+
+    async function promptDropGoal() {
       const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
       if (!goal) return;
-      if (!confirm(`Delete goal "${goal.title}"? This does not delete sessions.`)) return;
+      if (!confirm(`Drop goal "${goal.title}"?`)) return;
       try {
-        const res = await fetch(`/api/goals/${encodeURIComponent(goal.id)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed');
+        await updateGoal(goal.id, { dropped: true, status: 'dropped', droppedAtMs: Date.now() });
         await loadGoals();
-        navigateTo('dashboard');
+        navigateTo(`condo/${encodeURIComponent(goal.condoId || state.currentCondoId || 'misc:default')}`);
       } catch {
-        showToast('Failed to delete goal', 'error');
+        showToast('Failed to drop goal', 'error');
       }
     }
 
@@ -4466,8 +4564,9 @@ Response format:
       if (titleEl) titleEl.textContent = condoName;
 
       const allGoals = (state.goals || []).filter(g => (g.condoId || 'misc:default') === condoId);
-      const activeGoals = allGoals.filter(g => !isGoalCompleted(g));
-      const completedGoals = allGoals.filter(g => isGoalCompleted(g));
+      const activeGoals = allGoals.filter(g => !isGoalCompleted(g) && !isGoalDropped(g));
+      const completedGoals = allGoals.filter(g => isGoalCompleted(g) && !isGoalDropped(g));
+      const droppedGoals = allGoals.filter(g => isGoalDropped(g));
 
       const doing = activeGoals.filter(g => (g.status || 'active') === 'doing' || (g.priority === 'P0'));
       const blocked = activeGoals.filter(g => (g.status || '').toLowerCase() === 'blocked');
@@ -4478,6 +4577,8 @@ Response format:
       const statBlocked = document.getElementById('condoStatBlocked');
       if (statActive) statActive.textContent = String(activeGoals.length);
       if (statTotal) statTotal.textContent = String(allGoals.length);
+      const statDropped = document.getElementById('condoStatDropped');
+      if (statDropped) statDropped.textContent = String(droppedGoals.length);
       if (statDoing) statDoing.textContent = String(doing.length);
       if (statBlocked) statBlocked.textContent = String(blocked.length);
 
@@ -5532,16 +5633,128 @@ Response format:
         stopAgent();
       }
     }
-    
+
     function autoResize(el) {
       el.style.height = 'auto';
       el.style.height = Math.min(el.scrollHeight, 200) + 'px';
     }
-    
+
     function updateSendButton() {
-      document.getElementById('sendBtn').disabled = state.isThinking;
+      // Primary chat composer
+      const sendBtn = document.getElementById('sendBtn');
+      if (sendBtn) sendBtn.disabled = state.isThinking;
       const stopBtn = document.getElementById('stopBtn');
       if (stopBtn) stopBtn.disabled = !state.isThinking;
+
+      // Goal composer uses separate ids
+      const sendGoal = document.getElementById('goal_sendBtn');
+      if (sendGoal) sendGoal.disabled = state.isThinking;
+      const stopGoal = document.getElementById('goal_stopBtn');
+      if (stopGoal) stopGoal.disabled = !state.isThinking;
+    }
+
+    function composerTemplate(prefix) {
+      const p = prefix ? `${prefix}_` : '';
+      const inputId = prefix ? `${prefix}_chatInput` : 'chatInput';
+      const fileId = prefix ? `${prefix}_mediaFileInput` : 'mediaFileInput';
+      const prevId = prefix ? `${prefix}_mediaPreviewContainer` : 'mediaPreviewContainer';
+      const dropId = prefix ? `${prefix}_dropOverlay` : 'dropOverlay';
+      const queueId = prefix ? `${prefix}_queueIndicator` : 'queueIndicator';
+      const queueCountId = prefix ? `${prefix}_queueCount` : 'queueCount';
+      const voiceId = prefix ? `${prefix}_voiceRecordBtn` : 'voiceRecordBtn';
+      const timerId = prefix ? `${prefix}_voiceTimer` : 'voiceTimer';
+      const stopId = prefix ? `${prefix}_stopBtn` : 'stopBtn';
+      const sendId = prefix ? `${prefix}_sendBtn` : 'sendBtn';
+
+      return `
+        <div class="chat-input-area">
+          <div class="queue-indicator" id="${queueId}" style="display:none">
+            <span>📨</span>
+            <span class="queue-count" id="${queueCountId}">0</span>
+            <span>queued</span>
+            <button class="clear-queue" onclick="clearMessageQueue()" title="Clear queue">✕</button>
+          </div>
+
+          <div id="${prevId}"></div>
+
+          <input type="file" id="${fileId}" accept="image/*,audio/*" multiple>
+
+          <div class="chat-input-wrapper">
+            <button class="attach-btn" onclick="document.getElementById('${fileId}').click()" title="Attach files">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+              </svg>
+            </button>
+            <textarea class="chat-input" id="${inputId}" placeholder="Type a message..." rows="1"></textarea>
+            <button class="stop-btn" id="${stopId}" onclick="stopAgent()" disabled title="Stop">⏹</button>
+            <button class="voice-btn" id="${voiceId}" title="Record voice" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zm5 11a5 5 0 01-10 0H5a7 7 0 0014 0h-2zm-5 9a7.001 7.001 0 006.93-6H19a8.99 8.99 0 01-14 0H5.07A7.001 7.001 0 0012 21z"/>
+              </svg>
+              <span class="voice-btn-text">Rec</span>
+              <span class="recording-timer" id="${timerId}">0:00</span>
+            </button>
+            <button class="send-btn" id="${sendId}">Send</button>
+          </div>
+
+          <div class="drop-overlay" id="${dropId}">
+            <div class="drop-overlay-content">
+              <div class="drop-overlay-icon">📎</div>
+              <div class="drop-overlay-text">Drop files here</div>
+              <div class="drop-overlay-hint">Images and audio supported</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function mountComposer(mountId, prefix, opts = {}) {
+      const mount = document.getElementById(mountId);
+      if (!mount) return;
+
+      mount.innerHTML = composerTemplate(prefix);
+
+      const inputId = prefix ? `${prefix}_chatInput` : 'chatInput';
+      const sendId = prefix ? `${prefix}_sendBtn` : 'sendBtn';
+
+      const input = document.getElementById(inputId);
+      const send = document.getElementById(sendId);
+
+      if (input) {
+        input.addEventListener('keydown', (e) => {
+          if (opts.onKeyDown) return opts.onKeyDown(e);
+          handleChatKey(e);
+        });
+        input.addEventListener('input', () => autoResize(input));
+      }
+
+      if (send) {
+        send.addEventListener('click', () => {
+          if (opts.onSend) return opts.onSend();
+          sendMessage();
+        });
+      }
+
+      // Mount MediaUpload + VoiceRecorder onto this composer if supported
+      try {
+        if (window.MediaUpload && typeof window.MediaUpload.mount === 'function') {
+          window.MediaUpload.mount({
+            prefix,
+            viewId: (prefix === 'goal') ? 'goalChatPanel' : 'chatView',
+            inputId: inputId,
+            fileInputId: prefix ? `${prefix}_mediaFileInput` : 'mediaFileInput',
+            previewContainerId: prefix ? `${prefix}_mediaPreviewContainer` : 'mediaPreviewContainer',
+            dropOverlayId: prefix ? `${prefix}_dropOverlay` : 'dropOverlay',
+          });
+        }
+        if (window.VoiceRecorder && typeof window.VoiceRecorder.mount === 'function') {
+          window.VoiceRecorder.mount({
+            prefix,
+            btnId: prefix ? `${prefix}_voiceRecordBtn` : 'voiceRecordBtn',
+            timerId: prefix ? `${prefix}_voiceTimer` : 'voiceTimer',
+          });
+        }
+      } catch {}
     }
     
     async function stopAgent() {
@@ -6001,6 +6214,28 @@ Response format:
       if (typeof window.showNotification !== 'function' && typeof window.showToast === 'function') {
         window.showNotification = (msg, type) => window.showToast(msg, type || 'info', 4000);
       }
+
+      // Mount reusable composers (chat + goal)
+      try {
+        mountComposer('composerMountChat', '', {
+          onSend: () => sendMessage(),
+          onKeyDown: (e) => handleChatKey(e),
+        });
+        mountComposer('composerMountGoal', 'goal', {
+          onSend: () => sendGoalChatMessage(),
+          onKeyDown: (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              sendGoalChatMessage();
+              return;
+            }
+            if (e.key === 'Escape' && state.isThinking) {
+              e.preventDefault();
+              stopAgent();
+            }
+          },
+        });
+      } catch {}
     }
 
     function init() {

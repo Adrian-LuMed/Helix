@@ -36,6 +36,10 @@ const VoiceRecorder = (() => {
     return document.getElementById(id);
   }
 
+  // Support multiple composers via mount({btnId, timerId, hintId?, meterId?}).
+  // If you don't mount, it defaults to the original chatView ids.
+  let mounted = null; // { btnId, timerId, hintId, meterId, meterLevelId }
+
   function pickMimeType() {
     if (!window.MediaRecorder) return null;
     for (const t of CONFIG.preferredMimeTypes) {
@@ -53,11 +57,15 @@ const VoiceRecorder = (() => {
     return `${m}:${String(r).padStart(2, '0')}`;
   }
 
+  function el(id) {
+    return mounted?.[id] ? $(mounted[id]) : $(id);
+  }
+
   function setUIRecording(isRecording) {
-    const btn = $('voiceRecordBtn');
-    const timer = $('voiceTimer');
-    const hint = $('voiceHint');
-    const meter = $('voiceMeter');
+    const btn = el('btnId') || $('voiceRecordBtn');
+    const timer = el('timerId') || $('voiceTimer');
+    const hint = el('hintId') || $('voiceHint');
+    const meter = el('meterId') || $('voiceMeter');
 
     if (btn) {
       btn.classList.toggle('recording', isRecording);
@@ -87,7 +95,7 @@ const VoiceRecorder = (() => {
   }
 
   function updateTimer() {
-    const timer = $('voiceTimer');
+    const timer = el('timerId') || $('voiceTimer');
     if (!timer) return;
     const elapsed = Date.now() - startedAt;
     timer.textContent = formatTime(elapsed);
@@ -134,7 +142,7 @@ const VoiceRecorder = (() => {
         const rms = Math.sqrt(sum / data.length);
         const level = Math.min(1, rms * 2.2);
 
-        const meter = $('voiceMeterLevel');
+        const meter = (mounted?.meterLevelId ? $(mounted.meterLevelId) : $('voiceMeterLevel'));
         if (meter) meter.style.width = `${Math.round(level * 100)}%`;
 
         meterRaf = requestAnimationFrame(tick);
@@ -211,7 +219,7 @@ const VoiceRecorder = (() => {
       analyser = null;
     }
 
-    const meter = $('voiceMeterLevel');
+    const meter = (mounted?.meterLevelId ? $(mounted.meterLevelId) : $('voiceMeterLevel'));
     if (meter) meter.style.width = '0%';
 
     // Convert chunks to file and add to MediaUpload
@@ -269,14 +277,33 @@ const VoiceRecorder = (() => {
     }
   }
 
-  function init() {
-    const btn = $('voiceRecordBtn');
+  function mount(opts = {}) {
+    mounted = {
+      btnId: opts.btnId || 'voiceRecordBtn',
+      timerId: opts.timerId || 'voiceTimer',
+      hintId: opts.hintId || 'voiceHint',
+      meterId: opts.meterId || 'voiceMeter',
+      meterLevelId: opts.meterLevelId || 'voiceMeterLevel',
+    };
+
+    const btn = $(mounted.btnId);
     if (!btn) return;
+
+    // avoid double-binding
+    if (btn.dataset.voiceBound) return;
+    btn.dataset.voiceBound = '1';
 
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       toggle();
     });
+
+    console.log('[VoiceRecorder] Mounted', mounted);
+  }
+
+  function init() {
+    // default mount for the primary chat composer
+    mount({ btnId: 'voiceRecordBtn', timerId: 'voiceTimer' });
 
     // Safety: stop recording when changing session
     if (window.state && typeof window.selectSession === 'function') {
@@ -300,6 +327,7 @@ const VoiceRecorder = (() => {
 
   return {
     init,
+    mount,
     start,
     stop,
     toggle,

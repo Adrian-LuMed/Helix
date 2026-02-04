@@ -4152,18 +4152,30 @@ Response format:
     async function checkAppStatus(app) {
       const dot = document.getElementById(`app-status-${app.id}`);
       if (!dot) return;
-      
+
+      const host = window.location.hostname;
+      const isLocal = host === 'localhost' || host === '127.0.0.1';
+
+      // On localhost, some app reverse-proxies may not be running; don't spam the console.
+      // Treat unknown/unreachable as 'idle' to keep the UI calm.
       try {
-        const res = await fetch(`/${app.id}/`, { method: 'HEAD' });
-        const ok = res.ok || res.status === 401;
-        dot.className = 'item-status ' + (ok ? 'active' : 'error');
-        app.statusClass = ok ? 'running' : 'stopped';
-        app.statusLabel = ok ? 'Running' : 'Stopped';
+        if (isLocal) {
+          dot.className = 'item-status idle';
+          app.statusClass = 'unknown';
+          app.statusLabel = 'Unknown';
+        } else {
+          const res = await fetch(`/${app.id}/`, { method: 'HEAD' });
+          const ok = res.ok || res.status === 401;
+          dot.className = 'item-status ' + (ok ? 'active' : 'error');
+          app.statusClass = ok ? 'running' : 'stopped';
+          app.statusLabel = ok ? 'Running' : 'Stopped';
+        }
       } catch {
-        dot.className = 'item-status error';
-        app.statusClass = 'stopped';
-        app.statusLabel = 'Stopped';
+        dot.className = 'item-status idle';
+        app.statusClass = 'unknown';
+        app.statusLabel = 'Unknown';
       }
+
       if (state.currentView === 'apps') {
         renderAppsGridView();
         renderDetailPanel();

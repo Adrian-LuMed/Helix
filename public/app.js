@@ -3,6 +3,8 @@
     // ═══════════════════════════════════════════════════════════════
     const WS_PROTOCOL_VERSION = 3;
     const RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 30000];
+    // Sidebar should only show recently-active sessions (unless pinned / running)
+    const SIDEBAR_HIDE_INACTIVE_MS = 15 * 60 * 1000; // 15 minutes
     
     // ═══════════════════════════════════════════════════════════════
     // STATE
@@ -10,7 +12,23 @@
     
     // Get configuration (from config.js)
     const config = window.ClawCondosConfig ? window.ClawCondosConfig.getConfig() : {};
-    
+
+    // localStorage keys (migrate from legacy "sharp_*" keys)
+    const LS_PREFIX = 'clawcondos_';
+    function lsGet(key, fallback = null) {
+      const v = localStorage.getItem(LS_PREFIX + key);
+      if (v != null) return v;
+      const legacy = localStorage.getItem('sharp_' + key);
+      if (legacy != null) return legacy;
+      return fallback;
+    }
+    function lsSet(key, value) {
+      localStorage.setItem(LS_PREFIX + key, value);
+    }
+    function lsRemove(key) {
+      localStorage.removeItem(LS_PREFIX + key);
+    }
+
     const state = {
       // Data
       sessions: [],
@@ -19,13 +37,32 @@
       goals: [],
       currentGoalId: 'all',
       currentGoalOpenId: null,
+      currentCondoId: null,
+      newSessionCondoId: null,
+      newGoalCondoId: null,
       attachSessionKey: null,
       attachGoalId: null,
       
       // UI
-      currentView: 'overview',
+      currentView: 'dashboard',
       currentSession: null,
+      selectedAppId: null,
+      // Recurring tasks (cron)
+      selectedCronJobId: null,    // preferred: cron job id
+      cronJobs: [],
+      cronJobsLoaded: false,
+      cronRunsByJobId: {},
+      newSessionAgentId: null,
+      pendingRouteSessionKey: null,
+      pendingRouteGoalId: null,
+      pendingRouteCondoId: null,
+      pendingRouteAppId: null,
+      pendingRouteNewSession: null,
+      pendingRouteNewGoalCondoId: null,
       chatHistory: [],
+      // Cache last loaded history per session so UI doesn't go blank on transient disconnects.
+      sessionHistoryCache: new Map(), // Map<sessionKey, messages[]>
+      sessionHistoryLoadSeq: 0,
       isThinking: false,
       messageQueue: [],  // Queued messages when agent is busy
 
@@ -33,6 +70,14 @@
       sessionModelOverrides: (() => {
         try { return JSON.parse(lsGet('session_model_overrides', '{}') || '{}') || {}; } catch { return {}; }
       })(),
+
+      // Chat UX
+      chatAutoScroll: true,          // user is at bottom (or near-bottom)
+      chatUnseenCount: 0,            // new messages while scrolled up
+      streamingBuffers: new Map(),   // Map<runId, string>
+      streamingRaf: new Map(),       // Map<runId, rafId>
+      recentMessageFingerprints: new Map(), // Map<fingerprint, timestampMs>
+      recentMessageFingerprintPruneAt: 0,
       
       // Audio recording
       mediaRecorder: null,
@@ -40,25 +85,19 @@
       recordingStartTime: null,
       recordingTimerInterval: null,
       
-      // Multi-select
-      multiSelectMode: false,
-      selectedSessions: new Set(),
-      
       // Auth - loaded from config or localStorage
       // Token should be set via config.json or login modal, NOT hardcoded
-      token: (() => {
-        const t = localStorage.getItem('sharp_token');
-        if (!t || t === 'null' || t === 'undefined') return null;
-        return t;
-      })(),
+      token: lsGet('token', null),
       gatewayUrl: (() => {
         // Priority: localStorage > config > auto-detect
-        const saved = localStorage.getItem('sharp_gateway');
+        const saved = lsGet('gateway', null);
         if (saved && !saved.includes(':18789')) {
           return saved;
         }
         // Clear invalid old URLs
         if (saved && saved.includes(':18789') && window.location.hostname !== 'localhost') {
+          lsRemove('gateway');
+          // Also clear legacy if present
           localStorage.removeItem('sharp_gateway');
         }
         // Use config if available
@@ -83,6 +122,10 @@
       wsLastMessageAt: 0,
       wsReconnectAttempts: 0,
       connected: false,
+      connectionStatus: 'connecting',
+      wsLastClose: null,          // { code, reason, at }
+      wsLastError: null,          // string
+      wsLastConnectAttemptAt: 0,  // ms
       connectNonce: null,
       connectSent: false,
       rpcIdCounter: 0,
@@ -90,48 +133,56 @@
       
       // Streaming
       activeRuns: new Map(),
-      activeRunsStore: JSON.parse(localStorage.getItem('sharp_active_runs') || '{}'),  // Persisted: { sessionKey: { runId, startedAt } }
+      activeRunsStore: JSON.parse(lsGet('active_runs', '{}') || '{}'),  // Persisted: { sessionKey: { runId, startedAt } }
       sessionInputReady: new Map(),
       
       // Pin & Archive
-      pinnedSessions: JSON.parse(localStorage.getItem('sharp_pinned_sessions') || '[]'),
-      archivedSessions: JSON.parse(localStorage.getItem('sharp_archived_sessions') || '[]'),
+      pinnedSessions: JSON.parse(lsGet('pinned_sessions', '[]') || '[]'),
+      archivedSessions: JSON.parse(lsGet('archived_sessions', '[]') || '[]'),
       showArchived: false,
       
       // Custom session names
-      sessionNames: JSON.parse(localStorage.getItem('sharp_session_names') || '{}'),
+      sessionNames: JSON.parse(lsGet('session_names', '{}') || '{}'),
 
-      // Per-session UI verbose toggle (best-effort; actual runtime state lives server-side)
-      verboseBySession: JSON.parse(localStorage.getItem('sharp_verbose_by_session') || '{}'),
+      // Per-session UI verbose toggle (best-effort)
+      verboseBySession: JSON.parse(lsGet('verbose_by_session', '{}') || '{}'),
       
       // Search & Filters
       searchQuery: '',
       filterChannel: 'all',  // all, telegram, discord, signal, whatsapp, cron
       filterStatus: 'all',   // all, running, unread, error, recent, idle
+      recurringSearch: lsGet('recurring_search', '') || '',
+      recurringAgentFilter: lsGet('recurring_agent_filter', 'all') || 'all',
+      recurringEnabledOnly: lsGet('recurring_enabled_only', '0') === '1',
+      agentJobsSearchByAgent: JSON.parse(lsGet('agent_jobs_search', '{}') || '{}'),
+      agentJobsEnabledOnlyByAgent: JSON.parse(lsGet('agent_jobs_enabled_only', '{}') || '{}'),
       
       // Auto-title generation tracking
       generatingTitles: new Set(),  // Currently generating
       attemptedTitles: new Set(),   // Already tried (avoid retries)
       
       // Auto-archive: 'never' or number of days
-      autoArchiveDays: localStorage.getItem('sharp_auto_archive_days') || '7',
+      autoArchiveDays: lsGet('auto_archive_days', '7') || '7',
       
       // Track when sessions were last viewed (for unread indicator)
-      lastViewedAt: JSON.parse(localStorage.getItem('sharp_last_viewed') || '{}'),
+      lastViewedAt: JSON.parse(lsGet('last_viewed', '{}') || '{}'),
       
       // Track which session groups are expanded (for nested view)
-      expandedGroups: JSON.parse(localStorage.getItem('sharp_expanded_groups') || '{}'),
+      expandedGroups: JSON.parse(lsGet('expanded_groups', '{}') || '{}'),
+
+      // Track which condos are expanded/collapsed in sidebar
+      expandedCondos: JSON.parse(lsGet('expanded_condos', '{}') || '{}'),
 
       // Track which agent nodes are expanded in sidebar (Agents > Sessions/Subsessions)
-      expandedAgents: JSON.parse(localStorage.getItem('sharp_expanded_agents') || '{}'),
+      expandedAgents: JSON.parse(lsGet('expanded_agents', '{}') || '{}'),
       
       // Session status (two separate concepts)
       // 1) Brief current state (LLM-generated text)
-      sessionBriefStatus: JSON.parse(localStorage.getItem('sharp_session_brief_status') || '{}'),
+      sessionBriefStatus: JSON.parse(lsGet('session_brief_status', '{}') || '{}'),
       generatingStatus: new Set(),
 
       // 2) Agent lifecycle status (idle/thinking/offline/error)
-      sessionAgentStatus: JSON.parse(localStorage.getItem('sharp_session_agent_status') || '{}'),
+      sessionAgentStatus: JSON.parse(lsGet('session_agent_status', '{}') || '{}'),
       
       // Tool activity tracking (for compact indicator)
       activeTools: new Map(),  // Map<toolCallId, { name, args, output, startedAt, status }>
@@ -172,6 +223,40 @@
       }
       return { type: 'standalone', isGrouped: false };
     }
+
+    function getSessionCondoId(session) {
+      if (!session?.key) return 'unknown';
+      const parsed = parseSessionGroup(session.key);
+      if (parsed.type === 'topic') {
+        return `${parsed.groupKey}:topic:${parsed.topicId}`;
+      }
+      if (parsed.type === 'group') {
+        return parsed.groupKey;
+      }
+      if (session.key.startsWith('cron:')) return 'cron';
+      return `misc:${session.key.split(':')[0] || 'misc'}`;
+    }
+
+    function getSessionCondoName(session) {
+      if (!session) return 'Unknown';
+      if (session.key.startsWith('cron:')) return 'Recurring';
+      if (session.key.includes(':topic:')) return getSessionName(session);
+      if (session.key.includes(':group:')) {
+        const parsed = parseSessionGroup(session.key);
+        return parsed.groupKey ? getGroupDisplayName(parsed.groupKey) : getSessionName(session);
+      }
+      return session.displayName || session.label || 'Direct';
+    }
+
+    function isGoalCompleted(goal) {
+      return goal?.completed === true || goal?.status === 'done';
+    }
+
+    function getCondoIdForSessionKey(sessionKey) {
+      const session = state.sessions.find(s => s.key === sessionKey);
+      if (session) return getSessionCondoId(session);
+      return state.currentCondoId || null;
+    }
     
     function getGroupDisplayName(groupKey) {
       // Try to find a custom name for the group
@@ -187,7 +272,7 @@
     
     function toggleGroupExpanded(groupKey) {
       state.expandedGroups[groupKey] = !state.expandedGroups[groupKey];
-      localStorage.setItem('sharp_expanded_groups', JSON.stringify(state.expandedGroups));
+      lsSet('expanded_groups', JSON.stringify(state.expandedGroups));
       renderSessions();
     }
     
@@ -196,9 +281,20 @@
       return state.expandedGroups[groupKey] !== false;
     }
 
+    function toggleCondoExpanded(condoId) {
+      state.expandedCondos[condoId] = !isCondoExpanded(condoId);
+      lsSet('expanded_condos', JSON.stringify(state.expandedCondos));
+      renderCondos();
+    }
+
+    function isCondoExpanded(condoId) {
+      // Default: expanded unless explicitly set false
+      return state.expandedCondos[condoId] !== false;
+    }
+
     function toggleAgentExpanded(agentId) {
       state.expandedAgents[agentId] = !isAgentExpanded(agentId);
-      localStorage.setItem('sharp_expanded_agents', JSON.stringify(state.expandedAgents));
+      lsSet('expanded_agents', JSON.stringify(state.expandedAgents));
       renderAgents();
     }
 
@@ -258,7 +354,7 @@
           .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content.slice(0, 150) : ''}`)
           .join('\n');
         
-        const response = await fetch('api/openai/v1/chat/completions', {
+        const response = await fetch('/api/openai/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -277,7 +373,7 @@
           const status = data.choices?.[0]?.message?.content?.trim();
           if (status && status.length < 80) {
             state.sessionBriefStatus[key] = { text: status, updatedAt: Date.now() };
-            localStorage.setItem('sharp_session_brief_status', JSON.stringify(state.sessionBriefStatus));
+            lsSet('session_brief_status', JSON.stringify(state.sessionBriefStatus));
           }
         }
       } catch (err) {
@@ -335,14 +431,14 @@
     
     function markSessionRead(key) {
       state.lastViewedAt[key] = Date.now();
-      localStorage.setItem('sharp_last_viewed', JSON.stringify(state.lastViewedAt));
+      lsSet('last_viewed', JSON.stringify(state.lastViewedAt));
     }
     
     function markSessionUnread(key, event) {
       if (event) event.stopPropagation();
       // Set lastViewed to 0 so it appears unread
       state.lastViewedAt[key] = 0;
-      localStorage.setItem('sharp_last_viewed', JSON.stringify(state.lastViewedAt));
+      lsSet('last_viewed', JSON.stringify(state.lastViewedAt));
       renderSessions();
       renderSessionsGrid();
     }
@@ -352,7 +448,7 @@
       state.sessions.forEach(s => {
         state.lastViewedAt[s.key] = now;
       });
-      localStorage.setItem('sharp_last_viewed', JSON.stringify(state.lastViewedAt));
+      lsSet('last_viewed', JSON.stringify(state.lastViewedAt));
       renderSessions();
       renderSessionsGrid();
       showToast('All sessions marked as read');
@@ -369,7 +465,7 @@
       } else {
         state.pinnedSessions.push(key);
       }
-      localStorage.setItem('sharp_pinned_sessions', JSON.stringify(state.pinnedSessions));
+      lsSet('pinned_sessions', JSON.stringify(state.pinnedSessions));
       renderSessions();
       renderSessionsGrid();
     }
@@ -384,10 +480,10 @@
         const pinIdx = state.pinnedSessions.indexOf(key);
         if (pinIdx >= 0) {
           state.pinnedSessions.splice(pinIdx, 1);
-          localStorage.setItem('sharp_pinned_sessions', JSON.stringify(state.pinnedSessions));
+          lsSet('pinned_sessions', JSON.stringify(state.pinnedSessions));
         }
       }
-      localStorage.setItem('sharp_archived_sessions', JSON.stringify(state.archivedSessions));
+      lsSet('archived_sessions', JSON.stringify(state.archivedSessions));
       renderSessions();
       renderSessionsGrid();
     }
@@ -410,7 +506,7 @@
       } else {
         delete state.sessionNames[key];
       }
-      localStorage.setItem('sharp_session_names', JSON.stringify(state.sessionNames));
+      lsSet('session_names', JSON.stringify(state.sessionNames));
       renderSessions();
       renderSessionsGrid();
     }
@@ -481,7 +577,7 @@
     async function generateTitleWithLLM(conversation) {
       try {
         // Use server-side proxy that injects the API key
-        const response = await fetch('api/openai/v1/chat/completions', {
+        const response = await fetch('/api/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -611,12 +707,14 @@
     function handleSearchInput(value) {
       state.searchQuery = value.toLowerCase().trim();
       renderSessions();
+      renderSessionsGrid();
     }
     
     function clearSearch() {
       state.searchQuery = '';
       document.getElementById('sessionSearchInput').value = '';
       renderSessions();
+      renderSessionsGrid();
     }
     
     function handleSearchKeydown(event) {
@@ -625,7 +723,7 @@
         document.getElementById('sessionSearchInput').blur();
       } else if (event.key === 'Enter') {
         // Select first visible session
-        const firstSession = document.querySelector('#sessionsList .item');
+        const firstSession = document.querySelector('#sessionsList .session-item');
         if (firstSession) firstSession.click();
       }
     }
@@ -693,11 +791,13 @@
     function setFilterChannel(value) {
       state.filterChannel = value;
       renderSessions();
+      renderSessionsGrid();
     }
     
     function setFilterStatus(value) {
       state.filterStatus = value;
       renderSessions();
+      renderSessionsGrid();
     }
     
     // Keyboard shortcut: Cmd/Ctrl+K to focus search
@@ -713,11 +813,94 @@
     // ═══════════════════════════════════════════════════════════════
     function setAutoArchiveDays(value) {
       state.autoArchiveDays = value;
-      localStorage.setItem('sharp_auto_archive_days', value);
+      lsSet('auto_archive_days', value);
       console.log('[ClawCondos] Auto-archive set to:', value);
+      // Apply immediately so the sidebar updates without requiring a manual refresh.
+      if (state.sessions && state.sessions.length) {
+        checkAutoArchive();
+        renderSessions();
+        renderSessionsGrid();
+      }
     }
     
-    function initAutoArchiveUI() {
+    
+
+    // ═══════════════════════════════════════════════════════════════
+    // ACTIVITY WINDOW PRESET (Albert)
+    // Collapse all condos except those with goals modified in the last X.
+    // X comes from the preset dropdown.
+
+    function parseDaysValue(v) {
+      if (v == null) return null;
+      if (v === 'never') return null;
+      const n = parseFloat(String(v));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }
+
+    function goalLastActivityMs(goal) {
+      let t = 0;
+      if (goal?.updatedAtMs) t = Math.max(t, Number(goal.updatedAtMs) || 0);
+      if (goal?.createdAtMs) t = Math.max(t, Number(goal.createdAtMs) || 0);
+      // Also consider the most recently updated session inside the goal.
+      if (goal?.sessions && Array.isArray(goal.sessions) && state.sessions && state.sessions.length) {
+        for (const k of goal.sessions) {
+          const s = state.sessions.find(ss => ss.key === k);
+          if (s?.updatedAt) t = Math.max(t, Number(s.updatedAt) || 0);
+        }
+      }
+      return t;
+    }
+
+    function isGoalBlocked(goal) {
+      if (!goal) return false;
+      if (goal.status === 'blocked' || goal.blocked === true) return true;
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+      if (!tasks.length) return false;
+      const next = tasks.find(t => !(t?.done === true || t?.completed === true));
+      if (!next) return false;
+      return next.blocked === true || next.status === 'blocked' || next.state === 'blocked';
+    }
+
+    function applyActivityWindowPreset() {
+      const days = parseDaysValue(state.activityWindowDays);
+      if (!days) return;
+
+      const threshold = Date.now() - (days * 24 * 60 * 60 * 1000);
+
+      // Build condo -> goals mapping (pending goals only)
+      const recentCondos = new Set();
+      for (const g of (state.goals || [])) {
+        if (!g || isGoalCompleted(g)) continue;
+        const last = goalLastActivityMs(g);
+        if (last && last >= threshold) {
+          const condoId = g.condoId || 'misc:default';
+          recentCondos.add(condoId);
+        }
+      }
+
+      // Collapse everything except recent condos
+      const nextExpanded = {};
+      // Keep explicit expansion for current condo if it has recent activity, otherwise collapse it too.
+      // (Albert preference: collapse all except recent)
+      for (const condoId of Object.keys(state.expandedCondos || {})) {
+        nextExpanded[condoId] = false;
+      }
+      for (const condoId of recentCondos) {
+        nextExpanded[condoId] = true;
+      }
+      state.expandedCondos = nextExpanded;
+      lsSet('expanded_condos', JSON.stringify(state.expandedCondos));
+
+      renderGoals();
+    }
+
+    function setActivityWindowDays(value) {
+      state.activityWindowDays = value;
+      lsSet('activity_window_days', String(value));
+      // Apply immediately
+      applyActivityWindowPreset();
+    }
+function initAutoArchiveUI() {
       const select = document.getElementById('autoArchiveSelect');
       if (select) {
         select.value = state.autoArchiveDays;
@@ -756,7 +939,7 @@
       
       // Save if any were archived
       if (autoArchivedCount > 0) {
-        localStorage.setItem('sharp_archived_sessions', JSON.stringify(state.archivedSessions));
+        lsSet('archived_sessions', JSON.stringify(state.archivedSessions));
         showToast(`Auto-archived ${autoArchivedCount} inactive session${autoArchivedCount > 1 ? 's' : ''}`, 'info');
         renderSessions();
         renderSessionsGrid();
@@ -796,13 +979,14 @@
       
       state.connectNonce = null;
       state.connectSent = false;
+      state.wsLastConnectAttemptAt = Date.now();
       setConnectionStatus('connecting');
       
-      // Build WebSocket URL - use /ws path for Caddy proxy
+      // Build WebSocket URL
       let wsUrl = state.gatewayUrl.replace(/^http/, 'ws');
-      // If connecting through Caddy (port 9000 or no port), use /ws endpoint
+      // If connecting through Caddy (not directly to :18789), use the dedicated ClawCondos WS endpoint.
       if (!wsUrl.includes(':18789')) {
-        wsUrl = wsUrl.replace(/\/?$/, '/ws');
+        wsUrl = wsUrl.replace(/\/?$/, '/clawcondos-ws');
       }
       console.log('[WS] Connecting to', wsUrl);
       
@@ -833,10 +1017,13 @@
       };
       
       state.ws.onerror = (err) => {
+        const msg = (err && (err.message || err.type)) ? String(err.message || err.type) : 'WebSocket error';
+        state.wsLastError = msg;
         console.error('[WS] Error:', err);
       };
       
       state.ws.onclose = (event) => {
+        state.wsLastClose = { code: event?.code, reason: event?.reason || '', at: Date.now() };
         console.log('[WS] Closed:', event.code, event.reason);
         state.connected = false;
         state.ws = null;
@@ -844,6 +1031,28 @@
         state.connectSent = false;
         clearWsTimers();
         setConnectionStatus('error');
+        finalizeAllStreamingMessages('disconnected');
+
+        // If auth or handshake failed, prompt for token and STOP reconnect loop until user acts.
+        if (event?.code === 1008 && /unauthorized|password mismatch|device identity required|invalid connect params/i.test(event?.reason || '')) {
+          // Clear stored token to prevent infinite reconnect spam with a bad secret.
+          state.token = null;
+          lsRemove('token');
+          // Legacy cleanup
+          localStorage.removeItem('sharp_token');
+          localStorage.removeItem('sharp_gateway_token');
+
+          showLoginModal();
+          const errorDiv = document.getElementById('loginError');
+          if (errorDiv) {
+            errorDiv.textContent = event.reason || 'Authentication required';
+            errorDiv.style.display = 'block';
+          }
+
+          // Also show a toast so it's visible even if modal is dismissed.
+          showToast(event.reason || 'Authentication required', 'error', 8000);
+          return;
+        }
         
         for (const [id, pending] of state.rpcPending) {
           clearTimeout(pending.timeout);
@@ -908,18 +1117,19 @@
         minProtocol: WS_PROTOCOL_VERSION,
         maxProtocol: WS_PROTOCOL_VERSION,
         client: {
+          // Must be one of OpenClaw's allowed client IDs (see gateway protocol client-info)
           id: 'webchat-ui',
           displayName: 'ClawCondos Dashboard',
-          mode: 'webchat',
+          mode: 'ui',
           version: '2.0.0',
           platform: 'browser'
         }
       };
       
-      // Only include auth if we have a token/password
-      // NOTE: OpenClaw Gateway can use token or password auth depending on config.
+      // Authenticate. Different deployments may require password or token.
+      // We send both with the same user-provided secret for maximum compatibility.
       if (state.token) {
-        connectParams.auth = { password: state.token };
+        connectParams.auth = { token: state.token, password: state.token };
       }
       
       const connectFrame = {
@@ -946,11 +1156,15 @@
           setConnectionStatus('connected');
           hideReconnectOverlay();
           if (state.token) localStorage.setItem('sharp_token', state.token);
-          else localStorage.removeItem('sharp_token');
           localStorage.setItem('sharp_gateway', state.gatewayUrl);
           hideLoginModal();
           startKeepalive();
           loadInitialData();
+
+          // If user is currently viewing a session, reload history now that we are connected.
+          if (state.currentView === 'chat' && state.currentSession?.key) {
+            loadSessionHistory(state.currentSession.key, { preserve: true });
+          }
         },
         reject: (err) => {
           console.error('[WS] Connect failed:', err);
@@ -975,6 +1189,9 @@
         if (state.currentSession?.key === sessionKey) {
           showTypingIndicator(runId);
         }
+        if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) {
+          showTypingIndicator(runId, 'goal');
+        }
         // Also set thinking status
         trackActiveRun(sessionKey, runId);
         state.sessionInputReady.set(sessionKey, false);
@@ -986,6 +1203,7 @@
       // Hide typing indicator when agent ends
       if (stream === 'lifecycle' && eventData?.phase === 'end') {
         hideTypingIndicator(runId);
+        hideTypingIndicator(runId, 'goal');
       }
       
       // Show tool calls via compact activity indicator
@@ -1208,7 +1426,7 @@
       }
     }
     
-    function handleChatEvent(data) {
+    async function handleChatEvent(data) {
       const { sessionKey, runId, state: runState, message } = data;
       
       console.log('[ClawCondos] Chat event:', runState, 'for', sessionKey, 'runId:', runId);
@@ -1216,18 +1434,31 @@
       // Server sends: 'delta' (streaming), 'final' (done), 'error'
       // Track active runs and update agent status (with persistence)
       if (runState === 'delta') {
-        // Streaming chunk - agent is thinking/responding
         trackActiveRun(sessionKey, runId);
         state.sessionInputReady.set(sessionKey, false);
         if (state.sessionAgentStatus[sessionKey] !== 'thinking') {
           setSessionStatus(sessionKey, 'thinking');
         }
-        
-        // Show streaming content in current session
-        if (state.currentSession?.key === sessionKey && message?.content) {
+
+        // Keep Goal session state pill live.
+        if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) {
+          const goal = state.goals.find(g => g.id === state.currentGoalOpenId) || getGoalForSession(sessionKey);
+          try { updateGoalSessionStatePill(goal); } catch {}
+        }
+
+        // If we haven't received content yet, show typing indicator.
+        // (Some providers stream slowly; this keeps UI responsive.)
+        if (!message?.content) {
+          if (state.currentSession?.key === sessionKey) showTypingIndicator(runId, '');
+          if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) showTypingIndicator(runId, 'goal');
+        }
+
+        // Stream content
+        if (message?.content) {
           const text = extractText(message.content);
           if (text) {
-            updateStreamingMessage(runId, text);
+            if (state.currentSession?.key === sessionKey) updateStreamingMessage(runId, text, '');
+            if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) updateStreamingMessage(runId, text, 'goal');
           }
         }
       } else if (runState === 'final') {
@@ -1235,6 +1466,11 @@
         clearActiveRun(sessionKey);
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, 'idle');
+
+        if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) {
+          const goal = state.goals.find(g => g.id === state.currentGoalOpenId) || getGoalForSession(sessionKey);
+          try { updateGoalSessionStatePill(goal); } catch {}
+        }
         
         // Check if this is a categorization/wizard response (from main session)
         if (sessionKey === 'agent:main:main' && message?.content) {
@@ -1262,78 +1498,127 @@
           if (message?.content) {
             const text = extractText(message.content);
             if (text) {
-              finalizeStreamingMessage(runId, text);
+              finalizeStreamingMessage(runId, text, '');
+              // Auto-apply goal patches when agent updates tasks/status.
+              try { await maybeAutoApplyGoalPatch(sessionKey, text); } catch {}
             }
           } else {
-            // No content in final, just remove thinking indicator
-            removeStreamingMessage(runId);
+            removeStreamingMessage(runId, '');
+          }
+        }
+
+        // Finalize in goal view if it's showing the same session
+        if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) {
+          if (message?.content) {
+            const text = extractText(message.content);
+            if (text) {
+              finalizeStreamingMessage(runId, text, 'goal');
+              try { await maybeAutoApplyGoalPatch(sessionKey, text); } catch {}
+            }
+          } else {
+            removeStreamingMessage(runId, 'goal');
           }
         }
       } else if (runState === 'error' || runState === 'aborted') {
         clearActiveRun(sessionKey);
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, runState === 'error' ? 'error' : 'idle');
+
+        if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) {
+          const goal = state.goals.find(g => g.id === state.currentGoalOpenId) || getGoalForSession(sessionKey);
+          try { updateGoalSessionStatePill(goal); } catch {}
+        }
         
         if (state.currentSession?.key === sessionKey) {
           state.isThinking = false;
           updateSendButton();
-          removeStreamingMessage(runId);
+          removeStreamingMessage(runId, '');
           clearAllTools();  // Clear tool activity on error/abort
-          if (data.errorMessage) {
-            addChatMessage('system', `Error: ${data.errorMessage}`);
+          const msg = data.errorMessage || data.stopReason || (runState === 'aborted' ? 'Run aborted' : 'Run failed');
+          if (msg) {
+            addChatMessageTo('', 'system', `⚠️ ${msg}`);
+            showToast(msg, /timeout|rate_limit|429/i.test(msg) ? 'warning' : 'error', 8000);
           }
+        }
+
+        if (state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) {
+          removeStreamingMessage(runId, 'goal');
+          const msg = data.errorMessage || data.stopReason || (runState === 'aborted' ? 'Run aborted' : 'Run failed');
+          if (msg) addChatMessageTo('goal', 'system', `⚠️ ${msg}`);
         }
       }
     }
     
     // Typing indicator (bouncing dots)
-    function showTypingIndicator(runId) {
-      // Don't show if already have streaming content
+    function showTypingIndicator(runId, prefix = '') {
       if (document.getElementById(`streaming-${runId}`)) return;
-      
-      let el = document.getElementById(`typing-${runId}`);
-      if (el) return; // Already showing
-      
-      const container = document.getElementById('chatMessages');
+
+      const typingId = prefix ? `${prefix}-typing-${runId}` : `typing-${runId}`;
+      let el = document.getElementById(typingId);
+      if (el) return;
+
+      const containerId = prefix ? `${prefix}_chatMessages` : 'chatMessages';
+      const container = document.getElementById(containerId);
       if (!container) return;
-      
+
       el = document.createElement('div');
-      el.id = `typing-${runId}`;
+      el.id = typingId;
       el.className = 'typing-indicator';
       el.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
       container.appendChild(el);
-      scrollChatToBottom();
+
+      if (prefix) scrollChatPanelToBottom(prefix);
+      else scrollChatToBottom();
     }
     
-    function hideTypingIndicator(runId) {
-      const el = document.getElementById(`typing-${runId}`);
+    function hideTypingIndicator(runId, prefix = '') {
+      const typingId = prefix ? `${prefix}-typing-${runId}` : `typing-${runId}`;
+      const el = document.getElementById(typingId);
       if (el) el.remove();
     }
     
     // Streaming message management
-    function updateStreamingMessage(runId, text) {
+    function updateStreamingMessage(runId, text, prefix = '') {
       // Hide typing indicator when content arrives
-      hideTypingIndicator(runId);
-      
-      let el = document.getElementById(`streaming-${runId}`);
-      if (!el) {
-        // Remove old thinking indicator
-        const thinking = document.querySelector('.message.thinking');
-        if (thinking) thinking.remove();
-        
-        // Create streaming message element
-        const container = document.getElementById('chatMessages');
-        el = document.createElement('div');
-        el.id = `streaming-${runId}`;
-        el.className = 'message assistant streaming';
-        el.dataset.startTime = Date.now();
-        container.appendChild(el);
-      }
-      el.innerHTML = `<div class="message-content">${formatMessage(text)}<span class="streaming-cursor">▊</span></div>`;
-      scrollChatToBottom();
+      hideTypingIndicator(runId, prefix);
+
+      // Buffer streaming text and render at most once per animation frame.
+      state.streamingBuffers.set(runId, text);
+      if (state.streamingRaf.has(runId)) return;
+
+      const raf = requestAnimationFrame(() => {
+        state.streamingRaf.delete(runId);
+        const latest = state.streamingBuffers.get(runId) || '';
+
+        let el = document.getElementById(`streaming-${runId}`);
+        if (!el) {
+          // Remove old thinking indicator (scope to container)
+          const containerId = prefix ? `${prefix}_chatMessages` : 'chatMessages';
+          const container = document.getElementById(containerId);
+          if (!container) return;
+          const thinking = container.querySelector('.message.thinking');
+          if (thinking) thinking.remove();
+
+          el = document.createElement('div');
+          el.id = `streaming-${runId}`;
+          el.className = 'message assistant streaming';
+          el.dataset.startTime = Date.now();
+          container.appendChild(el);
+        }
+
+        el.innerHTML = `<div class="message-content">${formatMessage(latest)}<span class="streaming-cursor">▊</span></div>`;
+        if (prefix) scrollChatPanelToBottom(prefix);
+        else scrollChatToBottom();
+      });
+
+      state.streamingRaf.set(runId, raf);
     }
     
-    function finalizeStreamingMessage(runId, text) {
+    function finalizeStreamingMessage(runId, text, prefix = '') {
+      // If provider sends only a final frame (no deltas with content), we may have shown
+      // a typing indicator. Always clear it when final content arrives.
+      hideTypingIndicator(runId, prefix);
+
       const el = document.getElementById(`streaming-${runId}`);
       if (el) {
         el.classList.remove('streaming');
@@ -1341,17 +1626,51 @@
         el.innerHTML = `<div class="message-content">${formatMessage(text)}</div><div class="message-time">${timeStr}</div>`;
       } else if (text) {
         // No streaming element, add final message
-        const thinking = document.querySelector('.message.thinking');
+        const containerId = prefix ? `${prefix}_chatMessages` : 'chatMessages';
+        const container = document.getElementById(containerId);
+        const thinking = container ? container.querySelector('.message.thinking') : document.querySelector('.message.thinking');
         if (thinking) thinking.remove();
-        addChatMessage('assistant', text);
+        addChatMessageTo(prefix, 'assistant', text);
       }
     }
+
+    function finalizeAllStreamingMessages(reason = 'disconnected') {
+      const now = new Date();
+      const timeStr = formatMessageTime(now);
+      const note = reason ? ` (${reason})` : '';
+
+      document.querySelectorAll('.message.assistant.streaming').forEach(el => {
+        el.classList.remove('streaming');
+        const cursor = el.querySelector('.streaming-cursor');
+        if (cursor) cursor.remove();
+
+        let timeEl = el.querySelector('.message-time');
+        if (!timeEl) {
+          timeEl = document.createElement('div');
+          timeEl.className = 'message-time';
+          el.appendChild(timeEl);
+        }
+
+        if (!timeEl.textContent.includes(note.trim())) {
+          timeEl.textContent = `${timeStr}${note}`;
+        }
+      });
+
+      for (const rafId of state.streamingRaf.values()) {
+        cancelAnimationFrame(rafId);
+      }
+      state.streamingRaf.clear();
+      state.streamingBuffers.clear();
+    }
     
-    function removeStreamingMessage(runId) {
+    function removeStreamingMessage(runId, prefix = '') {
       const el = document.getElementById(`streaming-${runId}`);
       if (el) el.remove();
-      hideTypingIndicator(runId);
-      const thinking = document.querySelector('.message.thinking');
+      hideTypingIndicator(runId, prefix);
+
+      const containerId = prefix ? `${prefix}_chatMessages` : 'chatMessages';
+      const container = document.getElementById(containerId);
+      const thinking = container ? container.querySelector('.message.thinking') : document.querySelector('.message.thinking');
       if (thinking) thinking.remove();
     }
     
@@ -1452,6 +1771,7 @@
     // CONNECTION STATUS
     // ═══════════════════════════════════════════════════════════════
     function setConnectionStatus(status) {
+      state.connectionStatus = status;
       const dot = document.getElementById('connectionDot');
       const text = document.getElementById('connectionText');
       
@@ -1479,6 +1799,10 @@
           }
           renderSessions();
           updateHeaderStatus();
+          if (state.currentView === 'goal') {
+            const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+            updateGoalSessionStatePill(goal);
+          }
           break;
       }
     }
@@ -1495,7 +1819,7 @@
       for (const [key, data] of Object.entries(state.activeRunsStore)) {
         obj[key] = data;
       }
-      localStorage.setItem('sharp_active_runs', JSON.stringify(obj));
+      lsSet('active_runs', JSON.stringify(obj));
     }
     
     function restoreActiveRuns() {
@@ -1524,6 +1848,13 @@
       }
     }
     
+    function hasFreshActiveRun(sessionKey) {
+      const data = state.activeRunsStore?.[sessionKey];
+      if (!data?.runId) return false;
+      const age = Date.now() - (data.startedAt || 0);
+      return age >= 0 && age <= ACTIVE_RUN_STALE_MS;
+    }
+
     function trackActiveRun(sessionKey, runId) {
       state.activeRuns.set(sessionKey, runId);
       state.activeRunsStore[sessionKey] = { runId, startedAt: Date.now() };
@@ -1542,10 +1873,55 @@
       renderSessions();
       renderSessionsGrid();
       updateHeaderStatus();
+      if (state.currentView === 'goal' && state.goalChatSessionKey === key) {
+        const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+        updateGoalSessionStatePill(goal);
+      }
+
+      // Auto-clear transient statuses
+      if (status === 'sent') {
+        setTimeout(() => {
+          if (state.sessionAgentStatus[key] === 'sent') {
+            state.sessionAgentStatus[key] = 'idle';
+            localStorage.setItem('sharp_session_agent_status', JSON.stringify(state.sessionAgentStatus));
+            renderSessions();
+            renderSessionsGrid();
+            updateHeaderStatus();
+          }
+        }, 1500);
+      }
     }
     
     function getAgentStatus(key) {
       return state.sessionAgentStatus[key] || 'idle';
+    }
+
+    function deriveSessionBlinker(sessionKey, opts = {}) {
+      const goalId = opts?.goalId || null;
+      const agentStatus = sessionKey ? getAgentStatus(sessionKey) : 'offline';
+      const isDisconnected = state.connectionStatus === 'error' || agentStatus === 'offline';
+      const hasQueue = !!(sessionKey && state.messageQueue?.some?.(m => m.sessionKey === sessionKey));
+      const isRunning = !!(sessionKey && (state.activeRuns?.has?.(sessionKey) || agentStatus === 'thinking' || agentStatus === 'running'));
+      const isError = agentStatus === 'error' || agentStatus === 'rate_limited';
+      const isNeedsUser = agentStatus === 'needs_user';
+      const isBlocked = !!(goalId && isGoalBlocked(state.goals?.find(g => g.id === goalId)));
+      const isIdle = ['idle', 'ready', 'canceled', 'sent'].includes(agentStatus);
+
+      // 3-color mapping (Albert preference)
+      // - Idle: black
+      // - Active (running/thinking/queued): blue
+      // - Disconnected OR needs-attention (error/blocked/needs_user): orange
+
+      if (isDisconnected) return { state: 'offline', label: 'Disconnected', colorClass: 'blink-offline' };
+      if (isError) return { state: agentStatus, label: agentStatus === 'rate_limited' ? 'Rate limited' : 'Error', colorClass: 'blink-error' };
+      if (isBlocked) return { state: 'blocked', label: 'Blocked', colorClass: 'blink-blocked' };
+      if (isNeedsUser) return { state: 'needs_user', label: 'Needs input', colorClass: 'blink-needs-user' };
+
+      if (hasQueue) return { state: 'queued', label: 'Queued', colorClass: 'blink-queued' };
+      if (isRunning) return { state: agentStatus === 'thinking' ? 'thinking' : 'running', label: agentStatus === 'thinking' ? 'Thinking' : 'Running', colorClass: 'blink-running' };
+
+      if (isIdle) return { state: agentStatus, label: agentStatus === 'canceled' ? 'Canceled' : agentStatus === 'ready' ? 'Ready' : 'Idle', colorClass: 'blink-idle' };
+      return { state: agentStatus || 'idle', label: agentStatus || 'Idle', colorClass: 'blink-idle' };
     }
     
     function getStatusTooltip(status) {
@@ -1554,6 +1930,7 @@
         case 'thinking': return 'Processing...';
         case 'error': return 'Last request failed';
         case 'offline': return 'Disconnected';
+        case 'sent': return 'Sent';
         default: return status;
       }
     }
@@ -1567,6 +1944,94 @@
       indicator.setAttribute('data-tooltip', getStatusTooltip(status));
     }
     
+    // ═══════════════════════════════════════════════════════════════
+    // CONNECTION DIAGNOSTICS
+    // ═══════════════════════════════════════════════════════════════
+    function computeWsUrlForDiagnostics() {
+      let wsUrl = (state.gatewayUrl || '').replace(/^http/, 'ws');
+      if (wsUrl && !wsUrl.includes(':18789')) {
+        wsUrl = wsUrl.replace(/\/?$/, '/clawcondos-ws');
+      }
+      return wsUrl;
+    }
+
+    function buildConnectionDiagnosticsText() {
+      const wsUrl = computeWsUrlForDiagnostics();
+      const lines = [];
+      lines.push('ClawCondos connection diagnostics');
+      lines.push('time: ' + new Date().toISOString());
+      lines.push('page: ' + window.location.href);
+      lines.push('gatewayUrl: ' + (state.gatewayUrl || '')); 
+      lines.push('wsUrl: ' + (wsUrl || ''));
+      lines.push('status: ' + (state.connectionStatus || (state.connected ? 'connected' : 'unknown')));
+      lines.push('connected: ' + String(!!state.connected));
+      lines.push('reconnectAttempts: ' + String(state.wsReconnectAttempts || 0));
+      lines.push('lastConnectAttemptAt: ' + (state.wsLastConnectAttemptAt ? new Date(state.wsLastConnectAttemptAt).toISOString() : 'n/a'));
+      lines.push('lastMessageAt: ' + (state.wsLastMessageAt ? new Date(state.wsLastMessageAt).toISOString() : 'n/a'));
+      if (state.wsLastClose) {
+        lines.push('lastClose: ' + JSON.stringify({
+          code: state.wsLastClose.code,
+          reason: state.wsLastClose.reason,
+          at: new Date(state.wsLastClose.at).toISOString()
+        }));
+      } else {
+        lines.push('lastClose: n/a');
+      }
+      lines.push('lastError: ' + (state.wsLastError || 'n/a'));
+      lines.push('protocol: ' + String(WS_PROTOCOL_VERSION));
+      lines.push('client: webchat-ui / ClawCondos Dashboard v2.0.0');
+      lines.push('tokenPresent: ' + String(!!state.token));
+      lines.push('userAgent: ' + (navigator.userAgent || ''));
+      return lines.join('\n');
+    }
+
+    function showConnectionDetailsModal(ev) {
+      // Power users: Shift-click goes straight to login.
+      if (ev && ev.shiftKey) {
+        showLoginModal();
+        return;
+      }
+      const modal = document.getElementById('connectionDetailsModal');
+      const pre = document.getElementById('connectionDetailsText');
+      const err = document.getElementById('connectionDetailsError');
+      if (!modal || !pre) return;
+      if (err) { err.style.display = 'none'; err.textContent = ''; }
+      pre.textContent = buildConnectionDiagnosticsText();
+      modal.classList.remove('hidden');
+    }
+
+    function hideConnectionDetailsModal() {
+      const modal = document.getElementById('connectionDetailsModal');
+      if (modal) modal.classList.add('hidden');
+    }
+
+    async function copyConnectionDetailsToClipboard() {
+      const text = buildConnectionDiagnosticsText();
+      const err = document.getElementById('connectionDetailsError');
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast('Copied connection details', 'success');
+      } catch (e) {
+        // Fallback for older browsers / permissions
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+          showToast('Copied connection details', 'success');
+        } catch (e2) {
+          if (err) {
+            err.textContent = 'Clipboard copy failed. You can manually select the text and copy.';
+            err.style.display = 'block';
+          }
+        }
+      }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // LOGIN
     // ═══════════════════════════════════════════════════════════════
@@ -1603,10 +2068,14 @@
     async function loadInitialData() {
       console.log('[ClawCondos] loadInitialData starting - v2');
       try {
+        // Load persisted session->condo mappings (doesn't require gateway connection)
+        await loadSessionCondos();
+
         // Fetch active runs from server first (authoritative source)
         console.log('[ClawCondos] About to call syncActiveRunsFromServer...');
         await syncActiveRunsFromServer();
         console.log('[ClawCondos] syncActiveRunsFromServer completed');
+
         await Promise.all([loadGoals(), loadSessions(), loadApps(), loadAgents()]);
         updateOverview();
         updateStatsGrid();
@@ -1660,15 +2129,85 @@
       }
     }
     
-    async function loadGoals() {
+    async function loadSessionCondos() {
       try {
-        const res = await fetch('api/goals');
+        const res = await fetch('/api/session-condos');
         if (!res.ok) return;
         const data = await res.json();
-        state.goals = data.goals || [];
+        state.sessionCondoIndex = data.sessionCondoIndex || {};
+      } catch (err) {
+        console.warn('[ClawCondos] Failed to load session condos:', err);
+      }
+    }
+
+    function isSystemCondoSession(session) {
+      const k = String(session?.key || '');
+      if (!k.startsWith('agent:')) return false;
+      // Heartbeats + internal scheduled runs generally show up as cron sessions.
+      if (k.includes(':cron:')) return true;
+      if (k.includes(':heartbeat:')) return true;
+      return false;
+    }
+
+    async function persistSessionCondo(sessionKey, condoId) {
+      const key = String(sessionKey || '').trim();
+      const cid = String(condoId || '').trim();
+      if (!key || !cid) return;
+      if (state.sessionCondoIndex?.[key] === cid) return;
+
+      // Optimistic local write
+      state.sessionCondoIndex = state.sessionCondoIndex || {};
+      state.sessionCondoIndex[key] = cid;
+
+      // Best-effort persist (data-level)
+      try {
+        await fetch('/api/session-condo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionKey: key, condoId: cid }),
+        });
+      } catch {
+        // ignore
+      }
+    }
+
+    async function loadGoals() {
+      try {
+        const res = await fetch('/api/goals');
+        if (!res.ok) return;
+        const data = await res.json();
+        state.goals = (data.goals || []).map(g => {
+          if (!g.condoId && Array.isArray(g.sessions) && g.sessions.length > 0) {
+            g.condoId = getCondoIdForSessionKey(g.sessions[0]);
+          }
+          return g;
+        });
         renderGoals();
         renderGoalsGrid();
         updateUncategorizedCount();
+
+        if (state.pendingRouteGoalId) {
+          const pending = state.pendingRouteGoalId;
+          state.pendingRouteGoalId = null;
+          if (state.goals.find(x => x.id === pending)) {
+            openGoal(pending, { fromRouter: true });
+          }
+        }
+
+        if (state.pendingRouteNewSession) {
+          const pending = state.pendingRouteNewSession;
+          state.pendingRouteNewSession = null;
+          state.newSessionCondoId = pending?.condoId || state.currentCondoId;
+          state.attachGoalId = pending?.goalId || null;
+          showNewSessionView({ fromRouter: true });
+        }
+
+        if (state.pendingRouteNewGoalCondoId !== null) {
+          const pending = state.pendingRouteNewGoalCondoId;
+          state.pendingRouteNewGoalCondoId = null;
+          state.newGoalCondoId = pending || state.currentCondoId;
+          showNewGoalView({ fromRouter: true });
+        }
       } catch (err) {
         console.error('[ClawCondos] Failed to load goals:', err);
       }
@@ -1703,10 +2242,10 @@
       const activeSessions = activeRuns.length;
       
       // Pending goals: goals with status !== 'done'
-      const pendingGoals = goals.filter(g => g.status !== 'done').length;
+      const pendingGoals = goals.filter(g => !isGoalCompleted(g)).length;
       
       // Completed goals
-      const completedGoals = goals.filter(g => g.status === 'done').length;
+      const completedGoals = goals.filter(g => isGoalCompleted(g)).length;
       
       // Errors: sessions with error state
       const errorCount = sessions.filter(s => s.lastError || (runs[s.key] && runs[s.key] === 'error')).length;
@@ -1720,8 +2259,9 @@
       
       if (elActive) elActive.textContent = activeSessions;
       if (elTrend) {
-        const totalSessions = sessions.filter(s => !s.key.includes(':subagent:')).length;
-        elTrend.textContent = totalSessions > 0 ? `${totalSessions} total` : '';
+        // Prototype uses a small trend line (e.g. "↑ 3 today").
+        // We don't have reliable "today" deltas yet, so keep it empty for now.
+        elTrend.textContent = '';
       }
       if (elPending) elPending.textContent = pendingGoals;
       if (elCompleted) elCompleted.textContent = completedGoals;
@@ -1763,42 +2303,240 @@
     }
 
     function renderGoals() {
-      const container = document.getElementById('goalsList');
+      renderSidebar();
+    }
+
+    // Back-compat alias (some helper functions call renderCondos)
+    function renderCondos() {
+      renderSidebar();
+    }
+
+    function setCurrentGoal(goalId, condoId = null) {
+      state.currentGoalId = goalId;
+      if (condoId) state.currentCondoId = condoId;
+      renderSidebar();
+      renderSessionsGrid();
+      updateOverview();
+    }
+
+    function renderSidebar() {
+      const container = document.getElementById('sessionsList');
+      const archivedToggle = document.getElementById('showArchivedToggle');
       if (!container) return;
 
-      const allActive = state.currentGoalId === 'all' ? 'active' : '';
+      const archivedCount = state.sessions.filter(s => isSessionArchived(s.key)).length;
+      if (archivedToggle) {
+        archivedToggle.style.display = archivedCount > 0 ? 'flex' : 'none';
+        archivedToggle.querySelector('input').checked = state.showArchived;
+      }
 
-      const rows = [];
-      rows.push(`
-        <div class="goal-chip ${allActive}" onclick="setCurrentGoal('all')">
-          <span class="goal-chip-dot"></span>
-          <span class="goal-chip-title">All</span>
-          <span class="goal-chip-count">${state.sessions.length}</span>
-        </div>
-      `);
+      const markAllReadBtn = document.getElementById('markAllReadBtn');
+      if (markAllReadBtn) {
+        const unreadCount = getUnreadCount();
+        markAllReadBtn.style.display = unreadCount > 0 ? 'inline-flex' : 'none';
+        markAllReadBtn.title = `Mark all read (${unreadCount})`;
+      }
 
-      for (const g of state.goals) {
-        const isActive = state.currentGoalId === g.id ? 'active' : '';
-        const count = Array.isArray(g.sessions) ? g.sessions.length : 0;
-        const status = g.status || 'active';
-        rows.push(`
-          <div class="goal-chip ${isActive}" onclick="setCurrentGoal('${escapeHtml(g.id)}')" title="${escapeHtml(g.title || '')}">
-            <span class="goal-chip-dot ${status === 'done' ? 'done' : ''}"></span>
-            <span class="goal-chip-title">${escapeHtml(g.title || 'Untitled goal')}</span>
-            <span class="goal-chip-count">${count}</span>
+      const cutoff = Date.now() - SIDEBAR_HIDE_INACTIVE_MS;
+      const visibleSessions = state.sessions.filter(s => {
+        if (s.key.includes(':subagent:')) return false;
+        if (isSessionArchived(s.key) && !state.showArchived) return false;
+        if (!matchesSearch(s)) return false;
+
+        // Hide inactive sessions from sidebar after 15 minutes.
+        // Exceptions: pinned sessions, sessions with a fresh active run, and unread sessions.
+        const pinned = isSessionPinned(s.key);
+        const unread = isSessionUnread(s.key);
+        const running = hasFreshActiveRun(s.key) || getAgentStatus(s.key) === 'thinking';
+        const updatedAt = Number(s.updatedAt || s.updatedAtMs || 0);
+
+        if (!state.showArchived && !pinned && !unread && !running && updatedAt > 0 && updatedAt < cutoff) {
+          return false;
+        }
+
+        return true;
+      });
+
+      const activeGoals = (state.goals || []).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0);
+      const goalById = new Map(activeGoals.map(g => [g.id, g]));
+      const sessionToGoal = new Map();
+      for (const g of activeGoals) {
+        (g.sessions || []).forEach(s => sessionToGoal.set(s, g.id));
+      }
+
+      const condos = new Map();
+      const condoNameForId = (condoId, fallbackSession) => {
+        if (condoId === 'condo:genlayer') return 'GenLayer';
+        if (condoId === 'condo:clawcondos') return 'ClawCondos';
+        if (condoId === 'condo:rally') return 'Rally';
+        if (condoId === 'condo:moltcourt') return 'MoltCourt';
+        if (condoId === 'condo:personal') return 'Personal';
+        if (condoId === 'condo:finances') return 'Finances';
+        if (condoId === 'condo:subastas') return 'Subastas';
+        if (condoId === 'condo:system') return 'SYSTEM';
+        if (condoId?.startsWith('condo:')) return condoId.split(':').slice(1).join(':');
+        return fallbackSession ? getSessionCondoName(fallbackSession) : 'Condo';
+      };
+
+      const sessionByKey = new Map((state.sessions || []).map(s => [s.key, s]));
+      for (const g of activeGoals) {
+        const condoId = g.condoId || 'misc:default';
+        if (!condos.has(condoId)) {
+          condos.set(condoId, {
+            id: condoId,
+            name: g.condoName || condoNameForId(condoId, null),
+            sessions: [],
+            goals: new Map(),
+            latest: g.updatedAtMs || 0,
+            sessionKeySet: new Set(),
+          });
+        }
+        const condo = condos.get(condoId);
+        condo.goals.set(g.id, g);
+        condo.latest = Math.max(condo.latest, goalLastActivityMs(g));
+        for (const key of (g.sessions || [])) {
+          if (condo.sessionKeySet.has(key)) continue;
+          const s = sessionByKey.get(key);
+          if (s) {
+            condo.sessions.push(s);
+            condo.sessionKeySet.add(key);
+          }
+        }
+      }
+
+      // Ensure SYSTEM condo is visible when there are system-tagged sessions,
+      // even if it has no active goals (sessions are hidden-by-default, but condo should exist).
+      const systemTaggedKeys = Object.entries(state.sessionCondoIndex || {}).filter(([k, v]) => v === 'condo:system').map(([k]) => k);
+      const systemSessions = (state.sessions || []).filter(s => getSessionCondoId(s) === 'condo:system');
+      if (systemSessions.length > 0 || systemTaggedKeys.length > 0) {
+        if (!condos.has('condo:system')) {
+          condos.set('condo:system', {
+            id: 'condo:system',
+            name: 'SYSTEM',
+            sessions: [],
+            goals: new Map(),
+            latest: 0,
+            sessionKeySet: new Set(),
+          });
+        }
+        const sys = condos.get('condo:system');
+
+        // Keys from persisted mapping (even if sessions haven't loaded yet)
+        for (const key of systemTaggedKeys) {
+          if (!key || sys.sessionKeySet.has(key)) continue;
+          sys.sessionKeySet.add(key);
+        }
+
+        for (const s of systemSessions) {
+          if (sys.sessionKeySet.has(s.key)) continue;
+          sys.sessions.push(s);
+          sys.sessionKeySet.add(s.key);
+          const t = Number(s.updatedAt || s.updatedAtMs || 0);
+          if (t) sys.latest = Math.max(sys.latest, t);
+        }
+      }
+
+      const sortedCondos = Array.from(condos.values()).sort((a, b) => (b.latest || 0) - (a.latest || 0));
+
+      if (sortedCondos.length === 0) {
+        container.innerHTML = `<div style=\"padding: 16px; color: var(--text-dim); font-size: 0.85rem;\">No active goals yet</div>`;
+        return;
+      }
+
+      if (!state.currentCondoId && sortedCondos[0]) {
+        state.currentCondoId = sortedCondos[0].id;
+      }
+
+      let html = '';
+      for (const condo of sortedCondos) {
+        const condoUnread = condo.sessions.filter(s => isSessionUnread(s.key)).length;
+        const condoErrors = condo.sessions.filter(s => s.lastError).length;
+        const badge = condoUnread > 0
+          ? `<span class=\"badge unread\">${condoUnread}</span>`
+          : condoErrors > 0 ? `<span class=\"badge error\">${condoErrors}</span>` : '';
+        const activeCondo = state.currentCondoId === condo.id ? 'active' : '';
+
+        // Only active + started goals should be displayed in sidebar
+        const pendingGoalsCount = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0).length;
+
+        // Default collapse condos that have "nothing happening" unless user explicitly expanded them before.
+        // Heuristic: no pending goals OR no sessions attached to any pending goal and no unassigned sessions.
+        if (state.expandedCondos[condo.id] === undefined) {
+          const pendingGoals = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0);
+          const pendingGoalsSessionsCount = pendingGoals.reduce((acc, g) => acc + (Array.isArray(g.sessions) ? g.sessions.length : 0), 0);
+          const hasAnySessions = (condo.sessions?.length || 0) > 0;
+          const shouldCollapse = pendingGoals.length === 0 || (!hasAnySessions && pendingGoalsSessionsCount === 0);
+          if (shouldCollapse) state.expandedCondos[condo.id] = false;
+        }
+
+        const isExpanded = isCondoExpanded(condo.id);
+        const toggleIcon = isExpanded ? '▾' : '▸';
+
+        html += `
+          <div class=\"condo-item\">
+            <a class=\"condo-header ${activeCondo}\" href=\"${escapeHtml(fullHref(`#/condo/${encodeURIComponent(condo.id)}`))}\" onclick=\"return handleCondoLinkClick(event, '${escapeHtml(condo.id)}')\">
+              <span class=\"condo-toggle\" title=\"${isExpanded ? 'Collapse' : 'Expand'}\" onclick=\"event.preventDefault(); event.stopPropagation(); toggleCondoExpanded('${escapeHtml(condo.id)}')\">${toggleIcon}</span>
+              <span class=\"condo-icon\">🏢</span>
+              <span class=\"condo-name\">${escapeHtml(condo.name || 'Condo')}</span>
+              ${badge}
+              <span class=\"condo-add\" title=\"New goal\" onclick=\"event.preventDefault(); event.stopPropagation(); state.newGoalCondoId = '${escapeHtml(condo.id)}'; showCreateGoalModal()\">+</span>
+            </a>
+            ${isExpanded ? `<div class=\"condo-goals\">${renderCondoGoals(condo, sessionToGoal, goalById)}</div>` : ''}
           </div>
+        `;
+      }
+
+      // persist any new default-collapse decisions
+      localStorage.setItem('sharp_expanded_condos', JSON.stringify(state.expandedCondos));
+
+      container.innerHTML = html;
+    }
+
+    function renderGoalDot(goal, sessionsForGoal) {
+      let newest = null;
+      for (const key of (sessionsForGoal || [])) {
+        const s = state.sessions.find(ss => ss.key === key);
+        if (!s) continue;
+        if (!newest || (s.updatedAt || 0) > (newest.updatedAt || 0)) newest = s;
+      }
+      const sessionKey = newest?.key;
+      const blinker = deriveSessionBlinker(sessionKey, { goalId: goal?.id });
+      const title = blinker?.label || 'Status';
+      const cls = blinker?.colorClass || 'blink-idle';
+      return `<span class="goal-dot blinker ${cls}" title="${escapeHtml(title)}"></span>`;
+    }
+
+
+    function renderCondoGoals(condo, sessionToGoal, goalById) {
+      const goals = Array.from(condo.goals.values()).filter(g => !isGoalCompleted(g) && !isGoalDropped(g) && Array.isArray(g.sessions) && g.sessions.length > 0);
+      const goalRows = [];
+
+      for (const goal of goals) {
+        const isActive = state.currentGoalId === goal.id ? 'active' : '';
+        const sessKeys = Array.isArray(goal.sessions) ? goal.sessions : [];
+        const sessionsForGoal = sessKeys.map(k => state.sessions.find(s => s.key === k)).filter(Boolean);
+        sessionsForGoal.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        const dot = renderGoalDot(goal, sessKeys);
+        const nextTask = (goal.nextTask || '').trim();
+        const nextTaskEl = nextTask
+          ? `<div style="grid-column: 1 / -1; margin: 2px 0 0 22px; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Next: ${escapeHtml(nextTask)}</div>`
+          : '';
+        goalRows.push(`
+          <a class=\"goal-item ${isActive}\" href=\"${escapeHtml(goalHref(goal.id))}\" onclick=\"return handleGoalLinkClick(event, '${escapeHtml(goal.id)}')\">\n            ${dot}\n            <div class=\"goal-checkbox\"></div>\n            <span class=\"goal-name\" title=\"${escapeHtml(nextTask || '')}\">${escapeHtml(goal.title || 'Untitled goal')}</span>\n            <span class=\"goal-count\">${sessionsForGoal.length}</span>\n            <span class=\"goal-add\" title=\"New session for this goal\" onclick=\"event.preventDefault(); event.stopPropagation(); openNewSession('${escapeHtml(condo.id)}','${escapeHtml(goal.id)}')\">+</span>\n            ${nextTaskEl}\n          </a>
         `);
       }
 
-      container.innerHTML = rows.join('');
+      return goalRows.join('');
     }
 
-    function setCurrentGoal(goalId) {
-      state.currentGoalId = goalId;
-      renderGoals();
-      renderSessions();
-      renderSessionsGrid();
-      updateOverview();
+    function renderSidebarSession(s) {
+      const isActive = state.currentSession && state.currentSession.key === s.key;
+      const hasUnread = !isActive && isSessionUnread(s.key);
+      const agentStatus = getAgentStatus(s.key);
+      const statusClass = hasUnread ? 'unread' : agentStatus === 'error' ? 'error' : isActive ? 'active' : '';
+      return `
+        <a class=\"session-item ${isActive ? 'active' : ''}\" href=\"${escapeHtml(sessionHref(s.key))}\" onclick=\"return handleSessionLinkClick(event, '${escapeHtml(s.key)}')\">\n          <div class=\"session-dot ${statusClass}\"></div>\n          <span>${escapeHtml(getSessionName(s))}</span>\n        </a>
+      `;
     }
 
 
@@ -1821,100 +2559,772 @@
       return null;
     }
 
-    function openGoal(goalId) {
+    function openGoal(goalId, opts = {}) {
       const goal = state.goals.find(g => g.id === goalId);
       if (!goal) return;
 
+      if (!opts.fromRouter) {
+        navigateTo(`goal/${encodeURIComponent(goalId)}`);
+        return;
+      }
+
       state.currentView = 'goal';
       state.currentGoalOpenId = goalId;
-
-      document.getElementById('overviewView').classList.remove('active');
-      document.getElementById('chatView').classList.remove('active');
-      document.getElementById('goalView').classList.add('active');
-
-      document.getElementById('mainTitle').textContent = 'Goal';
-      document.getElementById('mainSubtitle').textContent = '';
+      state.currentGoalId = goalId;
+      if (goal.condoId) state.currentCondoId = goal.condoId;
+      setView('goalView');
+      setActiveNav(null);
+      setBreadcrumbs(buildGoalBreadcrumbs(goal));
       document.getElementById('headerAction').style.display = 'none';
       document.getElementById('headerStatusIndicator').style.display = 'none';
 
       renderGoalView();
+
+      // If we explicitly requested a fresh goal session (via + New inside a goal),
+      // clear the selected goal chat session so the kickoff overlay is shown.
+      if (state.forceNewGoalSessionGoalId === goalId) {
+        state.forceNewGoalSessionGoalId = null;
+        state.goalChatSessionKey = null;
+        setGoalChatLocked(true);
+        const chatMetaEl = document.getElementById('goalChatMeta');
+        if (chatMetaEl) chatMetaEl.textContent = 'New session not started';
+        renderGoalChat();
+      }
+
+      renderDetailPanel();
       updateMobileHeader();
       closeSidebar();
+    }
+
+    function setGoalChatLocked(locked) {
+      const overlay = document.getElementById('goalKickoffOverlay');
+      const composer = document.getElementById('composerMountGoal');
+      if (overlay) overlay.style.display = locked ? 'block' : 'none';
+      if (composer) composer.style.display = locked ? 'none' : 'block';
+
+      const btns = [
+        document.getElementById('goalNewSessionBtn'),
+        document.getElementById('goalAttachBtn'),
+        document.getElementById('goalOpenBtn'),
+      ].filter(Boolean);
+
+      for (const b of btns) {
+        b.disabled = !!locked;
+        b.style.opacity = locked ? '0.45' : '1';
+        b.style.pointerEvents = locked ? 'none' : 'auto';
+      }
+    }
+
+    async function kickOffGoal() {
+      const goalId = state.currentGoalOpenId;
+      const goal = state.goals.find(g => g.id === goalId);
+      if (!goalId || !goal) {
+        showToast('Goal not ready', 'warning', 3000);
+        return;
+      }
+
+      if (state.goalChatSessionKey) {
+        // Already kicked off
+        setGoalChatLocked(false);
+        return;
+      }
+
+      setGoalChatLocked(true);
+
+      const agentId = 'main';
+      const timestamp = Date.now();
+      const sessionKey = `agent:${agentId}:webchat:${timestamp}`;
+
+      // Build kickoff payload (single message, includes current goal state).
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+      const tasksText = tasks.length
+        ? tasks.map((t, i) => `${i + 1}. [${t.done ? 'x' : ' '}] ${t.text || ''}`.trim()).join('\n')
+        : '(no tasks yet)';
+      const def = (goal.notes || goal.description || '').trim() || '(no definition yet)';
+
+      const kickoff = [
+        `You are working on this goal in ClawCondos.`,
+        ``,
+        `GOAL: ${goal.title || goalId}`,
+        `STATUS: ${goal.status || 'active'}${goal.priority ? ` · PRIORITY: ${goal.priority}` : ''}`,
+        ``,
+        `DEFINITION:`,
+        def,
+        ``,
+        `TASKS:`,
+        tasksText,
+        ``,
+        `INSTRUCTIONS:`,
+        `1) Pick the best first task to start now (you choose).`,
+        `2) Start executing immediately.`,
+        `3) FIRST REPLY: output a single-line JSON object of the form {"goalPatch": {...}} updating at least nextTask (and status if needed).`,
+        `   - Do NOT wrap it in markdown fences.`,
+        `   - Keep it compact (no commentary before/after).`,
+        `4) Do NOT use tools unless the user explicitly asks.`,
+        `5) As you progress, emit additional {"goalPatch": {...}} updates when you change status/nextTask/complete tasks.`,
+        `   Example: {"goalPatch":{"status":"active","nextTask":"…"}}`,
+      ].join('\n');
+
+      try {
+        // Attach session to goal first so it shows up immediately.
+        const attachRes = await fetch(`/api/goals/${encodeURIComponent(goalId)}/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionKey }),
+        });
+        if (!attachRes.ok) {
+          let msg = 'Failed to attach session to goal';
+          try {
+            const j = await attachRes.json();
+            if (j?.error) msg = String(j.error);
+          } catch {}
+          throw new Error(msg);
+        }
+
+        state.goalChatSessionKey = sessionKey;
+
+        // Update meta now
+        const chatMetaEl = document.getElementById('goalChatMeta');
+        if (chatMetaEl) chatMetaEl.textContent = `${sessionKey} · starting…`;
+
+        // Send kickoff with reliability check.
+        await rpcCall('chat.send', {
+          sessionKey,
+          message: kickoff,
+          idempotencyKey: `kickoff-${goalId}-${timestamp}`,
+        }, 130000);
+
+        // Verify delivery (best-effort). Don't exact-match content; just confirm we can see a user msg at/after kickoff.
+        const kickoffStartedAt = Date.now();
+        const deadline = Date.now() + 15000;
+        let ok = false;
+        while (Date.now() < deadline) {
+          try {
+            const h = await rpcCall('chat.history', { sessionKey, limit: 30 }, 20000);
+            const msgs = h?.messages || [];
+            ok = msgs.some(m => m.role === 'user' && Number(m.timestamp || 0) >= kickoffStartedAt - 2000);
+          } catch {}
+          if (ok) break;
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (!ok) {
+          showToast('Kickoff delivery not confirmed yet. If it stays stuck on “starting…”, click Kick Off again.', 'warning', 7000);
+        }
+
+        await loadSessions();
+        await loadGoals();
+
+        setGoalChatLocked(false);
+        await renderGoalChat();
+
+        // Focus input
+        const input = document.getElementById('goal_chatInput');
+        if (input) input.focus();
+      } catch (err) {
+        console.error('Kickoff failed', err);
+        showToast(err.message || 'Kickoff failed', 'error', 7000);
+        state.goalChatSessionKey = null;
+        setGoalChatLocked(true);
+      }
     }
 
     function renderGoalView() {
       const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
       if (!goal) return;
 
-      const status = goal.status || 'active';
+      const completed = isGoalCompleted(goal);
+      const status = completed ? 'done' : (goal.status || 'active');
       const pr = goal.priority || '';
       const deadline = goal.deadline || '';
-      const { done, total } = goalTaskStats(goal);
 
-      document.getElementById('goalHeroTitle').textContent = goal.title || 'Untitled goal';
-      document.getElementById('goalHeroSub').textContent = `${status.toUpperCase()}${pr ? ` · ${pr}` : ''}${deadline ? ` · due ${deadline}` : ''} · ${done}/${total} tasks`;
+      const titleEl = document.getElementById('goalHeroTitle');
+      if (titleEl) titleEl.textContent = goal.title || 'Untitled goal';
+
+      const condoNameEl = document.getElementById('goalCondoName');
+      if (condoNameEl) {
+        const condoName = (() => {
+          const cid = goal.condoId || state.currentCondoId || '';
+          if (cid === 'cron') return 'Recurring';
+          const s = (state.sessions || []).find(x => getSessionCondoId(x) === cid);
+          return s ? getSessionCondoName(s) : (cid.split(':').pop() || 'Condo');
+        })();
+        condoNameEl.textContent = condoName;
+      }
+
+      const lastEl = document.getElementById('goalLastUpdated');
+      if (lastEl) lastEl.textContent = formatTimestamp(goal.updatedAtMs || goal.updatedAt || goal.createdAtMs || Date.now());
 
       const btn = document.getElementById('goalMarkDoneBtn');
-      btn.textContent = status === 'done' ? 'Mark active' : 'Mark done';
+      if (btn) btn.textContent = completed ? 'Mark active' : 'Mark done';
+
+      // Goal header meta is shown in the right panel; left chat meta is reserved for session identity.
+
+      // Definition editor uses goal.notes (closest thing we have today)
+      const defDisplay = document.getElementById('goalDefDisplay');
+      const notes = (goal.notes || goal.description || '').trim();
+      if (defDisplay) {
+        defDisplay.innerHTML = notes ? `${escapeHtml(notes)} <small>(click to edit)</small>` : `Click to add a definition… <small>(click to edit)</small>`;
+      }
+
+      // Goal chat should load the latest session for this goal (unless user chose a history entry)
+      const sess = Array.isArray(goal.sessions) ? goal.sessions : [];
+      const latestKey = getLatestGoalSessionKey(goal);
+      const hasSelection = state.goalChatSessionKey && sess.includes(state.goalChatSessionKey);
+      if (!hasSelection) {
+        state.goalChatSessionKey = latestKey;
+      }
+      setGoalChatLocked(!state.goalChatSessionKey);
+
+      updateGoalChatMeta(state.goalChatSessionKey);
+      renderGoalHistoryPicker(goal);
+      updateGoalSessionStatePill(goal);
+
+      renderGoalChat();
+
+      // Tabs + pane
+      if (!state.goalTab) state.goalTab = 'tasks';
+      setGoalTab(state.goalTab, { skipRender: true });
+      renderGoalPane();
+    }
+
+    function getLatestGoalSessionKey(goal) {
+      const keys = Array.isArray(goal?.sessions) ? goal.sessions : [];
+      if (!keys.length) return null;
+      const byKey = new Map((state.sessions || []).map(s => [s.key, s]));
+      const scored = keys.map(k => {
+        const s = byKey.get(k);
+        const t = Number(s?.updatedAt || s?.updatedAtMs || 0);
+        return { k, t };
+      });
+      scored.sort((a, b) => (b.t || 0) - (a.t || 0));
+      return scored[0]?.k || keys[0];
+    }
+
+    function updateGoalChatMeta(sessionKey) {
+      const chatMetaEl = document.getElementById('goalChatMeta');
+      if (!chatMetaEl) return;
+      if (!sessionKey) {
+        chatMetaEl.textContent = 'No session yet';
+        return;
+      }
+      const s = (state.sessions || []).find(x => x.key === sessionKey);
+      chatMetaEl.textContent = s ? `${getSessionName(s)} · ${getSessionMeta(s)}` : sessionKey;
+    }
+
+    function updateGoalSessionStatePill(goal) {
+      const pill = document.getElementById('goalSessionStatePill');
+      const dot = document.getElementById('goalSessionStateDot');
+      const label = document.getElementById('goalSessionStateLabel');
+      if (!pill || !dot || !label) return;
+
+      const goalId = goal?.id || state.currentGoalOpenId || null;
+      const key = state.goalChatSessionKey;
+
+      // No session yet: show neutral "Not started".
+      if (!key) {
+        dot.className = 'session-state-dot blink-idle';
+        label.textContent = 'Not started';
+        pill.title = 'Not started';
+        return;
+      }
+
+      const b = deriveSessionBlinker(key, { goalId });
+      dot.className = `session-state-dot ${b?.colorClass || 'blink-idle'}`;
+      label.textContent = b?.label || 'Idle';
+      pill.title = b?.label || 'Status';
+    }
+
+    function renderGoalHistoryPicker(goal) {
+      const wrap = document.getElementById('goalHistoryWrap');
+      const select = document.getElementById('goalHistorySelect');
+      if (!wrap || !select) return;
+      const sess = Array.isArray(goal?.sessions) ? goal.sessions.slice() : [];
+      if (!sess.length) {
+        wrap.style.display = 'none';
+        return;
+      }
+
+      const byKey = new Map((state.sessions || []).map(s => [s.key, s]));
+      const rows = sess.map(key => {
+        const s = byKey.get(key);
+        const updatedAt = Number(s?.updatedAt || s?.updatedAtMs || 0);
+        const label = s ? `${getSessionName(s)} · ${getSessionMeta(s)}` : key;
+        return { key, label, updatedAt };
+      }).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+      select.innerHTML = rows.map(r => `<option value="${escapeHtml(r.key)}">${escapeHtml(r.label)}</option>`).join('');
+      const current = state.goalChatSessionKey && sess.includes(state.goalChatSessionKey) ? state.goalChatSessionKey : rows[0]?.key;
+      if (current) select.value = current;
+
+      wrap.style.display = rows.length > 1 ? 'flex' : 'none';
+    }
+
+    function handleGoalHistoryChange(value) {
+      if (!value || value === state.goalChatSessionKey) return;
+      state.goalChatSessionKey = value;
+      setGoalChatLocked(false);
+      updateGoalChatMeta(value);
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      updateGoalSessionStatePill(goal);
+      renderGoalChat();
+    }
+
+    async function renderGoalChat() {
+      const box = document.getElementById('goal_chatMessages');
+      if (!box) return;
+
+      const key = state.goalChatSessionKey;
+      if (!key) {
+        box.innerHTML = `<div class="message system">Not started yet. Click “Kick Off Goal” to create the first session and begin.</div>`;
+        return;
+      }
+
+      box.innerHTML = `<div class="message system">Loading history…</div>`;
+      try {
+        const result = await rpcCall('chat.history', { sessionKey: key, limit: 50 });
+        const messages = result?.messages || [];
+        renderChatHistoryInto(box, messages);
+        scrollChatPanelToBottom('goal');
+      } catch (err) {
+        box.innerHTML = `<div class="message system">Error loading: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderChatHistoryInto(container, messages) {
+      if (!container) return;
+      if (!messages || messages.length === 0) {
+        container.innerHTML = '<div class="message system">No messages yet</div>';
+        return;
+      }
+
+      container.innerHTML = messages.map((m, idx) => {
+        if (m.role === 'user') {
+          const text = extractText(m.content);
+          if (!text) return '';
+          const timeHtml = m.timestamp ? `<div class="message-time">${formatMessageTime(new Date(m.timestamp))}</div>` : '';
+          return `<div class="message user"><div class="message-content">${formatMessage(text)}</div>${timeHtml}</div>`;
+        } else if (m.role === 'assistant') {
+          const text = extractText(m.content);
+          const spawnCards = extractSpawnCards(m.content, m.timestamp);
+          const timeHtml = m.timestamp ? `<div class="message-time">${formatMessageTime(new Date(m.timestamp))}</div>` : '';
+
+          let html = '';
+          if (spawnCards.length > 0) html += spawnCards.map(card => renderSpawnCard(card, idx)).join('');
+          if (text) html += `<div class="message assistant"><div class="message-content">${formatMessage(text)}</div>${timeHtml}</div>`;
+          return html;
+        }
+        return '';
+      }).filter(Boolean).join('');
+    }
+
+    function scrollChatPanelToBottom(prefix, force = true) {
+      const id = prefix ? `${prefix}_chatMessages` : 'chatMessages';
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+
+      // hide jump button
+      const jump = document.getElementById(prefix ? `${prefix}_jumpToLatest` : 'jumpToLatest');
+      if (jump) jump.style.display = 'none';
+      const cnt = document.getElementById(prefix ? `${prefix}_jumpToLatestCount` : 'jumpToLatestCount');
+      if (cnt) cnt.style.display = 'none';
+    }
+
+    function handleGoalChatKey(event) {
+      // Deprecated: goal chat composer is now mounted via mountComposer.
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendGoalChatMessage();
+      }
+    }
+
+    function openGoalChatInFull() {
+      const key = state.goalChatSessionKey;
+      if (!key) return;
+      openSession(key, { fromRouter: true });
+    }
+
+    async function sendGoalChatMessage() {
+      const input = document.getElementById('goal_chatInput');
+      const box = document.getElementById('goal_chatMessages');
+
+      if (!input || !box) {
+        showToast('Goal chat not ready', 'warning', 3000);
+        return;
+      }
+
+      const text = (input.value || '').trim();
+      const hasMedia = typeof MediaUpload !== 'undefined' && MediaUpload.hasPendingFiles && MediaUpload.hasPendingFiles();
+
+      if (!text && !hasMedia) {
+        showToast('Nothing to send', 'info', 1500);
+        return;
+      }
+
+      // Goal chat requires explicit kickoff.
+      const key = state.goalChatSessionKey;
+      if (!key) {
+        showToast('Kick off this goal before chatting', 'warning', 3500);
+        return;
+      }
+
+      // If agent is busy, queue goal messages (including attachments).
+      if (state.isThinking) {
+        let queuedText = text;
+        let queuedAttachments = undefined;
+
+        if (hasMedia) {
+          const files = MediaUpload.getPendingFiles();
+          const hasAudio = files.some(f => f.fileType === 'audio');
+
+          if (hasAudio) {
+            try {
+              showToast('Uploading voice note…', 'info', 2000);
+              addChatMessageTo('goal', 'system', 'Uploading voice note…');
+
+              const uploaded = await MediaUpload.uploadAllPending(key);
+              const lines = [];
+              const transcripts = [];
+
+              showToast('Transcribing…', 'info', 2000);
+              addChatMessageTo('goal', 'system', 'Transcribing…');
+
+              for (const u of (uploaded || [])) {
+                if (!u || !u.ok) continue;
+                lines.push(`[attachment: ${u.url}]`);
+                const isAudio = String(u.mimeType || '').startsWith('audio/') || String(u.url || '').match(/\.(webm|m4a|mp3|wav|ogg)(\?|$)/i);
+                if (isAudio && u.serverPath) {
+                  try {
+                    const resp = await fetch(`/api/whisper/transcribe?path=${encodeURIComponent(u.serverPath)}&cb=${Date.now()}`);
+                    const data = await resp.json();
+                    if (data?.ok && data.text) transcripts.push(data.text.trim());
+                  } catch {}
+                }
+              }
+
+              const transcriptText = transcripts.filter(Boolean).join('\n\n');
+              const voiceBlock = [transcriptText || '', ...lines].filter(Boolean).join('\n\n');
+              queuedText = queuedText ? [queuedText, voiceBlock].filter(Boolean).join('\n\n') : voiceBlock;
+              queuedAttachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
+              MediaUpload.clearFiles();
+            } catch (err) {
+              MediaUpload.clearFiles();
+              addChatMessageTo('goal', 'system', `Upload/transcribe error: ${err.message}`);
+              return;
+            }
+          } else {
+            // Images are uploaded to ClawCondos and referenced by URL.
+            // Avoid sending base64 blobs over WebSocket (can exceed frame limits and close the socket).
+            try {
+              showToast('Uploading image…', 'info', 2000);
+              addChatMessageTo('goal', 'system', 'Uploading image…');
+
+              const uploaded = await MediaUpload.uploadAllPending(key);
+              const lines = [];
+              for (const u of (uploaded || [])) {
+                if (!u || !u.ok) continue;
+                lines.push(`[attachment: ${u.url}]`);
+              }
+
+              const attachText = lines.filter(Boolean).join('\n');
+              queuedText = queuedText ? [queuedText, attachText].filter(Boolean).join('\n\n') : attachText;
+              queuedAttachments = undefined;
+              MediaUpload.clearFiles();
+            } catch (err) {
+              MediaUpload.clearFiles();
+              addChatMessageTo('goal', 'system', `Upload error: ${err.message}`);
+              return;
+            }
+          }
+        }
+
+        state.messageQueue.push({ text: queuedText || '', sessionKey: key, attachments: queuedAttachments });
+        updateQueueIndicator();
+        input.value = '';
+        autoResize(input);
+        addChatMessageTo('goal', 'user queued', queuedText || '[attachment]');
+        return;
+      }
+
+      input.value = '';
+      autoResize(input);
+
+      let finalMessage = text;
+      let attachments = undefined;
+
+      if (hasMedia) {
+        const files = MediaUpload.getPendingFiles();
+        const hasAudio = files.some(f => f.fileType === 'audio');
+
+        if (hasAudio) {
+          try {
+            // Give visible feedback
+            showToast('Uploading voice note…', 'info', 2000);
+            addChatMessageTo('goal', 'system', 'Uploading voice note…');
+
+            const uploaded = await MediaUpload.uploadAllPending(key);
+            const lines = [];
+            const transcripts = [];
+
+            showToast('Transcribing…', 'info', 2000);
+            addChatMessageTo('goal', 'system', 'Transcribing…');
+
+            for (const u of (uploaded || [])) {
+              if (!u || !u.ok) continue;
+              lines.push(`[attachment: ${u.url}]`);
+
+              const isAudio = String(u.mimeType || '').startsWith('audio/') || String(u.url || '').match(/\.(webm|m4a|mp3|wav|ogg)(\?|$)/i);
+              if (isAudio && u.serverPath) {
+                try {
+                  const resp = await fetch(`/api/whisper/transcribe?path=${encodeURIComponent(u.serverPath)}&cb=${Date.now()}`);
+                  const data = await resp.json();
+                  if (data?.ok && data.text) transcripts.push(data.text.trim());
+                } catch {}
+              }
+            }
+
+            const transcriptText = transcripts.filter(Boolean).join('\n\n');
+            const voiceBlock = [transcriptText || '', ...lines].filter(Boolean).join('\n\n');
+
+            if (!finalMessage) finalMessage = voiceBlock;
+            else finalMessage = [finalMessage, voiceBlock].filter(Boolean).join('\n\n');
+
+            attachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
+            MediaUpload.clearFiles();
+          } catch (err) {
+            MediaUpload.clearFiles();
+            box.insertAdjacentHTML('beforeend', `<div class="message system">Upload/transcribe error: ${escapeHtml(err.message)}</div>`);
+            box.scrollTop = box.scrollHeight;
+            return;
+          }
+        } else {
+          // Images are uploaded to ClawCondos and referenced by URL.
+          // Avoid sending base64 blobs over WebSocket (can exceed frame limits and close the socket).
+          try {
+            showToast('Uploading image…', 'info', 2000);
+            addChatMessageTo('goal', 'system', 'Uploading image…');
+
+            const uploaded = await MediaUpload.uploadAllPending(key);
+            const lines = [];
+            for (const u of (uploaded || [])) {
+              if (!u || !u.ok) continue;
+              lines.push(`[attachment: ${u.url}]`);
+            }
+
+            const attachText = lines.filter(Boolean).join('\n');
+            if (!finalMessage) finalMessage = attachText;
+            else finalMessage = [finalMessage, attachText].filter(Boolean).join('\n\n');
+
+            attachments = undefined;
+            MediaUpload.clearFiles();
+          } catch (err) {
+            MediaUpload.clearFiles();
+            box.insertAdjacentHTML('beforeend', `<div class="message system">Upload error: ${escapeHtml(err.message)}</div>`);
+            box.scrollTop = box.scrollHeight;
+            return;
+          }
+        }
+      }
+
+      // optimistic render
+      if (finalMessage) {
+        addChatMessageTo('goal', 'user', finalMessage);
+      }
+
+      try {
+        const sendStartedAt = Date.now();
+        const idempotencyKey = `goalmsg-${key}-${sendStartedAt}`;
+
+        await rpcCall('chat.send', {
+          sessionKey: key,
+          message: finalMessage || '',
+          attachments,
+          idempotencyKey,
+        }, 130000);
+
+        // Reliability: verify delivery (avoid "phantom" optimistic messages).
+        // NOTE: Don't exact-match message text — history can normalize whitespace, and attachments-only sends vary.
+        try {
+          const sentText = (finalMessage || '').trim();
+          if (sentText) {
+            const normalize = s => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const sentNorm = normalize(sentText);
+            const deadline = Date.now() + 12000;
+            let ok = false;
+
+            while (Date.now() < deadline) {
+              try {
+                const h = await rpcCall('chat.history', { sessionKey: key, limit: 30 }, 20000);
+                const msgs = h?.messages || [];
+
+                ok = msgs.some(m => {
+                  if (m.role !== 'user') return false;
+                  const ts = Number(m.timestamp || 0);
+                  if (ts && ts < sendStartedAt - 2000) return false;
+                  const txt = extractText(m.content);
+                  if (!txt) return false;
+                  const norm = normalize(txt);
+                  return norm === sentNorm || norm.includes(sentNorm.slice(0, Math.min(60, sentNorm.length)));
+                });
+              } catch {}
+
+              if (ok) break;
+              await new Promise(r => setTimeout(r, 450));
+            }
+
+            if (!ok) {
+              // Only warn when we truly couldn't observe it; avoid spurious nags.
+              addChatMessageTo('goal', 'system', '⚠️ Delivery not confirmed yet. If you do not see a reply soon, retry once.');
+            }
+          }
+        } catch {}
+
+        // Don't re-fetch history immediately; the WS event will append the response.
+        // (Immediate reload causes "message appears then disappears".)
+      } catch (err) {
+        box.insertAdjacentHTML('beforeend', `<div class="message system">Error: ${escapeHtml(err.message)}</div>`);
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+
+    function formatTimestamp(ms) {
+      const d = new Date(Number(ms) || Date.now());
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function startGoalDefEdit() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      const disp = document.getElementById('goalDefDisplay');
+      const edit = document.getElementById('goalDefEdit');
+      const ta = document.getElementById('goalDefTA');
+      if (!disp || !edit || !ta) return;
+
+      const val = (goal?.notes || goal?.description || '').trim();
+      ta.value = val;
+      edit.classList.add('open');
+      disp.style.display = 'none';
+      ta.focus();
+    }
+
+    async function saveGoalDefEdit() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      const ta = document.getElementById('goalDefTA');
+      if (!goal || !ta) return;
+      const val = (ta.value || '').trim();
+      await updateGoal(goal.id, { notes: val });
+      cancelGoalDefEdit();
+      renderGoalView();
+    }
+
+    function cancelGoalDefEdit() {
+      const disp = document.getElementById('goalDefDisplay');
+      const edit = document.getElementById('goalDefEdit');
+      if (!disp || !edit) return;
+      edit.classList.remove('open');
+      disp.style.display = 'block';
+    }
+
+    function setGoalTab(which, opts = {}) {
+      state.goalTab = which;
+      const t1 = document.getElementById('goalTabTasks');
+      const t2 = document.getElementById('goalTabFiles');
+      if (t1) t1.classList.toggle('active', which === 'tasks');
+      if (t2) t2.classList.toggle('active', which === 'files');
+      if (!opts.skipRender) renderGoalPane();
+    }
+
+    function renderGoalPane() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      const pane = document.getElementById('goalPane');
+      if (!goal || !pane) return;
+
+      if ((state.goalTab || 'tasks') === 'files') {
+        pane.innerHTML = `<div class="empty-state" style="padding:14px;">Files view is coming soon. (We can wire it to a goal “files” field or to session artifacts.)</div>`;
+        return;
+      }
 
       const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
-      const tasksEl = document.getElementById('goalTasks');
       if (!tasks.length) {
-        tasksEl.innerHTML = `<div class="empty-state">No tasks yet. Add the next physical step.</div>`;
-      } else {
-        tasksEl.innerHTML = tasks.map((t, idx) => {
-          const id = escapeHtml(t.id || String(idx));
-          const checked = t.done ? 'checked' : '';
-          return `
-            <div class="goal-task ${t.done ? 'done' : ''}">
-              <label class="goal-task-check">
-                <input type="checkbox" ${checked} onchange="toggleGoalTask('${id}')">
-                <span class="goal-task-text">${escapeHtml(t.text || '')}</span>
-              </label>
-              <button class="goal-task-del" onclick="deleteGoalTask('${id}')" title="Delete">×</button>
-            </div>
-          `;
-        }).join('');
+        pane.innerHTML = `
+          <div class="empty-state" style="padding:14px;">No tasks yet. Add the next physical step.</div>
+          <div class="goal-task-compose">
+            <input class="form-input" id="goalNewTaskInput" placeholder="Add a task…" onkeypress="if(event.key==='Enter')addGoalTaskFromGoalPane()">
+            <button class="ghost-btn" onclick="addGoalTaskFromGoalPane()">Add</button>
+          </div>
+        `;
+        return;
       }
 
-      document.getElementById('goalNotes').value = goal.notes || '';
-      document.getElementById('goalDeadlineInput').value = goal.deadline || '';
-      document.getElementById('goalPriorityInput').value = goal.priority || '';
+      // Tasks: grouped by stage (prototype direction). If no stage metadata yet, they land in Backlog.
+      const stages = [
+        { k: 'backlog', l: 'Backlog' },
+        { k: 'blocked', l: 'Blocked' },
+        { k: 'doing', l: 'Doing' },
+        { k: 'review', l: 'Review' },
+        { k: 'done', l: 'Done' },
+      ];
 
-      const sess = Array.isArray(goal.sessions) ? goal.sessions : [];
-      const sessEl = document.getElementById('goalSessions');
-      if (!sess.length) {
-        sessEl.innerHTML = `<div class="empty-state">No sessions attached. Attach one to keep the work located.</div>`;
-      } else {
-        const byKey = new Map(state.sessions.map(s => [s.key, s]));
-        sessEl.innerHTML = sess.map(k => {
-          const s = byKey.get(k);
-          const name = s ? getSessionName(s) : k;
-          const meta = s ? getSessionMeta(s) : 'unknown';
-          return `
-            <div class="goal-session-row" onclick="openSession('${escapeHtml(k)}')">
-              <div class="goal-session-icon">${s ? getSessionIcon(s) : '💬'}</div>
-              <div class="goal-session-main">
-                <div class="goal-session-name">${escapeHtml(name)}</div>
-                <div class="goal-session-meta">${escapeHtml(meta)}</div>
+      const by = new Map(stages.map(s => [s.k, []]));
+      for (const t of tasks) {
+        const key = t.blocked ? 'blocked' : (t.stage || (t.done ? 'done' : 'backlog'));
+        if (!by.has(key)) by.set(key, []);
+        by.get(key).push(t);
+      }
+
+      pane.innerHTML = `
+        ${stages.map(s => {
+          const items = by.get(s.k) || [];
+          if (!items.length) return '';
+          const rows = items.map((t, idx) => {
+            const id = escapeHtml(t.id || String(idx));
+            const checked = t.done ? 'checked' : '';
+            const badge = t.blocked ? 'blocked' : (t.stage || (t.done ? 'done' : 'backlog'));
+            const title = t.text || t.title || '';
+            return `
+              <div class="goal-task-row" onclick="toggleGoalTask('${id}')">
+                <input type="checkbox" ${checked} onclick="event.stopPropagation(); toggleGoalTask('${id}')">
+                <div class="goal-badge ${escapeHtml(badge)}"></div>
+                <div class="goal-rtitle">${escapeHtml(title)}</div>
+                <div class="goal-rmeta"><span>${escapeHtml(String(t.id || ''))}</span></div>
               </div>
-              <button class="goal-session-move" onclick="event.stopPropagation(); showAttachSessionModal('${escapeHtml(k)}')" title="Move">⛓</button>
-            </div>
-          `;
-        }).join('');
-      }
+            `;
+          }).join('');
+
+          return `<div class="goal-group"><div class="goal-ghead"><div class="goal-gtitle">${escapeHtml(s.l)}</div><div class="goal-gcount">${items.length}</div></div>${rows}</div>`;
+        }).join('')}
+
+        <div class="goal-task-compose">
+          <input class="form-input" id="goalNewTaskInput" placeholder="Add a task…" onkeypress="if(event.key==='Enter')addGoalTaskFromGoalPane()">
+          <button class="ghost-btn" onclick="addGoalTaskFromGoalPane()">Add</button>
+        </div>
+      `;
+    }
+
+    async function addGoalTaskFromGoalPane() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      const input = document.getElementById('goalNewTaskInput');
+      if (!input) return;
+      const text = (input.value || '').trim();
+      if (!text) return;
+
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks.slice() : [];
+      tasks.unshift({ id: uid('task'), text, done: false, stage: 'backlog' });
+      input.value = '';
+      await updateGoal(goal.id, { tasks });
     }
 
     async function toggleGoalDone() {
       const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
       if (!goal) return;
-      const next = goal.status === 'done' ? 'active' : 'done';
-      await updateGoal(goal.id, { status: next });
+      const next = !isGoalCompleted(goal);
+      await updateGoal(goal.id, { completed: next, status: next ? 'done' : 'active' });
     }
 
-    async function updateGoal(goalId, patch) {
+    async function updateGoal(goalId, patch, opts = {}) {
       try {
-        const res = await fetch(`api/goals/${encodeURIComponent(goalId)}`, {
+        const res = await fetch(`/api/goals/${encodeURIComponent(goalId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(patch),
@@ -1923,11 +3333,128 @@
         const data = await res.json();
         const idx = state.goals.findIndex(g => g.id === goalId);
         if (idx !== -1 && data?.goal) state.goals[idx] = data.goal;
-        renderGoals();
-        renderGoalsGrid();
-        renderGoalView();
+
+        if (!opts.skipRender) {
+          try { renderGoals(); } catch {}
+          try { renderGoalsGrid(); } catch {}
+
+          // Avoid nuking chat contents when we're in goal view; prefer lighter refresh.
+          if (!(opts.skipGoalViewRerender) && state.currentView === 'goal' && state.currentGoalOpenId === goalId) {
+            try { renderGoalView(); } catch {}
+          } else {
+            try { renderDetailPanel(); } catch {}
+          }
+        }
+
+        return data?.goal;
       } catch (e) {
-        showToast('Failed to save goal', 'error');
+        if (!opts.silent) showToast('Failed to save goal', 'error');
+        throw e;
+      }
+    }
+
+    function extractJsonBlocks(text) {
+      const out = [];
+      const s = String(text || '');
+      const re = /```(?:json)?\s*([\s\S]*?)```/gi;
+      let m;
+      while ((m = re.exec(s)) !== null) {
+        const body = (m[1] || '').trim();
+        if (body) out.push(body);
+      }
+      return out;
+    }
+
+    function extractFirstJsonObject(s) {
+      const str = String(s || '');
+      const start = str.indexOf('{');
+      if (start === -1) return null;
+
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let i = start; i < str.length; i++) {
+        const ch = str[i];
+        if (inString) {
+          if (escape) {
+            escape = false;
+          } else if (ch === '\\') {
+            escape = true;
+          } else if (ch === '"') {
+            inString = false;
+          }
+          continue;
+        }
+        if (ch === '"') {
+          inString = true;
+          continue;
+        }
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        if (depth === 0) {
+          return str.slice(start, i + 1);
+        }
+      }
+      return null;
+    }
+
+    function tryParseGoalPatch(text) {
+      // Accept either:
+      // - fenced ```json ...``` blocks
+      // - a raw single-line JSON object
+      // - a JSON object embedded inside a longer assistant message
+      const blocks = extractJsonBlocks(text);
+      const candidates = blocks.length ? blocks : [String(text || '')];
+
+      for (const c of candidates) {
+        const trimmed = (c || '').trim();
+        const jsonStr = trimmed.startsWith('{') ? trimmed : extractFirstJsonObject(trimmed);
+        if (!jsonStr || !jsonStr.trim().startsWith('{')) continue;
+
+        try {
+          const obj = JSON.parse(jsonStr);
+          const patch = obj?.goalPatch || obj?.clawcondosGoalPatch || obj;
+          if (!patch || typeof patch !== 'object') continue;
+
+          // Heuristic: only treat as patch if it looks like one.
+          const keys = Object.keys(patch);
+          const allowed = new Set(['status','priority','deadline','notes','description','tasks','nextTask','completed','dropped','droppedAtMs','condoId','condoName']);
+          const looksLikePatch = keys.some(k => allowed.has(k));
+          if (!looksLikePatch) continue;
+
+          return patch;
+        } catch {}
+      }
+      return null;
+    }
+
+    async function maybeAutoApplyGoalPatch(sessionKey, assistantText) {
+      const text = (assistantText || '').trim();
+      if (!text) return;
+
+      const patch = tryParseGoalPatch(text);
+      if (!patch) return;
+
+      // Determine goalId from sessionKey mapping.
+      let goalId = null;
+      try {
+        const g = getGoalForSession(sessionKey);
+        if (g?.id) goalId = g.id;
+      } catch {}
+      if (!goalId && state.currentView === 'goal' && state.goalChatSessionKey === sessionKey) {
+        goalId = state.currentGoalOpenId;
+      }
+      if (!goalId) return;
+
+      try {
+        await updateGoal(goalId, patch, { silent: true, skipGoalViewRerender: true });
+        // Light refresh for goal header + tasks pane.
+        if (state.currentView === 'goal' && state.currentGoalOpenId === goalId) {
+          try { renderGoalView(); } catch {}
+        }
+        showToast('Applied goal update', 'info', 1200);
+      } catch (e) {
+        addChatMessageTo('goal', 'system', `⚠️ Failed to apply goal update: ${e.message}`);
       }
     }
 
@@ -1989,17 +3516,91 @@
       }
     }
 
-    async function promptDeleteGoal() {
+    function isGoalDropped(goal) {
+      return !!(goal && (goal.dropped || goal.status === 'dropped' || goal.deleted === true));
+    }
+
+    function showArchivedGoalsModal() {
+      const modal = document.getElementById('archivedGoalsModal');
+      if (!modal) return;
+      modal.classList.remove('hidden');
+      if (!state.archivedTab) state.archivedTab = 'done';
+      renderArchivedGoals();
+    }
+
+    function hideArchivedGoalsModal() {
+      const modal = document.getElementById('archivedGoalsModal');
+      if (!modal) return;
+      modal.classList.add('hidden');
+    }
+
+    function setArchivedTab(tab) {
+      state.archivedTab = tab;
+      renderArchivedGoals();
+    }
+
+    function renderArchivedGoals() {
+      const list = document.getElementById('archivedGoalsList');
+      if (!list) return;
+
+      const doneBtn = document.getElementById('archTabDone');
+      const dropBtn = document.getElementById('archTabDropped');
+      if (doneBtn) doneBtn.classList.toggle('active', state.archivedTab === 'done');
+      if (dropBtn) dropBtn.classList.toggle('active', state.archivedTab === 'dropped');
+
+      const condoId = state.currentCondoId;
+      const all = (state.goals || []).filter(g => (g.condoId || 'misc:default') === condoId);
+      const items = (state.archivedTab === 'dropped')
+        ? all.filter(g => isGoalDropped(g))
+        : all.filter(g => isGoalCompleted(g) && !isGoalDropped(g));
+
+      if (!items.length) {
+        list.innerHTML = `<div class="empty-state">Nothing here yet.</div>`;
+        return;
+      }
+
+      list.innerHTML = items
+        .sort((a, b) => Number(b.updatedAtMs || b.updatedAt || 0) - Number(a.updatedAtMs || a.updatedAt || 0))
+        .map(g => {
+          const updated = formatTimestamp(g.updatedAtMs || g.updatedAt || g.createdAtMs || Date.now());
+          const pill = state.archivedTab === 'dropped' ? 'dropped' : 'done';
+          return `
+            <a class="goal-picker-row" style="cursor:pointer" href="${escapeHtml(goalHref(g.id))}" onclick="return handleGoalLinkClick(event, '${escapeHtml(g.id)}')">
+              <div class="goal-picker-title">${escapeHtml(g.title || 'Untitled goal')}</div>
+              <div class="goal-picker-meta">${pill} · updated ${escapeHtml(updated)}</div>
+              <div style="margin-top:8px; display:flex; gap:8px;">
+                ${state.archivedTab === 'dropped' ? `<button class=\"ghost-btn\" onclick=\"event.preventDefault(); event.stopPropagation(); restoreGoal('${escapeHtml(g.id)}')\">Restore</button>` : ''}
+                ${state.archivedTab === 'done' ? `<button class=\"ghost-btn\" onclick=\"event.preventDefault(); event.stopPropagation(); markGoalActive('${escapeHtml(g.id)}')\">Mark active</button>` : ''}
+              </div>
+            </a>
+          `;
+        }).join('');
+    }
+
+    async function restoreGoal(goalId) {
+      await updateGoal(goalId, { dropped: false, status: 'active' });
+      await loadGoals();
+      renderCondoView();
+      renderArchivedGoals();
+    }
+
+    async function markGoalActive(goalId) {
+      await updateGoal(goalId, { completed: false, status: 'active' });
+      await loadGoals();
+      renderCondoView();
+      renderArchivedGoals();
+    }
+
+    async function promptDropGoal() {
       const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
       if (!goal) return;
-      if (!confirm(`Delete goal "${goal.title}"? This does not delete sessions.`)) return;
+      if (!confirm(`Drop goal "${goal.title}"?`)) return;
       try {
-        const res = await fetch(`api/goals/${encodeURIComponent(goal.id)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed');
+        await updateGoal(goal.id, { dropped: true, status: 'dropped', droppedAtMs: Date.now() });
         await loadGoals();
-        showOverview();
+        navigateTo(`condo/${encodeURIComponent(goal.condoId || state.currentCondoId || 'misc:default')}`);
       } catch {
-        showToast('Failed to delete goal', 'error');
+        showToast('Failed to drop goal', 'error');
       }
     }
 
@@ -2015,17 +3616,19 @@
       document.getElementById('attachSessionPill').textContent = key ? key : 'No session selected';
 
       if (!state.attachGoalId && state.currentGoalOpenId) state.attachGoalId = state.currentGoalOpenId;
-      if (!state.attachGoalId && state.goals[0]) state.attachGoalId = state.goals[0].id;
 
       const picker = document.getElementById('goalPicker');
-      const rows = state.goals.map(g => {
+      const condoId = getCondoIdForSessionKey(key);
+      const goals = state.goals.filter(g => !isGoalCompleted(g) && (g.condoId || condoId) === condoId);
+      if (!state.attachGoalId && goals[0]) state.attachGoalId = goals[0].id;
+      const rows = goals.map(g => {
         const active = state.attachGoalId === g.id ? 'active' : '';
         const { done, total } = goalTaskStats(g);
         const due = g.deadline ? `<span class="goal-picker-due">due ${escapeHtml(g.deadline)}</span>` : '';
         return `
           <div class="goal-picker-row ${active}" onclick="selectAttachGoal('${escapeHtml(g.id)}')">
             <div class="goal-picker-title">${escapeHtml(g.title || 'Untitled goal')}</div>
-            <div class="goal-picker-meta">${g.status === 'done' ? 'done' : 'active'} · ${done}/${total} tasks ${due}</div>
+            <div class="goal-picker-meta">${isGoalCompleted(g) ? 'done' : 'active'} · ${done}/${total} tasks ${due}</div>
           </div>
         `;
       }).join('');
@@ -2058,7 +3661,7 @@
         return;
       }
       try {
-        const res = await fetch(`api/goals/${encodeURIComponent(goalId)}/sessions`, {
+        const res = await fetch(`/api/goals/${encodeURIComponent(goalId)}/sessions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionKey }),
@@ -2285,16 +3888,16 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
       if (!sessionKey || !title) return;
       
       try {
-        const res = await fetch('api/goals', {
+        const res = await fetch('/api/goals', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title }),
+          body: JSON.stringify({ title, condoId: getCondoIdForSessionKey(sessionKey) }),
         });
         if (!res.ok) throw new Error('Failed to create goal');
         const data = await res.json();
         
         if (data?.goal?.id) {
-          await fetch(`api/goals/${data.goal.id}/sessions`, {
+          await fetch(`/api/goals/${data.goal.id}/sessions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionKey }),
@@ -2328,7 +3931,7 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
             <div class="suggestion-icon">🏙️</div>
             <div class="suggestion-content">
               <div class="suggestion-title">${escapeHtml(g.title)}</div>
-              <div class="suggestion-reason">${g.sessions?.length || 0} sessions · ${g.status || 'active'}</div>
+              <div class="suggestion-reason">${g.sessions?.length || 0} sessions · ${isGoalCompleted(g) ? 'done' : 'active'}</div>
             </div>
           </div>
         `).join('');
@@ -2340,7 +3943,7 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
       if (!sessionKey) return;
       
       try {
-        const res = await fetch(`api/goals/${goalId}/sessions`, {
+        const res = await fetch(`/api/goals/${goalId}/sessions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionKey }),
@@ -2369,17 +3972,17 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
       
       try {
         // Create goal
-        const res = await fetch('api/goals', {
+        const res = await fetch('/api/goals', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title }),
+          body: JSON.stringify({ title, condoId: getCondoIdForSessionKey(sessionKey) }),
         });
         if (!res.ok) throw new Error('Failed to create goal');
         const data = await res.json();
         
         // Assign session to new goal
         if (sessionKey && data?.goal?.id) {
-          await fetch(`api/goals/${data.goal.id}/sessions`, {
+          await fetch(`/api/goals/${data.goal.id}/sessions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionKey }),
@@ -2751,21 +4354,21 @@ Response format:
       try {
         if (proposal.goalId && !proposal.isNew) {
           // Assign to existing goal
-          await fetch(`api/goals/${proposal.goalId}/sessions`, {
+          await fetch(`/api/goals/${proposal.goalId}/sessions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionKey }),
           });
         } else {
           // Create new goal and assign
-          const res = await fetch('api/goals', {
+          const res = await fetch('/api/goals', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: proposal.title || 'New Goal' }),
+            body: JSON.stringify({ title: proposal.title || 'New Goal', condoId: getCondoIdForSessionKey(sessionKey) }),
           });
           const data = await res.json();
           if (data?.goal?.id) {
-            await fetch(`api/goals/${data.goal.id}/sessions`, {
+            await fetch(`/api/goals/${data.goal.id}/sessions`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ sessionKey }),
@@ -2789,7 +4392,7 @@ Response format:
       if (!sessionKey) return;
       
       try {
-        await fetch(`api/goals/${goalId}/sessions`, {
+        await fetch(`/api/goals/${goalId}/sessions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionKey }),
@@ -2811,15 +4414,15 @@ Response format:
       if (!sessionKey) return;
       
       try {
-        const res = await fetch('api/goals', {
+        const res = await fetch('/api/goals', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title }),
+          body: JSON.stringify({ title, condoId: getCondoIdForSessionKey(state.wizardPendingSessionKey) }),
         });
         const data = await res.json();
         
         if (data?.goal?.id) {
-          await fetch(`api/goals/${data.goal.id}/sessions`, {
+          await fetch(`/api/goals/${data.goal.id}/sessions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionKey }),
@@ -2870,10 +4473,10 @@ Response format:
         return;
       }
       try {
-        const res = await fetch('api/goals', {
+        const res = await fetch('/api/goals', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title, deadline: deadline || null }),
+          body: JSON.stringify({ title, deadline: deadline || null, condoId: state.currentCondoId || state.newGoalCondoId || null }),
         });
         if (!res.ok) throw new Error('Failed to create goal');
         const data = await res.json();
@@ -2928,6 +4531,15 @@ Response format:
         console.log('[ClawCondos] Sessions result:', result);
         if (result?.sessions) {
           state.sessions = result.sessions;
+
+          // Data-level: funnel heartbeat/cron sessions into SYSTEM condo.
+          for (const s of state.sessions) {
+            if (isSystemCondoSession(s)) {
+              // Fire-and-forget; don't block rendering.
+              persistSessionCondo(s.key, 'condo:system');
+            }
+          }
+
           // Goals chips depend on total session count
           renderGoals();
           // Initialize/update status for sessions
@@ -2945,6 +4557,18 @@ Response format:
           renderSessions();
           renderSessionsGrid();
           updateUncategorizedCount();
+          if (state.pendingRouteSessionKey) {
+            const pending = state.pendingRouteSessionKey;
+            state.pendingRouteSessionKey = null;
+            if (state.sessions.find(s => s.key === pending)) {
+              openSession(pending, { fromRouter: true });
+            }
+          }
+          if (state.pendingRouteCondoId) {
+            const pending = state.pendingRouteCondoId;
+            state.pendingRouteCondoId = null;
+            openCondo(pending, { fromRouter: true });
+          }
           // Agents tree uses sessions for its nested view
           if (state.agents?.length) renderAgents();
         }
@@ -2953,15 +4577,363 @@ Response format:
       }
     }
     
+    async function loadCronJobs() {
+      if (state.cronJobsLoaded) return;
+      try {
+        const res = await rpcCall('cron.list', { includeDisabled: true });
+        const jobs = res?.jobs || res?.items || (Array.isArray(res) ? res : []);
+        if (Array.isArray(jobs)) {
+          state.cronJobs = jobs;
+          state.cronJobsLoaded = true;
+        }
+      } catch (e) {
+        console.warn('cron.list failed:', e?.message || e);
+      }
+    }
+
+    function formatRelativeTime(ms) {
+      const t = Number(ms || 0);
+      if (!t) return '—';
+      const delta = Date.now() - t;
+      const s = Math.floor(Math.abs(delta) / 1000);
+      const m = Math.floor(s / 60);
+      const h = Math.floor(m / 60);
+      const d = Math.floor(h / 24);
+      const fmt = d > 0 ? `${d}d` : h > 0 ? `${h}h` : m > 0 ? `${m}m` : `${s}s`;
+      return delta >= 0 ? `${fmt} ago` : `in ${fmt}`;
+    }
+
+    function formatSchedule(schedule) {
+      if (!schedule) return '—';
+      if (schedule.kind === 'cron') {
+        const tz = schedule.tz ? ` (${schedule.tz})` : '';
+        return `${schedule.expr || 'cron'}${tz}`;
+      }
+      if (schedule.kind === 'every') {
+        const ms = Number(schedule.everyMs || 0);
+        if (!ms) return 'every (unknown)';
+        const s = Math.round(ms / 1000);
+        const m = Math.round(s / 60);
+        const h = Math.round(m / 60);
+        const d = Math.round(h / 24);
+        const every = d >= 1 && d * 86400 === s ? `${d}d` : h >= 1 && h * 3600 === s ? `${h}h` : m >= 1 && m * 60 === s ? `${m}m` : `${s}s`;
+        return `every ${every}`;
+      }
+      if (schedule.kind === 'at') {
+        const at = Number(schedule.atMs || 0);
+        return at ? `at ${new Date(at).toLocaleString()}` : 'at (unknown)';
+      }
+      return schedule.kind || '—';
+    }
+
+    function getJobModel(payload) {
+      if (!payload) return 'main';
+      if (payload.kind === 'agentTurn') return payload.model || 'default';
+      return 'main';
+    }
+
+    function summarizeOutcome(payload) {
+      if (!payload) return '';
+      const txt = String(payload.message || payload.text || '').trim();
+      if (!txt) return '';
+      const line = txt.split(/\r?\n/).map(s => s.trim()).find(Boolean) || '';
+      return line.length > 120 ? line.slice(0, 117) + '…' : line;
+    }
+
+    function openCronJobDetail(jobId) {
+      state.selectedCronJobId = String(jobId || '').trim() || null;
+      renderDetailPanel();
+    }
+
+    async function ensureCronRuns(jobId) {
+      const id = String(jobId || '').trim();
+      if (!id) return;
+      if (!state.cronRunsByJobId) state.cronRunsByJobId = {};
+      const existing = state.cronRunsByJobId[id];
+      if (existing && existing.loaded) return;
+      state.cronRunsByJobId[id] = { loaded: false, loading: true, runs: [], error: null };
+      try {
+        const res = await rpcCall('cron.runs', { jobId: id });
+        const runs = res?.runs || res?.items || (Array.isArray(res) ? res : []);
+        state.cronRunsByJobId[id] = { loaded: true, loading: false, runs: Array.isArray(runs) ? runs : [], error: null };
+      } catch (e) {
+        state.cronRunsByJobId[id] = { loaded: true, loading: false, runs: [], error: e?.message || String(e) };
+      }
+    }
+
+    async function loadSkillDetailsForAgent(agentId, skillIds) {
+      try {
+        const ids = (skillIds || []).map(String).filter(Boolean);
+        if (!ids.length) return;
+        const res = await fetch(`/api/skills/resolve?ids=${encodeURIComponent(ids.join(','))}`);
+        const data = await res.json();
+        if (data?.ok && Array.isArray(data.skills)) {
+          state.resolvedSkillsByAgent[agentId] = data.skills;
+        } else {
+          state.resolvedSkillsByAgent[agentId] = ids.map(id => ({ id, name: id, description: '' }));
+        }
+      } catch {
+        state.resolvedSkillsByAgent[agentId] = (skillIds || []).map(id => ({ id, name: id, description: '' }));
+      } finally {
+        if (state.currentView === 'agents') {
+          renderAgentsPage();
+        }
+      }
+    }
+
+    async function loadAgentSummary(agentId) {
+      const id = String(agentId || '').trim();
+      if (!id) return;
+      if (state.agentSummaries?.[id] || state.agentSummaryLoading?.[id]) return;
+      state.agentSummaryLoading[id] = true;
+      try {
+        const res = await fetch(`/api/agents/summary?agentId=${encodeURIComponent(id)}`);
+        const data = await res.json();
+        if (data && data.ok) state.agentSummaries[id] = data;
+      } catch (e) {
+        console.warn('agent summary load failed', id, e?.message || e);
+      } finally {
+        state.agentSummaryLoading[id] = false;
+        if (state.currentView === 'agents') {
+          renderAgentsPage();
+        }
+      }
+    }
+
+    async function loadAgentFiles(agentId) {
+      const id = String(agentId || '').trim();
+      if (!id) return;
+      if (state.agentFileLoading) return;
+      state.agentFileLoading = true;
+      try {
+        const res = await fetch(`/api/agents/files?agentId=${encodeURIComponent(id)}`);
+        const data = await res.json();
+        if (data?.ok) {
+          state.agentFileEntries = data.entries || [];
+        }
+      } catch (e) {
+        console.warn('agent files load failed', id, e?.message || e);
+      } finally {
+        state.agentFileLoading = false;
+        if (state.currentView === 'agents') renderDetailPanel();
+      }
+    }
+
+    async function selectAgentFile(relPath) {
+      const agent = state.agents?.find(a => a.id === state.selectedAgentId) || state.agents?.[0];
+      if (!agent) return;
+      state.selectedAgentFile = relPath;
+      state.agentFileContent = '';
+      try {
+        const res = await fetch(`/api/agents/file?agentId=${encodeURIComponent(agent.id)}&path=${encodeURIComponent(relPath)}`);
+        const data = await res.json();
+        if (data?.ok) state.agentFileContent = data.content || '';
+        else state.agentFileContent = data?.error || 'Failed to load file';
+      } catch (e) {
+        state.agentFileContent = `Failed to load file: ${e?.message || e}`;
+      }
+      renderDetailPanel();
+    }
+
+    function renderAgentsPage() {
+      // Ensure agent data caches exist (detail panel used to initialize these)
+      if (!state.agentSummaries) state.agentSummaries = {};
+      if (!state.agentSummaryLoading) state.agentSummaryLoading = {};
+      if (!state.resolvedSkillsByAgent) state.resolvedSkillsByAgent = {};
+
+      const list = document.getElementById('agentsListColumn');
+      const body = document.getElementById('agentsMainBody');
+      if (!list || !body) return;
+
+      const agents = (state.agents || []).slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      const sub = document.getElementById('agentsLeftSub');
+      if (sub) sub.textContent = agents.length ? `${agents.length} configured` : '—';
+
+      if (!agents.length) {
+        list.innerHTML = `<div style="padding:12px; color: var(--text-dim);">No agents</div>`;
+        body.innerHTML = '';
+        return;
+      }
+
+      if (!state.selectedAgentId) state.selectedAgentId = agents[0].id;
+
+      list.innerHTML = agents.map(a => {
+        const name = a.identity?.name || a.name || a.id;
+        const active = state.selectedAgentId === a.id;
+        const model = a.model || a.models?.primary || '';
+
+        const chips = [
+          `<span class="agent-chip">${escapeHtml(String(a.id))}</span>`,
+          model ? `<span class="agent-chip">${escapeHtml(String(model))}</span>` : ''
+        ].filter(Boolean).join('');
+
+        return `
+          <div class="agent-card ${active ? 'active' : ''}" onclick="selectAgentForAgentsPage('${escapeHtml(a.id)}')">
+            <div class="agent-card-title">${escapeHtml(String(name))}</div>
+            <div class="agent-card-meta">${chips}</div>
+          </div>
+        `;
+      }).join('');
+
+      const agent = agents.find(a => a.id === state.selectedAgentId) || agents[0];
+      state.selectedAgentId = agent.id;
+
+      const titleEl = document.getElementById('agentsMainTitle');
+      const metaEl = document.getElementById('agentsMainMeta');
+      const displayName = agent.identity?.name || agent.name || agent.id;
+      const model = agent.model || agent.models?.primary || '';
+      if (titleEl) titleEl.textContent = `${agent.identity?.emoji || '🤖'} ${displayName}`;
+      if (metaEl) {
+        const toolCount = Array.isArray(agent.tools) ? agent.tools.length : (Array.isArray(agent.toolAllowlist) ? agent.toolAllowlist.length : null);
+        metaEl.innerHTML = [
+          `<span class="agent-chip">id: ${escapeHtml(String(agent.id))}</span>`,
+          model ? `<span class="agent-chip">model: ${escapeHtml(String(model))}</span>` : '',
+          toolCount != null ? `<span class="agent-chip">tools: ${escapeHtml(String(toolCount))}</span>` : ''
+        ].filter(Boolean).join(' ');
+      }
+
+      const desc = (agent.description || agent.summary || '').trim();
+
+      const jobsLoaded = state.cronJobsLoaded;
+      const allJobs = state.cronJobs || [];
+      const agentKey = String(agent.id);
+      const agentJobs = jobsLoaded ? allJobs.filter(j => String(j.agentId || '') === agentKey) : [];
+      const agentJobSearch = String((state.agentJobsSearchByAgent || {})[agentKey] || '');
+      const agentJobEnabledOnly = !!(state.agentJobsEnabledOnlyByAgent || {})[agentKey];
+
+      let filteredAgentJobs = agentJobs.slice();
+      const agentSearch = agentJobSearch.trim().toLowerCase();
+      if (agentJobEnabledOnly) {
+        filteredAgentJobs = filteredAgentJobs.filter(j => j.enabled !== false);
+      }
+      if (agentSearch) {
+        filteredAgentJobs = filteredAgentJobs.filter(j => {
+          const name = String(j.name || j.id || '');
+          const schedule = formatSchedule(j.schedule);
+          const agentId = String(j.agentId || 'main');
+          const model = String(getJobModel(j.payload));
+          const outcome = summarizeOutcome(j.payload);
+          const status = String(j.state?.lastStatus || '');
+          const haystack = `${name} ${j.id || ''} ${schedule} ${agentId} ${model} ${outcome} ${status}`.toLowerCase();
+          return haystack.includes(agentSearch);
+        });
+      }
+
+      const jobsHtml = !jobsLoaded
+        ? `<div class="grid-card">Loading recurring tasks…</div>`
+        : (filteredAgentJobs.length ? filteredAgentJobs.map(j => {
+            const name = j.name || j.id;
+            const schedule = formatSchedule(j.schedule);
+            const model = getJobModel(j.payload);
+            const outcome = summarizeOutcome(j.payload);
+            const last = j.state || {};
+            const lastAt = Number(last.lastRunAtMs || 0);
+            const lastStatus = last.lastStatus || '';
+            const line2 = `${j.agentId || 'main'} · ${model} · ${j.enabled === false ? 'disabled' : 'enabled'}`;
+            const line3 = lastAt ? `last ${formatRelativeTime(lastAt)}${lastStatus ? ` (${lastStatus})` : ''}` : '';
+            return `
+              <div class="grid-card" onclick="openCronJobDetail('${escapeHtml(String(j.id))}')">
+                <div class="grid-card-header">
+                  <div class="grid-card-icon">⏰</div>
+                  <div class="grid-card-actions">
+                    <button class="icon-btn" title="Details" onclick="event.stopPropagation(); openCronJobDetail('${escapeHtml(String(j.id))}')">ℹ️</button>
+                  </div>
+                </div>
+                <div class="grid-card-title">${escapeHtml(String(name))}</div>
+                <div class="grid-card-desc">${escapeHtml(schedule)}</div>
+                <div class="grid-card-desc">${escapeHtml(line2)}</div>
+                ${line3 ? `<div class="grid-card-desc">${escapeHtml(line3)}</div>` : ''}
+                ${outcome ? `<div class="grid-card-desc" style="color: var(--text-dim); margin-top:6px;">${escapeHtml(outcome)}</div>` : ''}
+              </div>
+            `;
+          }).join('') : `<div class="grid-card">${agentJobs.length ? 'No recurring tasks match filters' : 'No recurring tasks for this agent'}</div>`);
+
+      body.innerHTML = `
+        ${desc ? `<div class="detail-section"><div class="detail-label">Description</div><div class="detail-value" style="white-space: pre-wrap; color: var(--text-dim);">${escapeHtml(desc)}</div></div>` : ''}
+        <div class="detail-section">
+          <div class="detail-label">Recurring Tasks</div>
+          <div class="detail-value">
+            <div class="recurring-filters" style="margin: 6px 0 12px;">
+              <input type="text" id="agentJobsSearch" class="form-input" placeholder="Search jobs…">
+              <label class="recurring-toggle">
+                <input type="checkbox" id="agentJobsEnabledOnly">
+                Enabled only
+              </label>
+            </div>
+            ${jobsHtml}
+          </div>
+        </div>
+      `;
+
+      const agentSearchInput = document.getElementById('agentJobsSearch');
+      const agentEnabledToggle = document.getElementById('agentJobsEnabledOnly');
+      if (agentSearchInput) {
+        if (agentSearchInput.value !== agentJobSearch) {
+          agentSearchInput.value = agentJobSearch;
+        }
+        agentSearchInput.oninput = () => {
+          state.agentJobsSearchByAgent = state.agentJobsSearchByAgent || {};
+          state.agentJobsSearchByAgent[agentKey] = agentSearchInput.value || '';
+          lsSet('agent_jobs_search', JSON.stringify(state.agentJobsSearchByAgent));
+          renderAgentsPage();
+        };
+      }
+      if (agentEnabledToggle) {
+        if (agentEnabledToggle.checked !== agentJobEnabledOnly) {
+          agentEnabledToggle.checked = agentJobEnabledOnly;
+        }
+        agentEnabledToggle.onchange = () => {
+          state.agentJobsEnabledOnlyByAgent = state.agentJobsEnabledOnlyByAgent || {};
+          state.agentJobsEnabledOnlyByAgent[agentKey] = agentEnabledToggle.checked;
+          lsSet('agent_jobs_enabled_only', JSON.stringify(state.agentJobsEnabledOnlyByAgent));
+          renderAgentsPage();
+        };
+      }
+
+      // Optional async extras (keep, but don't block usefulness)
+      const sum = state.agentSummaries?.[agent.id];
+      if (!sum) loadAgentSummary(agent.id);
+      const skillIds = Array.isArray(agent.skills) ? agent.skills : (Array.isArray(agent.skillIds) ? agent.skillIds : []);
+      if (skillIds.length && !state.resolvedSkillsByAgent?.[agent.id]) loadSkillDetailsForAgent(agent.id, skillIds);
+      if (!state.agentFileEntries && !state.agentFileLoading) loadAgentFiles(agent.id);
+      if (!state.cronJobsLoaded) loadCronJobs().then(() => { if (state.currentView === 'agents') renderAgentsPage(); });
+    }
+
+    function selectAgentForAgentsPage(agentId) {
+      state.selectedAgentId = agentId;
+      // clear any open cron detail when switching agents
+      state.selectedCronJobId = null;
+      // reset file viewer for this agent
+      state.agentFileEntries = null;
+      state.selectedAgentFile = null;
+      state.agentFileContent = null;
+      renderAgentsPage();
+      renderDetailPanel();
+    }
+
     async function loadApps() {
       try {
-        const res = await fetch('api/apps');
+        const res = await fetch('/api/apps');
         if (!res.ok) return;
         const text = await res.text();
         if (!text) return;
         const data = JSON.parse(text);
-        state.apps = data.apps || [];
+        state.apps = (data.apps || []).map(app => ({
+          ...app,
+          statusClass: app.statusClass || 'idle',
+          statusLabel: app.statusLabel || 'Unknown',
+        }));
         renderApps();
+        if (state.currentView === 'apps') renderAppsGridView();
+
+        if (state.pendingRouteAppId) {
+          const pending = state.pendingRouteAppId;
+          state.pendingRouteAppId = null;
+          if (state.apps.find(a => a.id === pending)) {
+            selectApp(pending, { fromRouter: true });
+          }
+        }
+
         state.apps.forEach(checkAppStatus);
       } catch (err) {
         console.error('Failed to load apps:', err);
@@ -2971,9 +4943,14 @@ Response format:
     async function loadAgents() {
       try {
         const result = await rpcCall('agents.list', {});
-        if (result?.agents) {
-          state.agents = result.agents;
+        const agents = result?.agents || result?.items || (Array.isArray(result) ? result : null);
+        if (agents && Array.isArray(agents)) {
+          state.agents = agents;
           renderAgents();
+          if (state.currentView === 'agents') {
+            renderAgentsPage();
+            renderDetailPanel();
+          }
         }
       } catch (err) {
         console.error('Failed to load agents:', err);
@@ -3067,8 +5044,12 @@ Response format:
       const name = agent.identity?.name || agent.name || agent.id;
       
       state.currentView = 'agent';
-      document.getElementById('mainTitle').textContent = `${emoji} ${name}`;
-      document.getElementById('mainSubtitle').textContent = `Agent: ${agent.id}`;
+      setView('overviewView');
+      setActiveNav(null);
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: `${emoji} ${escapeHtml(name)}`, current: true }
+      ]);
       
       const contentArea = document.getElementById('overviewArea');
       contentArea.innerHTML = `
@@ -3140,15 +5121,11 @@ Response format:
 
     function renderSessionItem(s, isNested = false) {
       const isActive = state.currentSession && state.currentSession.key === s.key;
-      const isSelected = state.selectedSessions.has(s.key);
       const agentStatus = getAgentStatus(s.key);
       const tooltip = getStatusTooltip(agentStatus);
       const isPinned = isSessionPinned(s.key);
       const isArchived = isSessionArchived(s.key);
-      const clickHandler = state.multiSelectMode 
-        ? `toggleSessionSelection('${escapeHtml(s.key)}')`
-        : `openSession('${escapeHtml(s.key)}')`;
-      
+        const clickHandler = `openSession('${escapeHtml(s.key)}')`;
       const isGenerating = state.generatingTitles.has(s.key);
       const sessionName = getSessionName(s, true);  // This triggers auto-generation
       const hasUnread = !isActive && isSessionUnread(s.key);
@@ -3158,8 +5135,7 @@ Response format:
       let displayName = sessionName;
       
       return `
-        <div class="item ${isActive ? 'active' : ''} ${isArchived ? 'archived-session' : ''} ${hasUnread ? 'unread' : ''} ${isNested ? 'nested-item' : ''}" data-session-key="${escapeHtml(s.key)}" onclick="${clickHandler}">
-          <div class="session-checkbox ${isSelected ? 'checked' : ''}" data-key="${escapeHtml(s.key)}" onclick="toggleSessionSelection('${escapeHtml(s.key)}', event)"></div>
+        <div class="item status-${agentStatus} ${isActive ? 'active' : ''} ${isArchived ? 'archived-session' : ''} ${hasUnread ? 'unread' : ''} ${isNested ? 'nested-item' : ''}" data-session-key="${escapeHtml(s.key)}" onclick="${clickHandler}">
           <div class="item-icon">${isNested ? '💬' : getSessionIcon(s)}${s.compactionCount > 0 ? '<span class="compaction-badge" title="Compacted ' + s.compactionCount + 'x">📜</span>' : ''}</div>
           <div class="item-content">
             <div class="item-name ${isGenerating ? 'title-generating' : ''}">${escapeHtml(displayName)}</div>
@@ -3273,155 +5249,7 @@ Response format:
     }
 
     function renderSessions() {
-      const container = document.getElementById('sessionsList');
-      const archivedToggle = document.getElementById('showArchivedToggle');
-      
-      // Count archived sessions
-      const archivedCount = state.sessions.filter(s => isSessionArchived(s.key)).length;
-      
-      // Show/hide archived toggle
-      if (archivedToggle) {
-        archivedToggle.style.display = archivedCount > 0 ? 'flex' : 'none';
-        archivedToggle.querySelector('input').checked = state.showArchived;
-      }
-      
-      // Show/hide mark all read button
-      const markAllReadBtn = document.getElementById('markAllReadBtn');
-      if (markAllReadBtn) {
-        const unreadCount = getUnreadCount();
-        markAllReadBtn.style.display = unreadCount > 0 ? 'inline-flex' : 'none';
-        markAllReadBtn.title = `Mark all read (${unreadCount})`;
-      }
-      
-      // Filter sessions
-      const goal = state.currentGoalId !== 'all' ? state.goals.find(g => g.id === state.currentGoalId) : null;
-      const goalSessionSet = goal?.sessions ? new Set(goal.sessions) : null;
-      
-      // Build set of ALL sessions that are in ANY goal (for hiding from main Sessions list)
-      const allSessionsInGoals = new Set();
-      state.goals.forEach(g => (g.sessions || []).forEach(s => allSessionsInGoals.add(s)));
-      
-      // Also build a map of session -> goalId for subagent inheritance
-      const sessionToGoal = new Map();
-      state.goals.forEach(g => (g.sessions || []).forEach(s => sessionToGoal.set(s, g.id)));
-
-      let displaySessions = state.sessions.filter(s => {
-        if (isSessionArchived(s.key) && !state.showArchived) return false;
-        // When viewing a specific goal, only show sessions in that goal
-        if (goalSessionSet && !goalSessionSet.has(s.key)) return false;
-        // When viewing "all" (Sessions section), hide sessions that are in any goal
-        if (state.currentGoalId === 'all' && allSessionsInGoals.has(s.key)) return false;
-        if (!matchesSearch(s)) return false;
-        return true;
-      });
-
-      // Split out subagents - they render inline in parent chat, not in sidebar
-      const subagentSessions = displaySessions.filter(s => s.key.includes(':subagent:'));
-      const mainDisplaySessions = displaySessions.filter(s => !s.key.includes(':subagent:'));
-
-      const { parentMap: subagentsByParent, unparented: unparentedSubagents } = buildSubagentParentMap(
-        mainDisplaySessions,
-        subagentSessions
-      );
-
-      // Sort: pinned first, then by updatedAt
-      mainDisplaySessions.sort((a, b) => {
-        const aPinned = isSessionPinned(a.key);
-        const bPinned = isSessionPinned(b.key);
-        if (aPinned && !bPinned) return -1;
-        if (!aPinned && bPinned) return 1;
-        return (b.updatedAt || 0) - (a.updatedAt || 0);
-      });
-      
-      if (displaySessions.length === 0) {
-        container.innerHTML = `<div style="padding: 16px; color: var(--text-dim); font-size: 0.85rem;">${state.showArchived ? 'No sessions' : 'No active sessions'}</div>`;
-        return;
-      }
-      
-      // Group sessions by their parent group
-      const groups = new Map(); // groupKey -> { sessions: [], latestUpdate: number }
-      const standalone = []; // sessions that don't belong to a group
-      
-      for (const s of mainDisplaySessions) {
-        const parsed = parseSessionGroup(s.key);
-        if (parsed.type === 'topic' && parsed.isGrouped) {
-          if (!groups.has(parsed.groupKey)) {
-            groups.set(parsed.groupKey, { sessions: [], latestUpdate: 0 });
-          }
-          const group = groups.get(parsed.groupKey);
-          group.sessions.push(s);
-          group.latestUpdate = Math.max(group.latestUpdate, s.updatedAt || 0);
-        } else {
-          standalone.push(s);
-        }
-      }
-      
-      // Sort sessions within each group by updatedAt
-      for (const group of groups.values()) {
-        group.sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      }
-      
-      // Build combined list: groups + standalone, sorted by latest activity
-      const combined = [];
-      for (const [groupKey, group] of groups) {
-        combined.push({ type: 'group', groupKey, ...group });
-      }
-      for (const s of standalone) {
-        combined.push({ type: 'session', session: s, latestUpdate: s.updatedAt || 0 });
-      }
-      
-      // Sort combined by pinned status and latest update
-      combined.sort((a, b) => {
-        // Check if any session in group is pinned
-        const aPinned = a.type === 'group' 
-          ? a.sessions.some(s => isSessionPinned(s.key))
-          : isSessionPinned(a.session.key);
-        const bPinned = b.type === 'group'
-          ? b.sessions.some(s => isSessionPinned(s.key))
-          : isSessionPinned(b.session.key);
-        if (aPinned && !bPinned) return -1;
-        if (!aPinned && bPinned) return 1;
-        return (b.latestUpdate || 0) - (a.latestUpdate || 0);
-      });
-      
-      // Render
-      let html = '';
-      for (const item of combined) {
-        if (item.type === 'group') {
-          const expanded = isGroupExpanded(item.groupKey);
-          const groupName = getGroupDisplayName(item.groupKey);
-          const unreadCount = item.sessions.filter(s => isSessionUnread(s.key)).length;
-          const hasActiveSession = item.sessions.some(s => state.currentSession?.key === s.key);
-          
-          html += `
-            <div class="session-group ${hasActiveSession ? 'has-active' : ''}">
-              <div class="session-group-header" onclick="toggleGroupExpanded('${escapeHtml(item.groupKey)}')">
-                <span class="group-expand-icon">${expanded ? '▼' : '▶'}</span>
-                <span class="group-icon">👥</span>
-                <span class="group-name">${escapeHtml(groupName)}</span>
-                <span class="group-count">${item.sessions.length}</span>
-                ${unreadCount > 0 ? `<span class="group-unread">${unreadCount}</span>` : ''}
-                <button class="session-action-btn" onclick="event.stopPropagation(); generateGroupTitles('${escapeHtml(item.groupKey)}', event)" title="Auto-generate all topic titles">✨</button>
-                <button class="session-action-btn" onclick="event.stopPropagation(); promptRenameSession('${escapeHtml(item.groupKey)}', event)" title="Rename group">✏️</button>
-              </div>
-              ${expanded ? `<div class="session-group-items">${item.sessions.map(s => renderSessionItem(s, true)).join('')}</div>` : ''}
-            </div>
-          `;
-        } else {
-          const s = item.session;
-          // Subagents render inline in parent chat, not in sidebar
-          html += renderSessionItem(s, false);
-        }
-      }
-      
-      // Subagents are no longer shown in sidebar - they appear inline in parent session chat
-
-      container.innerHTML = html;
-      
-      // Update select all checkbox state
-      if (state.multiSelectMode) {
-        updateCheckboxStates();
-      }
+      renderSidebar();
     }
     
     function getSessionIcon(s) {
@@ -3525,12 +5353,33 @@ Response format:
     async function checkAppStatus(app) {
       const dot = document.getElementById(`app-status-${app.id}`);
       if (!dot) return;
-      
+
+      const host = window.location.hostname;
+      const isLocal = host === 'localhost' || host === '127.0.0.1';
+
+      // On localhost, some app reverse-proxies may not be running; don't spam the console.
+      // Treat unknown/unreachable as 'idle' to keep the UI calm.
       try {
-        const res = await fetch(`/${app.id}/`, { method: 'HEAD' });
-        dot.className = 'item-status ' + (res.ok || res.status === 401 ? 'active' : 'error');
+        if (isLocal) {
+          dot.className = 'item-status idle';
+          app.statusClass = 'unknown';
+          app.statusLabel = 'Unknown';
+        } else {
+          const res = await fetch(`/${app.id}/`, { method: 'HEAD' });
+          const ok = res.ok || res.status === 401;
+          dot.className = 'item-status ' + (ok ? 'active' : 'error');
+          app.statusClass = ok ? 'running' : 'stopped';
+          app.statusLabel = ok ? 'Running' : 'Stopped';
+        }
       } catch {
-        dot.className = 'item-status error';
+        dot.className = 'item-status idle';
+        app.statusClass = 'unknown';
+        app.statusLabel = 'Unknown';
+      }
+
+      if (state.currentView === 'apps') {
+        renderAppsGridView();
+        renderDetailPanel();
       }
     }
     
@@ -3565,12 +5414,19 @@ Response format:
       } else if (state.currentView === 'agent') {
         menuBtn.style.display = 'none';
         backBtn.style.display = 'flex';
-        mobileTitle.textContent = document.getElementById('mainTitle').textContent;
+        mobileTitle.textContent = 'Agent';
       } else if (state.currentView === 'goal') {
         menuBtn.style.display = 'none';
         backBtn.style.display = 'flex';
         const g = state.goals.find(x => x.id === state.currentGoalOpenId);
         mobileTitle.textContent = g ? g.title : 'Goal';
+      } else if (state.currentView === 'apps' || state.currentView === 'recurring' || state.currentView === 'new-session' || state.currentView === 'new-goal') {
+        menuBtn.style.display = 'none';
+        backBtn.style.display = 'flex';
+        mobileTitle.textContent = state.currentView === 'apps' ? 'Apps'
+          : state.currentView === 'recurring' ? 'Recurring'
+          : state.currentView === 'new-session' ? 'New Session'
+          : 'New Goal';
       } else {
         menuBtn.style.display = 'flex';
         backBtn.style.display = 'none';
@@ -3579,31 +5435,1126 @@ Response format:
     }
     
     function goBack() {
-      showOverview();
+      if (window.history.length > 1) {
+        window.history.back();
+      } else {
+        navigateTo('dashboard');
+      }
+    }
+
+    function goBackFromGoal() {
+      // Prefer real history back if possible
+      if (window.history.length > 1) {
+        window.history.back();
+        return;
+      }
+
+      const goal = state.goals?.find(g => g.id === state.currentGoalOpenId);
+      const condoId = goal?.condoId || state.currentCondoId;
+      if (condoId) {
+        navigateTo(`condo/${encodeURIComponent(condoId)}`);
+      } else {
+        navigateTo('dashboard');
+      }
     }
     
+    function setBreadcrumbs(crumbs) {
+      const container = document.getElementById('breadcrumbs');
+      if (!container) return;
+      container.innerHTML = crumbs.map((c, idx) => {
+        const sep = idx === 0 ? '' : '<span class="breadcrumb-sep">›</span>';
+        const cls = c.current ? 'breadcrumb-current' : 'breadcrumb';
+        return `${sep}<span class="${cls}" ${c.onClick ? `onclick="${c.onClick}"` : ''}>${c.label}</span>`;
+      }).join('');
+    }
+
+    function setActiveNav(route) {
+      document.querySelectorAll('.nav-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.route === route);
+      });
+    }
+
+    function setView(viewId) {
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      const view = document.getElementById(viewId);
+      if (view) view.classList.add('active');
+
+      // UX: when switching between top-level views (overview/apps/recurring/etc),
+      // reset the main scroll container so content doesn't appear "under" the wrapper.
+      // Preserve scroll for chat view since it manages its own autoscroll behavior.
+      try {
+        if (viewId !== 'chatView') {
+          const main = document.querySelector('.content-main');
+          if (main) main.scrollTop = 0;
+        }
+      } catch {}
+    }
+
+    function navigateTo(path, replace = false) {
+      const clean = String(path || '').replace(/^#\/?/, '').replace(/^\//, '');
+      const url = `#/${clean}`;
+
+      // Avoid double-pushing identical entries (breaks reliable Back behavior)
+      if (window.location.hash === url) {
+        handleRoute();
+        return;
+      }
+
+      if (replace) {
+        history.replaceState({ path: clean }, '', url);
+      } else {
+        history.pushState({ path: clean }, '', url);
+      }
+      handleRoute();
+    }
+
+    function handleRoute() {
+      const raw = window.location.hash.replace('#/', '');
+      const [route, ...rest] = raw.split('/');
+      const payload = rest.join('/');
+
+      switch (route || 'dashboard') {
+        case 'apps': {
+          if (payload) {
+            const appId = decodeURIComponent(payload);
+            if (!state.apps?.length) {
+              state.pendingRouteAppId = appId;
+              showAppsView();
+            } else {
+              showAppsView({ fromRouter: true });
+              selectApp(appId, { fromRouter: true });
+            }
+          } else {
+            showAppsView({ fromRouter: true });
+          }
+          break;
+        }
+        case 'recurring': {
+          if (payload) {
+            const cronJobId = decodeURIComponent(payload);
+            state.selectedCronJobId = cronJobId;
+            showRecurringView({ fromRouter: true });
+            renderDetailPanel();
+          } else {
+            showRecurringView({ fromRouter: true });
+          }
+          break;
+        }
+        case 'condo':
+          if (payload) {
+            const condoId = decodeURIComponent(payload);
+            // If data hasn't loaded yet, defer
+            if (!(state.sessions?.length || state.goals?.length)) {
+              state.pendingRouteCondoId = condoId;
+              showOverview(); // don't navigate; we're already in a router call
+            } else {
+              openCondo(condoId, { fromRouter: true });
+            }
+          } else {
+            showOverview();
+          }
+          break;
+        case 'goal':
+          if (payload) {
+            const goalId = decodeURIComponent(payload);
+            // If goals not loaded yet, defer
+            if (!state.goals?.length) {
+              state.pendingRouteGoalId = goalId;
+              showOverview();
+            } else {
+              openGoal(goalId, { fromRouter: true });
+            }
+          } else {
+            showOverview();
+          }
+          break;
+        case 'session':
+          if (payload) {
+            const sessionKey = decodeURIComponent(payload);
+            if (state.sessions.find(s => s.key === sessionKey)) {
+              openSession(sessionKey, { fromRouter: true });
+            } else {
+              state.pendingRouteSessionKey = sessionKey;
+            }
+          } else {
+            showOverview();
+          }
+          break;
+        case 'agents': {
+          if (payload) state.pendingRouteAgentId = decodeURIComponent(payload);
+          showAgentsView({ fromRouter: true });
+          break;
+        }
+        case 'new-session': {
+          // /new-session/<condoId>/<goalId?>
+          const parts = payload ? payload.split('/').map(decodeURIComponent) : [];
+          const condoId = parts[0] || null;
+          const goalId = parts[1] || null;
+
+          // If goals aren't loaded yet, defer so the goal dropdown can populate.
+          if (!state.goals?.length) {
+            state.pendingRouteNewSession = { condoId, goalId };
+            showNewSessionView({ fromRouter: true });
+          } else {
+            state.newSessionCondoId = condoId || state.currentCondoId;
+            state.attachGoalId = goalId || null;
+            showNewSessionView({ fromRouter: true });
+          }
+          break;
+        }
+        case 'new-goal': {
+          // /new-goal/<condoId>
+          const parts = payload ? payload.split('/').map(decodeURIComponent) : [];
+          const condoId = parts[0] || null;
+
+          if (!state.goals?.length) {
+            state.pendingRouteNewGoalCondoId = condoId;
+            showNewGoalView({ fromRouter: true });
+          } else {
+            state.newGoalCondoId = condoId || state.currentCondoId;
+            showNewGoalView({ fromRouter: true });
+          }
+          break;
+        }
+        case 'dashboard':
+        default:
+          showOverview();
+      }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // VIEWS
     // ═══════════════════════════════════════════════════════════════
     function showOverview() {
-      state.currentView = 'overview';
+      state.currentView = 'dashboard';
       state.currentSession = null;
+      state.currentGoalId = 'all';
       localStorage.removeItem('sharp_current_session');
       
-      document.getElementById('overviewView').classList.add('active');
-      document.getElementById('chatView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('active');
-      document.getElementById('mainTitle').textContent = 'Dashboard';
-      document.getElementById('mainSubtitle').textContent = '';
+      setView('overviewView');
+      setActiveNav('dashboard');
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: 'Dashboard', current: true }
+      ]);
       document.getElementById('headerAction').style.display = 'none';
       document.getElementById('headerStatusIndicator').style.display = 'none';
       
       renderSessions();
       updateMobileHeader();
       closeSidebar();
+      renderDetailPanel();
     }
-    
-    async function openSession(key) {
+
+    function showAppsView(opts = {}) {
+      state.currentView = 'apps';
+      setView('appsView');
+      setActiveNav('apps');
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: 'Apps', current: true }
+      ]);
+      document.getElementById('headerAction').style.display = 'none';
+      document.getElementById('headerStatusIndicator').style.display = 'none';
+      if (!state.selectedAppId && state.apps[0]) state.selectedAppId = state.apps[0].id;
+
+      // If route included an app id and apps were not loaded yet, resolve now
+      if (state.pendingRouteAppId && state.apps?.length) {
+        const pending = state.pendingRouteAppId;
+        state.pendingRouteAppId = null;
+        if (state.apps.find(a => a.id === pending)) {
+          state.selectedAppId = pending;
+        }
+      }
+      renderAppsGridView();
+      renderDetailPanel();
+      updateMobileHeader();
+      closeSidebar();
+    }
+
+    function showRecurringView(opts = {}) {
+      state.currentView = 'recurring';
+      setView('recurringView');
+      setActiveNav('recurring');
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: 'Recurring Tasks', current: true }
+      ]);
+      document.getElementById('headerAction').style.display = 'none';
+      document.getElementById('headerStatusIndicator').style.display = 'none';
+      bindRecurringFilters();
+      renderRecurringView();
+      renderDetailPanel();
+      updateMobileHeader();
+      closeSidebar();
+    }
+
+    function showAgentsView(opts = {}) {
+      state.currentView = 'agents';
+      setView('agentsView');
+      setActiveNav('agents');
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: 'Agents', current: true }
+      ]);
+      document.getElementById('headerAction').style.display = 'none';
+      document.getElementById('headerStatusIndicator').style.display = 'none';
+
+      // Ensure we have agents loaded
+      if (!state.agents || state.agents.length === 0) {
+        loadAgents();
+      }
+
+      if (state.pendingRouteAgentId) {
+        const pending = state.pendingRouteAgentId;
+        state.pendingRouteAgentId = null;
+        if (state.agents?.find(a => a.id === pending)) state.selectedAgentId = pending;
+      }
+
+      if (!state.selectedAgentId && state.agents?.length) state.selectedAgentId = state.agents[0].id;
+
+      renderAgentsPage();
+      renderDetailPanel();
+      updateMobileHeader();
+      closeSidebar();
+    }
+
+    function showNewSessionView(opts = {}) {
+      state.currentView = 'new-session';
+      setView('newSessionView');
+      setActiveNav(null);
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: 'New Session', current: true }
+      ]);
+      renderNewSessionForm();
+      renderDetailPanel();
+      updateMobileHeader();
+      closeSidebar();
+    }
+
+    function showNewGoalView(opts = {}) {
+      state.currentView = 'new-goal';
+      setView('newGoalView');
+      setActiveNav(null);
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: 'New Goal', current: true }
+      ]);
+      renderNewGoalForm();
+      renderDetailPanel();
+      updateMobileHeader();
+      closeSidebar();
+    }
+
+    function openNewSession(condoId, goalId = null) {
+      const c = condoId || state.currentCondoId || '';
+      const g = goalId || '';
+
+      // If we're creating a session from within a goal context, don't show the New Session modal.
+      // Instead: open the goal view in a "not started" state so the user can click "Kick Off Goal"
+      // to create the first message and begin.
+      if (g) {
+        state.forceNewGoalSessionGoalId = g;
+        navigateTo(`goal/${encodeURIComponent(g)}`);
+        return;
+      }
+
+      const path = `new-session/${encodeURIComponent(c)}`;
+      navigateTo(path);
+    }
+
+    function openNewGoal(condoId) {
+      const c = condoId || state.currentCondoId || '';
+      navigateTo(`new-goal/${encodeURIComponent(c)}`);
+    }
+
+    function selectCondo(condoId) {
+      openCondo(condoId);
+    }
+
+    function openCondo(condoId, opts = {}) {
+      if (!condoId) return;
+
+      if (!opts.fromRouter) {
+        navigateTo(`condo/${encodeURIComponent(condoId)}`);
+        return;
+      }
+
+      state.currentView = 'condo';
+      state.currentCondoId = condoId;
+      state.currentSession = null;
+      state.currentGoalId = 'all';
+      localStorage.removeItem('sharp_current_session');
+
+      setView('condoView');
+      setActiveNav(null);
+
+      const condoName = (() => {
+        if (condoId === 'cron') return 'Recurring';
+        // Try to resolve from existing sessions
+        const s = (state.sessions || []).find(x => getSessionCondoId(x) === condoId);
+        if (s) return getSessionCondoName(s);
+        return condoId.split(':').pop() || 'Condo';
+      })();
+
+      setBreadcrumbs([
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: `🏢 ${escapeHtml(condoName)}`, current: true }
+      ]);
+
+      document.getElementById('headerAction').style.display = 'none';
+      document.getElementById('headerStatusIndicator').style.display = 'none';
+
+      renderCondoView();
+      renderDetailPanel();
+      updateMobileHeader();
+      closeSidebar();
+    }
+
+    function renderCondoView() {
+      const gridEl = document.getElementById('condoGoalGrid');
+      const sessionsEl = document.getElementById('condoSessionsList');
+      if (!gridEl) return;
+
+      const condoId = state.currentCondoId;
+
+      const condoName = (() => {
+        if (condoId === 'cron') return 'Recurring';
+        const s = (state.sessions || []).find(x => getSessionCondoId(x) === condoId);
+        return s ? getSessionCondoName(s) : (condoId.split(':').pop() || 'Condo');
+      })();
+
+      const titleEl = document.getElementById('condoHeroTitle');
+      if (titleEl) titleEl.textContent = condoName;
+
+      const allGoals = (state.goals || []).filter(g => (g.condoId || 'misc:default') === condoId);
+      const activeGoals = allGoals.filter(g => !isGoalCompleted(g) && !isGoalDropped(g));
+      const completedGoals = allGoals.filter(g => isGoalCompleted(g) && !isGoalDropped(g));
+      const droppedGoals = allGoals.filter(g => isGoalDropped(g));
+
+      const doing = activeGoals.filter(g => (g.status || 'active') === 'doing' || (g.priority === 'P0'));
+      const blocked = activeGoals.filter(g => (g.status || '').toLowerCase() === 'blocked');
+
+      const statActive = document.getElementById('condoStatActive');
+      const statTotal = document.getElementById('condoStatTotal');
+      const statDoing = document.getElementById('condoStatDoing');
+      const statBlocked = document.getElementById('condoStatBlocked');
+      if (statActive) statActive.textContent = String(activeGoals.length);
+      if (statTotal) statTotal.textContent = String(allGoals.length);
+      const statDropped = document.getElementById('condoStatDropped');
+      if (statDropped) statDropped.textContent = String(droppedGoals.length);
+      if (statDoing) statDoing.textContent = String(doing.length);
+      if (statBlocked) statBlocked.textContent = String(blocked.length);
+
+      const focusEl = document.getElementById('condoStatFocus');
+      if (focusEl) {
+        const focus = (activeGoals[0]?.title || completedGoals[0]?.title || '—');
+        focusEl.textContent = focus;
+      }
+
+      const lastEl = document.getElementById('condoLastUpdated');
+      if (lastEl) {
+        const last = Math.max(0, ...allGoals.map(g => Number(g.updatedAtMs || g.updatedAt || g.createdAtMs || 0)));
+        lastEl.textContent = last ? formatTimestamp(last) : '—';
+      }
+
+      // Goal grid cards (D1)
+      if (!activeGoals.length) {
+        gridEl.innerHTML = `<div class="empty-state">No pending goals in this condo.</div>`;
+      } else {
+        gridEl.innerHTML = activeGoals
+          .sort((a, b) => Number(b.updatedAtMs || b.updatedAt || 0) - Number(a.updatedAtMs || a.updatedAt || 0))
+          .map(g => {
+            const status = (g.status || (isGoalCompleted(g) ? 'done' : 'doing')).toLowerCase();
+            const updated = formatTimestamp(g.updatedAtMs || g.updatedAt || g.createdAtMs || Date.now()).split(' ')[1] || '';
+
+            const tasks = Array.isArray(g.tasks) ? g.tasks : [];
+            const next = tasks.find(t => !t.done) || tasks[0] || null;
+            const nextTitle = next ? (next.text || next.title || 'Next task') : (g.notes ? 'Review definition + set next step' : 'Add the next step');
+            const nextId = next ? (next.id || '') : '';
+            const nextStage = next ? (next.blocked ? 'blocked' : (next.stage || (next.done ? 'done' : 'doing'))) : (status || 'doing');
+            const dotClass = nextStage === 'blocked' ? 'blocked' : (nextStage === 'review' ? 'review' : (nextStage === 'done' ? 'done' : ''));
+
+            const owner = (Array.isArray(g.sessions) && g.sessions.length) ? `${g.sessions.length} session${g.sessions.length===1?'':'s'}` : '—';
+
+            return `
+              <a class="condo-goal-card" href="${escapeHtml(goalHref(g.id))}" onclick="return handleGoalLinkClick(event, '${escapeHtml(g.id)}')">
+                <div class="condo-card-top">
+                  <div>
+                    <div class="condo-card-title">${escapeHtml(g.title || 'Untitled goal')}</div>
+                    <div class="condo-card-meta">
+                      <span class="condo-tag ${escapeHtml(status)}">${escapeHtml(status)}</span>
+                      <span>${escapeHtml(owner)}</span>
+                    </div>
+                  </div>
+                  <div style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; color: var(--text-muted);">${escapeHtml(updated)}</div>
+                </div>
+
+                <div class="condo-card-body">
+                  <div class="condo-next-label">Next task</div>
+                  <div class="condo-next-task">
+                    <div class="condo-dot ${dotClass}"></div>
+                    <div>
+                      <div class="condo-task-title">${escapeHtml(nextTitle)}</div>
+                      <div class="condo-task-sub">${nextId ? `<span style=\"font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; color: rgba(148,163,184,.75);\">${escapeHtml(String(nextId))}</span>` : ''}${g.priority ? `<span>${escapeHtml(g.priority)}</span>` : ''}${g.deadline ? `<span>due ${escapeHtml(g.deadline)}</span>` : ''}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="condo-card-foot"><span>Updated recently</span><span>Open →</span></div>
+              </a>
+            `;
+          }).join('');
+      }
+
+      // Keep the sessions list render for now (even if hidden)
+      if (sessionsEl) {
+        const condoSessions = (state.sessions || [])
+          .filter(s => !s.key.includes(':subagent:'))
+          .filter(s => getSessionCondoId(s) === condoId)
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        sessionsEl.innerHTML = condoSessions.length ? condoSessions.map(s => {
+          const preview = getMessagePreview(s);
+          const g = getGoalForSession(s.key);
+          const goalPill = g ? `<button type="button" class="card-badge goal" onclick="event.preventDefault(); event.stopPropagation(); openGoal('${escapeHtml(g.id)}', { fromRouter: true })">🏙️ ${escapeHtml(g.title || 'Goal')}</button>` : '';
+          return `
+            <a class="session-card" href="${escapeHtml(sessionHref(s.key))}" onclick="return handleSessionLinkClick(event, '${escapeHtml(s.key)}')">
+              <div class="card-top">
+                <div class="card-icon">${getSessionIcon(s)}</div>
+                <div class="card-info">
+                  <div class="card-name">${escapeHtml(getSessionName(s))}</div>
+                  <div class="card-desc">${escapeHtml(s.model?.split('/').pop() || 'unknown model')}</div>
+                </div>
+              </div>
+              ${preview ? `<div class="card-preview">${escapeHtml(preview)}</div>` : ''}
+              <div class="card-footer">
+                <span>${timeAgo(s.updatedAt)}</span>
+                <span class="card-footer-right">${goalPill}</span>
+              </div>
+            </a>
+          `;
+        }).join('') : `<div class="empty-state">No sessions in this condo.</div>`;
+      }
+    }
+
+    function buildSessionBreadcrumbs(session) {
+      const condoName = getSessionCondoName(session);
+      const condoId = getSessionCondoId(session);
+      const goal = getGoalForSession(session.key);
+      const crumbs = [
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: `🏢 ${escapeHtml(condoName)}`, onClick: `openCondo('${escapeHtml(condoId)}')` },
+      ];
+      if (goal) {
+        crumbs.push({ label: escapeHtml(goal.title || 'Goal'), onClick: `openGoal('${escapeHtml(goal.id)}')` });
+      }
+      crumbs.push({ label: escapeHtml(getSessionName(session)), current: true });
+      return crumbs;
+    }
+
+    function buildGoalBreadcrumbs(goal) {
+      const condoId = goal.condoId || state.currentCondoId || 'misc:default';
+      const condoName = goal.condoName || 'Condo';
+      return [
+        { label: '🏠', onClick: "navigateTo('dashboard')" },
+        { label: `🏢 ${escapeHtml(condoName)}`, onClick: `openCondo('${escapeHtml(condoId)}')` },
+        { label: escapeHtml(goal.title || 'Goal'), current: true }
+      ];
+    }
+
+    function renderDetailPanel() {
+      const panel = document.getElementById('detailPanelContent');
+      if (!panel) return;
+
+      // Cron job detail (works from any view)
+      if (state.selectedCronJobId) {
+        if (!state.cronJobsLoaded) {
+          panel.innerHTML = '<div class="detail-section"><div class="detail-label">Recurring</div><div class="detail-value">Loading jobs…</div></div>';
+          loadCronJobs().then(() => renderDetailPanel());
+          return;
+        }
+        const job = (state.cronJobs || []).find(j => String(j.id) === String(state.selectedCronJobId) || String(j.jobId) === String(state.selectedCronJobId));
+        if (!job) {
+          panel.innerHTML = '<div class="detail-section"><div class="detail-label">Recurring</div><div class="detail-value">Job not found</div></div>';
+          return;
+        }
+
+        const model = getJobModel(job.payload);
+        const schedule = formatSchedule(job.schedule);
+        const outcome = summarizeOutcome(job.payload);
+        const runsState = (state.cronRunsByJobId || {})[String(job.id)] || null;
+
+        if (!runsState || (!runsState.loaded && !runsState.loading)) {
+          ensureCronRuns(job.id).then(() => renderDetailPanel());
+        }
+
+        const deliver = job.payload?.channel || job.payload?.to ? `${job.payload.channel || ''}${job.payload.to ? ` → ${job.payload.to}` : ''}` : '—';
+        const runs = runsState?.runs || [];
+        const runsHtml = runs.length ? runs.slice(0, 20).map(r => {
+          const at = Number(r.atMs || r.runAtMs || r.startedAtMs || r.timeMs || 0);
+          const when = at ? `${new Date(at).toLocaleString()} (${formatRelativeTime(at)})` : '—';
+          const dur = r.durationMs != null ? `${Math.round(Number(r.durationMs) / 1000)}s` : '—';
+          const status = escapeHtml(String(r.status || r.lastStatus || 'unknown'));
+          const err = r.error || r.lastError;
+          return `<div style="padding:8px 0; border-top: 1px solid rgba(255,255,255,0.06);">
+            <div style="display:flex; justify-content:space-between; gap:10px;"><div><b>${status}</b></div><div style="color: var(--text-dim); font-size: 12px;">${escapeHtml(dur)}</div></div>
+            <div style="color: var(--text-dim); font-size: 12px; margin-top:4px;">${escapeHtml(when)}</div>
+            ${err ? `<div style="color: var(--accent-red); font-size: 12px; margin-top:4px; white-space: pre-wrap;">${escapeHtml(String(err))}</div>` : ''}
+          </div>`;
+        }).join('') : `<div style="color: var(--text-dim);">${runsState?.loading ? 'Loading runs…' : 'No runs found'}</div>`;
+
+        panel.innerHTML = `
+          <div class="detail-section">
+            <div class="detail-label">Recurring Task</div>
+            <div class="detail-value">${escapeHtml(job.name || job.id)}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Enabled</div>
+            <div class="detail-value">${job.enabled === false ? 'No' : 'Yes'}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Agent</div>
+            <div class="detail-value">${escapeHtml(String(job.agentId || 'main'))}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Model</div>
+            <div class="detail-value">${escapeHtml(String(model))}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Schedule</div>
+            <div class="detail-value">${escapeHtml(String(schedule))}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Outcome</div>
+            <div class="detail-value" style="white-space: pre-wrap; color: var(--text-dim);">${outcome ? escapeHtml(outcome) : '—'}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Payload kind</div>
+            <div class="detail-value">${escapeHtml(String(job.payload?.kind || 'systemEvent'))}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Deliver</div>
+            <div class="detail-value">${escapeHtml(deliver)}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Run log (last 20)</div>
+            <div class="detail-value" style="color: var(--text-dim);">${runsState?.error ? `<div style=\"color: var(--accent-red);\">${escapeHtml(runsState.error)}</div>` : ''}${runsHtml}</div>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.currentView === 'agents') {
+        const agent = state.agents?.find(a => a.id === state.selectedAgentId) || state.agents?.[0];
+        if (!agent) {
+          panel.innerHTML = '<div class="detail-section"><div class="detail-label">Agents</div><div class="detail-value">No agents configured</div></div>';
+          return;
+        }
+
+        const emoji = agent.identity?.emoji || '🤖';
+        const name = agent.identity?.name || agent.name || agent.id;
+        const skillIds = Array.isArray(agent.skills) ? agent.skills : (Array.isArray(agent.skillIds) ? agent.skillIds : []);
+
+        const summary = state.agentSummaries?.[agent.id];
+        const resolvedSkills = (state.resolvedSkillsByAgent?.[agent.id] || []).filter(Boolean);
+
+        const jobs = state.cronJobs || [];
+        const attachedJobs = jobs.filter(j => {
+          if (j.agentId && String(j.agentId) === String(agent.id)) return true;
+          const n = String(j.name || '').toLowerCase();
+          return n.includes(String(agent.id).toLowerCase());
+        });
+        const activityItems = attachedJobs
+          .map(j => {
+            const st = j.state || {};
+            const lastAt = Number(st.lastRunAtMs || 0);
+            const lastStatus = String(st.lastStatus || '');
+            const lastError = st.lastError ? String(st.lastError) : '';
+            if (!lastAt && !lastStatus && !lastError) return null;
+            const errorSnippet = lastError ? lastError.split('\n')[0].slice(0, 120) : '';
+            return {
+              name: String(j.name || j.id || 'Job'),
+              lastAt,
+              status: lastStatus || (lastError ? 'error' : 'unknown'),
+              errorSnippet
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0))
+          .slice(0, 10);
+
+        panel.innerHTML = `
+          <div class="detail-section">
+            <div class="detail-label">Agent</div>
+            <div class="detail-value">${emoji} ${escapeHtml(name)}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">High-level</div>
+            <div class="detail-value" style="white-space: pre-wrap; color: var(--text-dim);">${summary?.mission ? escapeHtml(summary.mission) : 'Loading summary…'}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Skills</div>
+            <div class="detail-value" style="color: var(--text-dim);">
+              ${resolvedSkills.length ? resolvedSkills.map(s => `
+                <div style="margin:6px 0;">
+                  <div style="font-weight:600; color: var(--text);">${escapeHtml(s.name || s.id)}</div>
+                  <div>${escapeHtml(s.description || '')}</div>
+                </div>
+              `).join('') : (skillIds.length ? escapeHtml(skillIds.join(', ')) : '(none)')}
+            </div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Heartbeat (outline)</div>
+            <div class="detail-value" style="white-space: pre-wrap; color: var(--text-dim);">${summary?.headings?.heartbeat?.length ? escapeHtml(summary.headings.heartbeat.map(h => `${'#'.repeat(h.level)} ${h.text}`).slice(0, 12).join('\n')) : (summary ? '(no HEARTBEAT.md found)' : 'Loading…')}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Security audit</div>
+            <div class="detail-value" style="color: var(--text-dim);">${summary?.audit?.summary ? `warn: <b>${escapeHtml(String(summary.audit.summary.warn))}</b> · info: ${escapeHtml(String(summary.audit.summary.info))}` : 'Loading…'}</div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Recent activity</div>
+            <div class="detail-value" style="color: var(--text-dim);">
+              ${!state.cronJobsLoaded ? 'Loading cron jobs…' : (activityItems.length ? activityItems.map(item => {
+                const when = item.lastAt ? formatRelativeTime(item.lastAt) : '—';
+                return `<div style="margin:6px 0;">${escapeHtml(when)} · <b>${escapeHtml(item.name)}</b> · ${escapeHtml(item.status)}${item.errorSnippet ? ` · ${escapeHtml(item.errorSnippet)}` : ''}</div>`;
+              }).join('') : 'No recent activity')}
+            </div>
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Cron jobs</div>
+            <div class="detail-value" style="color: var(--text-dim);">
+              ${attachedJobs.length ? attachedJobs.slice(0, 10).map(j => {
+                const sch = j.schedule?.kind === 'cron' ? j.schedule.expr : (j.schedule?.kind || '');
+                return `<div style="margin-top:6px;"><b>${escapeHtml(j.name || j.id)}</b><div style="color: var(--text-dim); font-size: 0.8rem;">${escapeHtml(sch)}${j.enabled === false ? ' · disabled' : ''}</div></div>`;
+              }).join('') : 'None detected'}
+            </div>
+          </div>
+        `;
+
+        // kick off async loads
+        if (!state.agentSummaries) state.agentSummaries = {};
+        if (!state.agentSummaryLoading) state.agentSummaryLoading = {};
+        if (!state.agentSummaries[agent.id] && !state.agentSummaryLoading[agent.id]) loadAgentSummary(agent.id);
+
+        if (!state.resolvedSkillsByAgent) state.resolvedSkillsByAgent = {};
+        if (skillIds.length && !state.resolvedSkillsByAgent[agent.id]) loadSkillDetailsForAgent(agent.id, skillIds);
+
+        if (!state.cronJobsLoaded) loadCronJobs();
+
+        return;
+      }
+
+      if (state.currentView === 'apps') {
+        const app = state.apps.find(a => a.id === state.selectedAppId) || state.apps[0];
+        if (!app) {
+          panel.innerHTML = '<div class=\"detail-section\"><div class=\"detail-label\">Apps</div><div class=\"detail-value\">No apps configured</div></div>';
+          return;
+        }
+        panel.innerHTML = `
+          <div class=\"detail-section\">\n            <div class=\"detail-label\">Status</div>\n            <div class=\"detail-value\">${escapeHtml(app.statusLabel || 'Unknown')}</div>\n          </div>\n          <div class=\"detail-section\">\n            <div class=\"detail-label\">Configuration</div>\n            <div class=\"detail-code\">:${escapeHtml(String(app.port || ''))}\n${escapeHtml(app.service || '')}</div>\n          </div>\n          <div class=\"detail-actions\">\n            <button class=\"btn btn-primary\" onclick=\"openApp('${escapeHtml(app.id)}')\">↗ Open App</button>\n          </div>
+        `;
+        return;
+      }
+
+      if (state.currentView === 'recurring') {
+        panel.innerHTML = '<div class=\"detail-section\"><div class=\"detail-label\">Recurring</div><div class=\"detail-value\">Select a recurring task.</div></div>';
+        return;
+      }
+
+      if (state.currentView === 'chat' && state.currentSession) {
+        const goal = getGoalForSession(state.currentSession.key);
+        panel.innerHTML = `
+          <div class=\"detail-section\">\n            <div class=\"detail-label\">Agent</div>\n            <div class=\"detail-value\">${escapeHtml(state.currentSession.agent || 'main')}</div>\n          </div>\n          <div class=\"detail-section\">\n            <div class=\"detail-label\">Session Key</div>\n            <div class=\"detail-code\">${escapeHtml(state.currentSession.key)}</div>\n          </div>\n          <div class=\"detail-section\">\n            <div class=\"detail-label\">Goal</div>\n            <div class=\"detail-value highlight\">${escapeHtml(goal?.title || 'Unassigned')}</div>\n          </div>\n          <div class=\"detail-actions\">\n            <button class=\"btn btn-secondary\" onclick=\"showAttachSessionModal('${escapeHtml(state.currentSession.key)}')\">Attach Goal</button>\n          </div>
+        `;
+        return;
+      }
+
+      panel.innerHTML = `
+        <div class="detail-section">
+          <div class="detail-label">Filters</div>
+          <div style="display: grid; gap: 8px;">
+            <select id="filterChannel" class="form-input" onchange="setFilterChannel(this.value)">
+              <option value="all">All channels</option>
+              <option value="telegram">📱 Telegram</option>
+              <option value="discord">🎮 Discord</option>
+              <option value="signal">💬 Signal</option>
+              <option value="whatsapp">📞 WhatsApp</option>
+              <option value="cron">⏰ Cron</option>
+              <option value="subagent">⚡ Subagent</option>
+            </select>
+            <select id="filterStatus" class="form-input" onchange="setFilterStatus(this.value)">
+              <option value="all">All status</option>
+              <option value="running">🔴 Running</option>
+              <option value="unread">🟠 Unread</option>
+              <option value="error">🟡 Error</option>
+              <option value="recent">🟢 Recent</option>
+              <option value="idle">⚪ Idle</option>
+            </select>
+          </div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">Overview</div>
+          <div class="detail-value">Select a session, app, or task.</div>
+        </div>
+      `;
+      const channel = document.getElementById('filterChannel');
+      const status = document.getElementById('filterStatus');
+      if (channel) channel.value = state.filterChannel;
+      if (status) status.value = state.filterStatus;
+    }
+
+    function renderAppsGridView() {
+      const container = document.getElementById('appsViewGrid');
+      if (!container) return;
+      if (state.apps.length === 0) {
+        container.innerHTML = '<div class="grid-card">No apps configured</div>';
+        return;
+      }
+      container.innerHTML = state.apps.map(app => `
+        <div class="grid-card" onclick="selectApp('${escapeHtml(app.id)}')">
+          <div class="grid-card-header">
+            <div class="grid-card-icon">${escapeHtml(app.icon || '📦')}</div>
+            <div class="grid-card-actions">
+              <button class="icon-btn" title="Info">ℹ️</button>
+              <button class="icon-btn" title="Open" onclick="event.stopPropagation(); openApp('${escapeHtml(app.id)}')">↗</button>
+            </div>
+          </div>
+          <div class="grid-card-title">${escapeHtml(app.name)}</div>
+          <div class="grid-card-desc">${escapeHtml(app.description || '')}</div>
+          <div class="grid-card-meta">
+            <div class="status-indicator">
+              <span class="status-dot ${app.statusClass || 'idle'}"></span>
+              <span>${escapeHtml(app.statusLabel || 'Unknown')}</span>
+            </div>
+            <span>${app.port ? ':' + escapeHtml(String(app.port)) : ''}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function bindRecurringFilters() {
+      const searchInput = document.getElementById('recurringSearch');
+      const agentSelect = document.getElementById('recurringAgentFilter');
+      const enabledToggle = document.getElementById('recurringEnabledOnly');
+      if (!searchInput || !agentSelect || !enabledToggle) return;
+      if (searchInput.dataset.bound) return;
+
+      searchInput.value = state.recurringSearch || '';
+      enabledToggle.checked = !!state.recurringEnabledOnly;
+
+      searchInput.addEventListener('input', () => {
+        state.recurringSearch = searchInput.value || '';
+        lsSet('recurring_search', state.recurringSearch);
+        renderRecurringView();
+      });
+      agentSelect.addEventListener('change', () => {
+        state.recurringAgentFilter = agentSelect.value || 'all';
+        lsSet('recurring_agent_filter', state.recurringAgentFilter);
+        renderRecurringView();
+      });
+      enabledToggle.addEventListener('change', () => {
+        state.recurringEnabledOnly = enabledToggle.checked;
+        lsSet('recurring_enabled_only', state.recurringEnabledOnly ? '1' : '0');
+        renderRecurringView();
+      });
+
+      searchInput.dataset.bound = '1';
+    }
+
+    function updateRecurringFilterControls(jobs = []) {
+      const searchInput = document.getElementById('recurringSearch');
+      const agentSelect = document.getElementById('recurringAgentFilter');
+      const enabledToggle = document.getElementById('recurringEnabledOnly');
+      if (!searchInput || !agentSelect || !enabledToggle) return;
+
+      if (searchInput.value !== (state.recurringSearch || '')) {
+        searchInput.value = state.recurringSearch || '';
+      }
+      if (enabledToggle.checked !== !!state.recurringEnabledOnly) {
+        enabledToggle.checked = !!state.recurringEnabledOnly;
+      }
+
+      const agents = Array.from(new Set((jobs || []).map(j => String(j.agentId || 'main')))).sort((a, b) => a.localeCompare(b));
+      const options = ['<option value="all">All agents</option>']
+        .concat(agents.map(agentId => `<option value="${escapeHtml(agentId)}">${escapeHtml(agentId)}</option>`));
+      agentSelect.innerHTML = options.join('');
+
+      if (state.recurringAgentFilter && state.recurringAgentFilter !== 'all' && !agents.includes(state.recurringAgentFilter)) {
+        state.recurringAgentFilter = 'all';
+        lsSet('recurring_agent_filter', 'all');
+      }
+      agentSelect.value = state.recurringAgentFilter || 'all';
+    }
+
+    function renderRecurringView() {
+      const container = document.getElementById('recurringGrid');
+      if (!container) return;
+
+      if (!state.cronJobsLoaded) {
+        container.innerHTML = '<div class="grid-card">Loading recurring tasks…</div>';
+        loadCronJobs().then(() => renderRecurringView());
+        return;
+      }
+
+      const allJobs = (state.cronJobs || []).slice();
+      updateRecurringFilterControls(allJobs);
+
+      let jobs = allJobs.slice();
+      if (!jobs.length) {
+        container.innerHTML = '<div class="grid-card">No recurring tasks found</div>';
+        return;
+      }
+
+      container.style.display = 'grid';
+      container.style.gridTemplateColumns = '1fr';
+      container.style.gap = '10px';
+
+      const agentFilter = state.recurringAgentFilter || 'all';
+      const search = (state.recurringSearch || '').trim().toLowerCase();
+      const enabledOnly = !!state.recurringEnabledOnly;
+
+      if (agentFilter !== 'all') {
+        jobs = jobs.filter(j => String(j.agentId || 'main') === agentFilter);
+      }
+      if (enabledOnly) {
+        jobs = jobs.filter(j => j.enabled !== false);
+      }
+      if (search) {
+        jobs = jobs.filter(j => {
+          const name = String(j.name || j.id || '');
+          const schedule = formatSchedule(j.schedule);
+          const agentId = String(j.agentId || 'main');
+          const model = String(getJobModel(j.payload));
+          const outcome = summarizeOutcome(j.payload);
+          const status = String(j.state?.lastStatus || '');
+          const haystack = `${name} ${j.id || ''} ${schedule} ${agentId} ${model} ${outcome} ${status}`.toLowerCase();
+          return haystack.includes(search);
+        });
+      }
+
+      if (!jobs.length) {
+        container.innerHTML = '<div class="grid-card">No recurring tasks match filters</div>';
+        return;
+      }
+
+      jobs.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
+
+      container.innerHTML = jobs.map(j => {
+        const name = j.name || j.id;
+        const schedule = formatSchedule(j.schedule);
+        const model = getJobModel(j.payload);
+        const outcome = summarizeOutcome(j.payload);
+        const last = j.state || {};
+        const lastAt = Number(last.lastRunAtMs || 0);
+        const lastStatus = last.lastStatus || '';
+        const line2 = `${j.agentId || 'main'} · ${model} · ${j.enabled === false ? 'disabled' : 'enabled'}`;
+        const line3 = lastAt ? `last ${formatRelativeTime(lastAt)}${lastStatus ? ` (${lastStatus})` : ''}` : '';
+
+        return `
+          <div class="grid-card" onclick="openCronJobDetail('${escapeHtml(String(j.id))}')">
+            <div class="grid-card-header">
+              <div class="grid-card-icon">⏰</div>
+              <div class="grid-card-actions">
+                <button class="icon-btn" title="Details" onclick="event.stopPropagation(); openCronJobDetail('${escapeHtml(String(j.id))}')">ℹ️</button>
+              </div>
+            </div>
+            <div class="grid-card-title">${escapeHtml(String(name))}</div>
+            <div class="grid-card-desc">${escapeHtml(schedule)}</div>
+            <div class="grid-card-desc">${escapeHtml(line2)}</div>
+            ${line3 ? `<div class="grid-card-desc">${escapeHtml(line3)}</div>` : ''}
+            ${outcome ? `<div class="grid-card-desc" style="color: var(--text-dim); margin-top:6px;">${escapeHtml(outcome)}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function selectApp(appId, opts = {}) {
+      if (!appId) return;
+
+      if (!opts.fromRouter) {
+        navigateTo(`apps/${encodeURIComponent(appId)}`);
+        return;
+      }
+
+      state.selectedAppId = appId;
+      // Keep view consistent when deep-linking
+      if (state.currentView !== 'apps') showAppsView({ fromRouter: true });
+      renderDetailPanel();
+    }
+
+    function selectCron(jobId, opts = {}) {
+      if (!jobId) return;
+
+      if (!opts.fromRouter) {
+        navigateTo(`recurring/${encodeURIComponent(jobId)}`);
+        return;
+      }
+
+      state.selectedCronJobId = String(jobId);
+      if (state.currentView !== 'recurring') showRecurringView({ fromRouter: true });
+      renderDetailPanel();
+    }
+
+    function openApp(appId) {
+      window.open(`/app?id=${encodeURIComponent(appId)}`, '_blank');
+    }
+
+    function renderNewSessionForm() {
+      const container = document.getElementById('newSessionAgents');
+      const goalSelect = document.getElementById('newSessionGoal');
+      if (!container || !goalSelect) return;
+
+      const agents = state.agents.length ? state.agents : [{ id: 'main' }];
+      if (!state.newSessionAgentId && agents[0]) state.newSessionAgentId = agents[0].id;
+
+      container.innerHTML = agents.map(agent => {
+        const active = state.newSessionAgentId === agent.id ? 'active' : '';
+        return `<div class="agent-chip ${active}" onclick="selectNewSessionAgent('${escapeHtml(agent.id)}')">${escapeHtml(agent.id)}</div>`;
+      }).join('');
+
+      const condoGoals = state.goals.filter(g => (g.condoId || state.currentCondoId) === state.newSessionCondoId && !isGoalCompleted(g));
+      goalSelect.innerHTML = ['<option value="">— Assign later —</option>']
+        .concat(condoGoals.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.title)}</option>`))
+        .join('');
+      if (state.attachGoalId) goalSelect.value = state.attachGoalId;
+    }
+
+    function selectNewSessionAgent(agentId) {
+      state.newSessionAgentId = agentId;
+      renderNewSessionForm();
+    }
+
+    async function submitNewSession() {
+      const agentId = state.newSessionAgentId || 'main';
+      const message = document.getElementById('newSessionMessage').value.trim();
+      const goalId = document.getElementById('newSessionGoal').value || null;
+
+      const timestamp = Date.now();
+      const sessionKey = `agent:${agentId}:webchat:${timestamp}`;
+      const idempotencyKey = `new-${agentId}-${timestamp}`;
+      try {
+        if (message) {
+          await rpcCall('chat.send', { sessionKey, message, idempotencyKey });
+        } else {
+          await rpcCall('chat.send', { sessionKey, message: 'Hello!', idempotencyKey });
+        }
+        if (goalId) {
+          await fetch(`/api/goals/${encodeURIComponent(goalId)}/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionKey }),
+          });
+        }
+        await loadSessions();
+        await loadGoals();
+        openSession(sessionKey);
+      } catch (err) {
+        console.error('Failed to start session:', err);
+        showToast('Failed to start new session: ' + err.message, 'error');
+      }
+    }
+
+    function renderNewGoalForm() {
+      document.getElementById('newGoalTitle').value = '';
+      document.getElementById('newGoalDescription').value = '';
+    }
+
+    async function submitNewGoal() {
+      const title = document.getElementById('newGoalTitle').value.trim();
+      const description = document.getElementById('newGoalDescription').value.trim();
+      if (!title) {
+        showToast('Enter a goal title', 'warning');
+        return;
+      }
+      try {
+        const res = await fetch('/api/goals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, notes: description || '', condoId: state.newGoalCondoId || state.currentCondoId || null }),
+        });
+        if (!res.ok) throw new Error('Failed to create goal');
+        const data = await res.json();
+        await loadGoals();
+        const startSession = document.querySelector('input[name="startGoalSession"]:checked')?.value === 'yes';
+        if (startSession && data?.goal?.id) {
+          openNewSession(state.newGoalCondoId || state.currentCondoId, data.goal.id);
+        } else if (data?.goal?.id) {
+          openGoal(data.goal.id);
+        } else {
+          navigateTo('dashboard');
+        }
+      } catch (err) {
+        showToast('Failed to create goal: ' + err.message, 'error');
+      }
+    }
+
+    function isModifiedEvent(e) {
+      return !!(e && (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey));
+    }
+
+    function isPlainLeftClick(e) {
+      return !!(e && e.button === 0 && !isModifiedEvent(e));
+    }
+
+    function sessionRouteHash(key) {
+      return `#/session/${encodeURIComponent(key)}`;
+    }
+
+    function goalRouteHash(id) {
+      return `#/goal/${encodeURIComponent(id)}`;
+    }
+
+    function fullHref(routeHash) {
+      return `${window.location.origin}${window.location.pathname}${window.location.search}${routeHash}`;
+    }
+
+    function sessionHref(key) {
+      return fullHref(sessionRouteHash(key));
+    }
+
+    function goalHref(id) {
+      return fullHref(goalRouteHash(id));
+    }
+
+    function handleSessionLinkClick(e, key) {
+      if (!e) return true;
+      e.stopPropagation();
+      if (!isPlainLeftClick(e)) return true; // let browser open new tab/window
+      e.preventDefault();
+      openSession(key, { fromRouter: true });
+      return false;
+    }
+
+    function handleGoalLinkClick(e, goalId) {
+      if (!e) return true;
+      e.stopPropagation();
+      if (!isPlainLeftClick(e)) return true;
+      e.preventDefault();
+      openGoal(goalId, { fromRouter: true });
+      return false;
+    }
+
+    function handleCondoLinkClick(e, condoId) {
+      if (!e) return true;
+      e.stopPropagation();
+      if (!isPlainLeftClick(e)) return true;
+      e.preventDefault();
+      openCondo(condoId, { fromRouter: true });
+      return false;
+    }
+
+    function handleRouteLinkClick(e, path) {
+      if (!e) return true;
+      e.stopPropagation();
+      if (!isPlainLeftClick(e)) return true;
+      e.preventDefault();
+      navigateTo(path);
+      return false;
+    }
+
+    async function openSession(key, opts = {}) {
       const session = state.sessions.find(s => s.key === key);
       if (!session) return;
       
@@ -3618,8 +6569,18 @@ Response format:
       
       state.currentView = 'chat';
       state.currentSession = session;
+      state.currentCondoId = getSessionCondoId(session);
+      const sessionGoal = getGoalForSession(session.key);
+      if (sessionGoal) state.currentGoalId = sessionGoal.id;
       state.chatHistory = [];
       state.isThinking = state.activeRuns.has(key);
+
+      // If we have cached history (e.g. from a previous view), render it immediately
+      // to avoid the "history disappeared" feeling while we fetch fresh data.
+      const cached = state.sessionHistoryCache.get(key);
+      if (cached && Array.isArray(cached) && cached.length) {
+        renderChatHistory(cached);
+      }
       
       // Initialize session status if not set
       if (!state.sessionAgentStatus[key]) {
@@ -3627,10 +6588,9 @@ Response format:
         localStorage.setItem('sharp_session_agent_status', JSON.stringify(state.sessionAgentStatus));
       }
       
-      document.getElementById('overviewView').classList.remove('active');
-      document.getElementById('chatView').classList.add('active');
-      document.getElementById('mainTitle').textContent = getSessionName(session);
-      document.getElementById('mainSubtitle').textContent = session.key;
+      setView('chatView');
+      setActiveNav(null);
+      setBreadcrumbs(buildSessionBreadcrumbs(session));
       
       // Show header status indicator
       document.getElementById('headerStatusIndicator').style.display = 'block';
@@ -3650,6 +6610,7 @@ Response format:
       }
       
       renderSessions();
+      renderDetailPanel();
       updateSendButton();
       updateMobileHeader();
       closeSidebar();
@@ -3657,22 +6618,55 @@ Response format:
       await loadSessionHistory(key);
       
       document.getElementById('chatInput').focus();
+      if (!opts.fromRouter) {
+        history.pushState({ path: `session/${encodeURIComponent(key)}` }, '', `#/session/${encodeURIComponent(key)}`);
+      }
     }
     
-    async function loadSessionHistory(key) {
+    async function loadSessionHistory(key, opts = {}) {
       const container = document.getElementById('chatMessages');
-      container.innerHTML = '<div class="message system">Loading history...</div>';
-      
+      if (!container) return;
+
+      // Guard against races: if user switches sessions quickly, late responses should not clobber the UI.
+      const seq = ++state.sessionHistoryLoadSeq;
+
+      // Only show the loading placeholder if we don't already have something to show.
+      const hasExisting = container.children && container.children.length > 0;
+      if (!opts.preserve && !hasExisting) {
+        container.innerHTML = '<div class="message system">Loading history...</div>';
+      }
+
       try {
-        const result = await rpcCall('chat.history', { sessionKey: key, limit: 50 });
+        const result = await rpcCall('chat.history', { sessionKey: key, limit: 200 });
+        if (seq !== state.sessionHistoryLoadSeq) return;
+        if (state.currentSession?.key !== key) return;
+
         const messages = result?.messages || [];
-        
+        // Cache so transient disconnects or re-renders don't blank the chat.
+        state.sessionHistoryCache.set(key, messages);
+
         if (messages.length > 0) {
           renderChatHistory(messages);
         } else {
           container.innerHTML = '<div class="message system">No messages yet</div>';
         }
       } catch (err) {
+        if (seq !== state.sessionHistoryLoadSeq) return;
+        if (state.currentSession?.key !== key) return;
+
+        const cached = state.sessionHistoryCache.get(key);
+        if (opts.preserve && cached && cached.length) {
+          // Keep whatever was shown.
+          showToast(`History load failed (showing cached): ${err.message}`, 'error', 5000);
+          return;
+        }
+
+        if (cached && cached.length) {
+          renderChatHistory(cached);
+          showToast(`History load failed (showing cached): ${err.message}`, 'error', 5000);
+          return;
+        }
+
         container.innerHTML = `<div class="message system">Error loading history: ${escapeHtml(err.message)}</div>`;
       }
     }
@@ -3690,8 +6684,7 @@ Response format:
           const text = extractText(m.content);
           if (!text) return '';
           const timeHtml = m.timestamp ? `<div class="message-time">${formatMessageTime(new Date(m.timestamp))}</div>` : '';
-          const msgIdAttr = m.id ? ` data-message-id="${escapeHtml(String(m.id))}"` : '';
-          return `<div class="message user" data-message-idx="${idx}"${msgIdAttr}><div class="message-content">${formatMessage(text)}</div>${timeHtml}</div>`;
+          return `<div class="message user"><div class="message-content">${formatMessage(text)}</div>${timeHtml}</div>`;
         } else if (m.role === 'assistant') {
           const text = extractText(m.content);
           const spawnCards = extractSpawnCards(m.content, m.timestamp);
@@ -3703,12 +6696,7 @@ Response format:
             html += spawnCards.map(card => renderSpawnCard(card, idx)).join('');
           }
           if (text) {
-            const shaped = shapeForDisplay(text);
-            if (!shaped.suppressed) {
-              const replyChip = renderReplyChip(shaped.replyTo, idx - 1);
-              const msgIdAttr = m.id ? ` data-message-id="${escapeHtml(String(m.id))}"` : '';
-              html += `<div class="message assistant" data-message-idx="${idx}"${msgIdAttr}>${replyChip}<div class="message-content">${formatMessage(shaped.text)}</div>${timeHtml}</div>`;
-            }
+            html += `<div class="message assistant"><div class="message-content">${formatMessage(text)}</div>${timeHtml}</div>`;
           }
           return html;
         }
@@ -3777,7 +6765,7 @@ Response format:
             <div class="spawn-card-messages" id="${cardId}-messages">
               <div class="spawn-card-loading">Click to load sub-agent transcript...</div>
             </div>
-            ${card.sessionKey ? `<div class="spawn-card-link" onclick="openSession('${escapeHtml(card.sessionKey)}')">Open full session →</div>` : ''}
+            ${card.sessionKey ? `<a class="spawn-card-link" href="${escapeHtml(sessionHref(card.sessionKey))}" onclick="return handleSessionLinkClick(event, '${escapeHtml(card.sessionKey)}')">Open full session →</a>` : ''}
           </div>
           <div class="message-time">${timeStr}</div>
         </div>
@@ -3807,17 +6795,11 @@ Response format:
             if (messages.length === 0) {
               messagesEl.innerHTML = '<div class="spawn-card-loading">No messages yet</div>';
             } else {
-              messagesEl.innerHTML = messages.map((m, idx) => {
+              messagesEl.innerHTML = messages.map(m => {
                 const text = extractText(m.content);
                 if (!text) return '';
                 const roleClass = m.role === 'user' ? 'user' : 'assistant';
-                if (roleClass === 'assistant') {
-                  const shaped = shapeForDisplay(text);
-                  if (shaped.suppressed) return '';
-                  const replyChip = renderReplyChip(shaped.replyTo, idx - 1);
-                  return `<div class="message ${roleClass}" data-message-idx="${idx}">${replyChip}<div class="message-content">${formatMessage(shaped.text)}</div></div>`;
-                }
-                return `<div class="message ${roleClass}" data-message-idx="${idx}"><div class="message-content">${formatMessage(text)}</div></div>`;
+                return `<div class="message ${roleClass}"><div class="message-content">${formatMessage(text)}</div></div>`;
               }).filter(Boolean).join('');
             }
           } catch (err) {
@@ -3844,54 +6826,6 @@ Response format:
       if (content[0]?.text) return content[0].text;
       
       return '';
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // MESSAGE SHAPING (reply tags + sentinel suppression)
-    // ═══════════════════════════════════════════════════════════════
-
-    function shapeForDisplay(rawText) {
-      const shaper = window.messageShaping && window.messageShaping.shapeMessageText;
-      if (!shaper) {
-        return { text: String(rawText || ''), replyTo: null, suppressed: false, suppressedReason: null };
-      }
-      return shaper(String(rawText || ''));
-    }
-
-    function renderReplyChip(replyTo, fallbackTargetId) {
-      if (!replyTo) return '';
-      const label = replyTo.kind === 'current' ? 'Replying to: current' : `Replying to: ${escapeHtml(replyTo.id)}`;
-      const ref = replyTo.kind === 'current' ? `idx:${escapeHtml(String(fallbackTargetId || ''))}` : `id:${escapeHtml(replyTo.id)}`;
-      return `<div class="reply-chip" onclick="scrollToReplyRef('${ref}')" title="${label}">↩ ${escapeHtml(label)}</div>`;
-    }
-
-    function scrollToReplyRef(ref) {
-      try {
-        if (!ref) return;
-        if (ref.startsWith('id:')) {
-          const id = ref.slice(3);
-          const el = document.querySelector(`[data-message-id='${CSS.escape(id)}']`);
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            el.classList.add('flash');
-            setTimeout(() => el.classList.remove('flash'), 800);
-            return;
-          }
-        }
-        if (ref.startsWith('idx:')) {
-          const idx = ref.slice(4);
-          const el = document.querySelector(`[data-message-idx='${CSS.escape(idx)}']`);
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            el.classList.add('flash');
-            setTimeout(() => el.classList.remove('flash'), 800);
-            return;
-          }
-        }
-        showToast('Replied-to message not found in loaded history', 'info');
-      } catch (e) {
-        // no-op
-      }
     }
     
     // ═══════════════════════════════════════════════════════════════
@@ -4005,25 +6939,143 @@ Response format:
     // ═══════════════════════════════════════════════════════════════
     // CHAT
     // ═══════════════════════════════════════════════════════════════
+
+    // Convert Uint8Array to base64 (browser-safe)
+    function bytesToBase64(bytes) {
+      const chunkSize = 0x8000;
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, chunk);
+      }
+      return btoa(binary);
+    }
+
+    async function fetchUrlAsBase64(url) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Failed to fetch media: ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      return bytesToBase64(new Uint8Array(buf));
+    }
+
+    async function buildGatewayAudioAttachmentsFromUploaded(uploaded) {
+      const out = [];
+      for (const u of (uploaded || [])) {
+        if (!u || !u.ok) continue;
+        const isAudio = String(u.mimeType || '').startsWith('audio/') || String(u.url || '').match(/\.(webm|m4a|mp3|wav|ogg)(\?|$)/i);
+        if (!isAudio) continue;
+        if (!u.url) continue;
+        const content = await fetchUrlAsBase64(u.url);
+        out.push({
+          type: 'audio',
+          mimeType: u.mimeType || 'audio/webm',
+          fileName: u.fileName || String(u.url).split('/').pop() || 'voice.webm',
+          content,
+        });
+      }
+      return out;
+    }
+
     async function sendMessage() {
       const input = document.getElementById('chatInput');
       const text = input.value.trim();
       const hasMedia = typeof MediaUpload !== 'undefined' && MediaUpload.hasPendingFiles();
       
       // Need either text or media
-      if (!text && !hasMedia) return;
-      if (!state.currentSession) return;
+      if (!text && !hasMedia) {
+        showToast('Nothing to send', 'info', 1500);
+        return;
+      }
+      if (!state.currentSession) {
+        showToast('No session selected', 'warning', 3000);
+        return;
+      }
       
       const sessionKey = state.currentSession.key;
       
-      // If agent is busy, queue the message (text only for now)
+      // If agent is busy, queue the message (supports attachments)
       if (state.isThinking) {
-        if (text) {
-          state.messageQueue.push({ text, sessionKey });
+        let queuedText = text;
+        let queuedAttachments = undefined;
+
+        if (hasMedia) {
+          const files = MediaUpload.getPendingFiles();
+          const hasAudio = files.some(f => f.fileType === 'audio');
+
+          // If audio is present while agent is busy, we STILL need to upload now.
+          // (Otherwise we lose the File object after clearing, and the later queued send can only do base64 attachments.)
+          if (hasAudio) {
+            try {
+              showToast('Uploading voice note…', 'info', 2000);
+              addChatMessage('system', 'Uploading voice note…');
+
+              const uploaded = await MediaUpload.uploadAllPending(sessionKey);
+              const lines = [];
+              const transcripts = [];
+
+              showToast('Transcribing…', 'info', 2000);
+              addChatMessage('system', 'Transcribing…');
+
+              for (const u of (uploaded || [])) {
+                if (!u || !u.ok) continue;
+                lines.push(`[attachment: ${u.url}]`);
+                const isAudio = String(u.mimeType || '').startsWith('audio/') || String(u.url || '').match(/\.(webm|m4a|mp3|wav|ogg)(\?|$)/i);
+                if (isAudio && u.serverPath) {
+                  try {
+                    const resp = await fetch(`/api/whisper/transcribe?path=${encodeURIComponent(u.serverPath)}&cb=${Date.now()}`);
+                    const data = await resp.json();
+                    if (data?.ok && data.text) transcripts.push(data.text.trim());
+                  } catch {}
+                }
+              }
+
+              const transcriptText = transcripts.filter(Boolean).join('\n\n');
+              const voiceBlock = [transcriptText || '', ...lines].filter(Boolean).join('\n\n');
+
+              if (!queuedText) queuedText = voiceBlock;
+              else queuedText = [queuedText, voiceBlock].filter(Boolean).join('\n\n');
+
+              // A+B: include the audio as a real gateway attachment so it can forward to Telegram/etc
+              queuedAttachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
+              MediaUpload.clearFiles();
+            } catch (err) {
+              MediaUpload.clearFiles();
+              addChatMessage('system', `Upload/transcribe error: ${err.message}`);
+              showToast(`Upload/transcribe error: ${err.message}`, 'error', 5000);
+              return;
+            }
+          } else {
+            // Images: upload to ClawCondos and reference by URL.
+            // Avoid base64 attachments (can exceed WebSocket frame limits via reverse proxy and close the socket).
+            try {
+              showToast('Uploading image…', 'info', 2000);
+              addChatMessage('system', 'Uploading image…');
+
+              const uploaded = await MediaUpload.uploadAllPending(sessionKey);
+              const lines = [];
+              for (const u of (uploaded || [])) {
+                if (!u || !u.ok) continue;
+                lines.push(`[attachment: ${u.url}]`);
+              }
+
+              const attachText = lines.filter(Boolean).join('\n');
+              queuedText = queuedText ? [queuedText, attachText].filter(Boolean).join('\n\n') : attachText;
+              queuedAttachments = undefined;
+              MediaUpload.clearFiles();
+            } catch (err) {
+              MediaUpload.clearFiles();
+              addChatMessage('system', `Upload error: ${err.message}`);
+              return;
+            }
+          }
+        }
+
+        if (queuedText || (queuedAttachments && queuedAttachments.length)) {
+          state.messageQueue.push({ text: queuedText || '', sessionKey, attachments: queuedAttachments });
           updateQueueIndicator();
           input.value = '';
           input.style.height = 'auto';
-          addChatMessage('user queued', text);
+          addChatMessage('user queued', queuedText || '[attachment]');
         }
         return;
       }
@@ -4031,22 +7083,94 @@ Response format:
       input.value = '';
       input.style.height = 'auto';
       
-      // Handle OpenClaw-native attachments (chat.send.attachments)
+      // Attachments:
+      // - For images we can still send base64 attachments to gateway.
+      // - For audio (voice notes) we MUST persist the file server-side so Whisper can access it.
       let finalMessage = text;
       let attachments = undefined;
 
       if (hasMedia) {
-        try {
-          attachments = await MediaUpload.buildGatewayAttachments();
-          // Optional: show a simple placeholder in the chat log (we don't embed base64)
-          if (!finalMessage) {
-            const files = MediaUpload.getPendingFiles();
-            finalMessage = files.map(f => `[attachment: ${f.file.name}]`).join('\n');
+        const files = MediaUpload.getPendingFiles();
+        const hasAudio = files.some(f => f.fileType === 'audio');
+
+        // If any audio is present: upload to ClawCondos first, transcribe locally, then send transcript + link.
+        if (hasAudio) {
+          // Give immediate user feedback (upload/transcribe can take time, esp. first run while Whisper model downloads)
+          state.isThinking = true;
+          setSessionStatus(sessionKey, 'thinking');
+          updateSendButton();
+          showToast('Uploading voice note…', 'info', 2000);
+          addChatMessage('system', 'Uploading voice note…');
+
+          try {
+            const uploaded = await MediaUpload.uploadAllPending(sessionKey);
+            // uploaded entries: { ok, url, serverPath, mimeType, fileName }
+            const lines = [];
+            const transcripts = [];
+
+            showToast('Transcribing…', 'info', 2000);
+            addChatMessage('system', 'Transcribing…');
+
+            for (const u of (uploaded || [])) {
+              if (!u || !u.ok) continue;
+              lines.push(`[attachment: ${u.url}]`);
+
+              const isAudio = String(u.mimeType || '').startsWith('audio/') || String(u.url || '').match(/\.(webm|m4a|mp3|wav|ogg)(\?|$)/i);
+              if (isAudio && u.serverPath) {
+                try {
+                  const resp = await fetch(`/api/whisper/transcribe?path=${encodeURIComponent(u.serverPath)}&cb=${Date.now()}`);
+                  const data = await resp.json();
+                  if (data?.ok && data.text) transcripts.push(data.text.trim());
+                } catch {}
+              }
+            }
+
+            const transcriptText = transcripts.filter(Boolean).join('\n\n');
+            if (!finalMessage) {
+              finalMessage = [transcriptText || '', ...lines].filter(Boolean).join('\n\n');
+            } else {
+              // append attachments + transcript under user text
+              finalMessage = [finalMessage, transcriptText, ...lines].filter(Boolean).join('\n\n');
+            }
+
+            // A+B: attach audio bytes to the outgoing gateway message
+            attachments = await buildGatewayAudioAttachmentsFromUploaded(uploaded);
+
+            MediaUpload.clearFiles();
+          } catch (err) {
+            // Unstick composer state if we fail before reaching processMessage()
+            state.isThinking = false;
+            setSessionStatus(sessionKey, 'idle');
+            updateSendButton();
+            addChatMessage('system', `Upload/transcribe error: ${err.message}`);
+            showToast(`Upload/transcribe error: ${err.message}`, 'error', 5000);
+            return;
           }
-          MediaUpload.clearFiles();
-        } catch (err) {
-          addChatMessage('system', `Attachment prep error: ${err.message}`);
-          return;
+        } else {
+          // Images: upload to ClawCondos and reference by URL.
+          // Avoid base64 attachments (can exceed WebSocket frame limits via reverse proxy and close the socket).
+          try {
+            showToast('Uploading image…', 'info', 2000);
+            addChatMessage('system', 'Uploading image…');
+
+            const uploaded = await MediaUpload.uploadAllPending(sessionKey);
+            const lines = [];
+            for (const u of (uploaded || [])) {
+              if (!u || !u.ok) continue;
+              lines.push(`[attachment: ${u.url}]`);
+            }
+
+            const attachText = lines.filter(Boolean).join('\n');
+            if (!finalMessage) finalMessage = attachText;
+            else finalMessage = [finalMessage, attachText].filter(Boolean).join('\n\n');
+
+            attachments = undefined;
+            MediaUpload.clearFiles();
+          } catch (err) {
+            MediaUpload.clearFiles();
+            addChatMessage('system', `Upload error: ${err.message}`);
+            return;
+          }
         }
       }
 
@@ -4069,12 +7193,20 @@ Response format:
           attachments: attachments,
           idempotencyKey
         }, 130000);
-        
+
+        // Visual ack: mark this session as "sent" briefly so user knows it left the client.
+        try {
+          state.sessionLastSentAt = state.sessionLastSentAt || {};
+          state.sessionLastSentAt[sessionKey] = Date.now();
+          setSessionStatus(sessionKey, 'sent');
+        } catch {
+          setSessionStatus(sessionKey, 'idle');
+        }
+
         if (result?.reply) {
           addChatMessage('assistant', result.reply);
         }
-        
-        setSessionStatus(sessionKey, 'idle');
+
         refresh();
         
       } catch (err) {
@@ -4099,17 +7231,27 @@ Response format:
         queuedMsgs[0].classList.remove('queued');
       }
       
-      processMessage(next.text, next.sessionKey);
+      processMessage(next.text, next.sessionKey, next.attachments);
     }
     
     function updateQueueIndicator() {
+      const count = state.messageQueue.length;
+
+      // main
       const indicator = document.getElementById('queueIndicator');
       const countEl = document.getElementById('queueCount');
-      if (!indicator || !countEl) return;
-      
-      const count = state.messageQueue.length;
-      countEl.textContent = count;
-      indicator.classList.toggle('visible', count > 0);
+      if (indicator && countEl) {
+        countEl.textContent = count;
+        indicator.classList.toggle('visible', count > 0);
+      }
+
+      // goal composer
+      const gInd = document.getElementById('goal_queueIndicator');
+      const gCnt = document.getElementById('goal_queueCount');
+      if (gInd && gCnt) {
+        gCnt.textContent = count;
+        gInd.classList.toggle('visible', count > 0);
+      }
     }
     
     function clearMessageQueue() {
@@ -4120,25 +7262,46 @@ Response format:
     }
     
     function addChatMessage(role, content, timestamp = null) {
-      const container = document.getElementById('chatMessages');
+      return addChatMessageTo('', role, content, timestamp);
+    }
+
+    function addChatMessageTo(prefix, role, content, timestamp = null) {
+      const containerId = prefix ? `${prefix}_chatMessages` : 'chatMessages';
+      const container = document.getElementById(containerId);
+      if (!container) return null;
+
+      const parts = String(role || '').split(/\s+/).filter(Boolean);
+      const base = parts[0] || 'system';
+      const normalizedContent = String(content ?? '').replace(/\s+/g, '');
+      const fingerprint = `${prefix}|${base}|${normalizedContent}`;
+      const now = Date.now();
+      const recent = state.recentMessageFingerprints.get(fingerprint);
+      if (recent && (now - recent) <= 15000) {
+        return null;
+      }
+      state.recentMessageFingerprints.set(fingerprint, now);
+
+      if ((now - state.recentMessageFingerprintPruneAt) > 5000) {
+        state.recentMessageFingerprintPruneAt = now;
+        for (const [key, ts] of state.recentMessageFingerprints) {
+          if ((now - ts) > 30000) state.recentMessageFingerprints.delete(key);
+        }
+      }
+
       const msg = document.createElement('div');
-      msg.className = `message ${role}`;
-      
+      // Normalize role strings like "user queued" → classes: message user queued
+      const extra = parts.slice(1);
+      msg.className = `message ${base}${extra.length ? ' ' + extra.join(' ') : ''}`;
+
       // Format content
       let contentHtml;
-      let replyChip = '';
       const features = (config && config.features) ? config.features : {};
       const formatUserMessages = features.formatUserMessages === true;
-      const shouldFormat = role.startsWith('assistant') || (formatUserMessages && role.startsWith('user'));
-
-      if (role.startsWith('assistant') && !role.includes('thinking')) {
-        const shaped = shapeForDisplay(content);
-        if (shaped.suppressed) {
-          return null; // do not render sentinel-only messages
-        }
-        replyChip = renderReplyChip(shaped.replyTo, container.children.length - 1);
-        contentHtml = shouldFormat ? formatMessage(shaped.text) : escapeHtml(shaped.text);
-      } else if (shouldFormat && !role.includes('thinking')) {
+      const baseRole = base;
+      // Always format assistant messages.
+      // Format user messages only if enabled OR if they contain attachment markers (so they render as pills/players).
+      const shouldFormat = baseRole === 'assistant' || (baseRole === 'user' && (formatUserMessages || /\[attachment:/i.test(String(content||''))));
+      if (shouldFormat && !role.includes('thinking')) {
         contentHtml = formatMessage(content);
       } else {
         contentHtml = escapeHtml(content);
@@ -4148,11 +7311,30 @@ Response format:
       const time = timestamp ? new Date(timestamp) : new Date();
       const timeStr = formatMessageTime(time);
 
-      msg.setAttribute('data-message-idx', String(container.children.length));
-      msg.innerHTML = `${replyChip}<div class="message-content">${contentHtml}</div><div class="message-time">${timeStr}</div>`;
-
+      msg.innerHTML = `<div class="message-content">${contentHtml}</div><div class="message-time">${timeStr}</div>`;
       container.appendChild(msg);
-      scrollChatToBottom();
+
+      // Unseen tracking
+      if (prefix === 'goal') {
+        if (!state.goalChatAutoScroll && !isNearChatBottom(container)) {
+          state.goalChatUnseenCount = (state.goalChatUnseenCount || 0) + 1;
+          const jump = document.getElementById('goal_jumpToLatest');
+          if (jump) jump.style.display = 'flex';
+          const cnt = document.getElementById('goal_jumpToLatestCount');
+          if (cnt) {
+            cnt.textContent = String(state.goalChatUnseenCount);
+            cnt.style.display = 'inline-flex';
+          }
+        }
+        scrollChatPanelToBottom('goal');
+      } else {
+        if (!state.chatAutoScroll && !isNearChatBottom(container)) {
+          state.chatUnseenCount = (state.chatUnseenCount || 0) + 1;
+          setJumpToLatestVisible(true);
+        }
+        scrollChatToBottom();
+      }
+
       return msg;
     }
     
@@ -4174,14 +7356,42 @@ Response format:
       }
     }
     
-    function scrollChatToBottom() {
-      const container = document.getElementById('chatMessages');
-      if (container) {
-        // Use requestAnimationFrame for reliable scrolling after DOM update
-        requestAnimationFrame(() => {
-          container.scrollTop = container.scrollHeight;
-        });
+    function isNearChatBottom(container) {
+      if (!container) return true;
+      const threshold = 120; // px
+      return (container.scrollHeight - (container.scrollTop + container.clientHeight)) <= threshold;
+    }
+
+    function setJumpToLatestVisible(visible) {
+      const btn = document.getElementById('jumpToLatest');
+      const badge = document.getElementById('jumpToLatestCount');
+      if (!btn) return;
+
+      btn.classList.toggle('visible', !!visible);
+      if (badge) {
+        const n = state.chatUnseenCount || 0;
+        badge.textContent = n > 9 ? '9+' : String(n);
+        badge.style.display = n > 0 ? 'inline-flex' : 'none';
       }
+    }
+
+    function scrollChatToBottom(force = false) {
+      const container = document.getElementById('chatMessages');
+      if (!container) return;
+
+      const should = force || state.chatAutoScroll || isNearChatBottom(container);
+      if (!should) {
+        // User is reading above; just surface the jump button.
+        setJumpToLatestVisible(true);
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+        state.chatAutoScroll = true;
+        state.chatUnseenCount = 0;
+        setJumpToLatestVisible(false);
+      });
     }
     
     const AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.webm', '.m4a', '.mp4'];
@@ -4286,6 +7496,13 @@ Response format:
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
         .replace(/\*([^*]+)\*/g, '<em>$1</em>')
         .replace(/\n/g, '<br>');
+
+      // ClawCondos formatting helpers:
+      // If a line is ONLY a bold title and is surrounded by blank lines in the source,
+      // render it as a block heading with consistent spacing.
+      // Pattern from our recommended template: **Title**\n\n...
+      html = html
+        .replace(/(^|<br>)(<strong>[^<]+<\/strong>)(<br>){2}/g, '$1<div class="msg-heading">$2</div><div class="msg-gap"></div>');
       
       tokens.forEach((tokenHtml, idx) => {
         html = html.replace(`@@MEDIA_${idx}@@`, tokenHtml);
@@ -4311,16 +7528,122 @@ Response format:
         stopAgent();
       }
     }
-    
+
     function autoResize(el) {
       el.style.height = 'auto';
       el.style.height = Math.min(el.scrollHeight, 200) + 'px';
     }
-    
+
     function updateSendButton() {
-      document.getElementById('sendBtn').disabled = state.isThinking;
+      // Primary chat composer
+      const sendBtn = document.getElementById('sendBtn');
+      if (sendBtn) sendBtn.disabled = state.isThinking;
+
       const stopBtn = document.getElementById('stopBtn');
-      if (stopBtn) stopBtn.disabled = !state.isThinking;
+      if (stopBtn) {
+        const canStop = state.isThinking && !!(state.currentSession?.key);
+        stopBtn.disabled = !canStop;
+      }
+
+      // Goal composer uses separate ids
+      const sendGoal = document.getElementById('goal_sendBtn');
+      if (sendGoal) sendGoal.disabled = state.isThinking;
+
+      const stopGoal = document.getElementById('goal_stopBtn');
+      if (stopGoal) {
+        const canStopGoal = state.isThinking && !!(state.goalChatSessionKey);
+        stopGoal.disabled = !canStopGoal;
+      }
+    }
+
+    function composerTemplate(prefix) {
+      const p = prefix ? `${prefix}_` : '';
+      const inputId = prefix ? `${prefix}_chatInput` : 'chatInput';
+      const fileId = prefix ? `${prefix}_mediaFileInput` : 'mediaFileInput';
+      const prevId = prefix ? `${prefix}_mediaPreviewContainer` : 'mediaPreviewContainer';
+      const dropId = prefix ? `${prefix}_dropOverlay` : 'dropOverlay';
+      const queueId = prefix ? `${prefix}_queueIndicator` : 'queueIndicator';
+      const queueCountId = prefix ? `${prefix}_queueCount` : 'queueCount';
+      const voiceId = prefix ? `${prefix}_voiceRecordBtn` : 'voiceRecordBtn';
+      const timerId = prefix ? `${prefix}_voiceTimer` : 'voiceTimer';
+      const stopId = prefix ? `${prefix}_stopBtn` : 'stopBtn';
+      const sendId = prefix ? `${prefix}_sendBtn` : 'sendBtn';
+
+      return `
+        <div class="chat-input-area">
+          <div class="queue-indicator" id="${queueId}">
+            <span>📨</span>
+            <span class="queue-count" id="${queueCountId}">0</span>
+            <span>queued</span>
+            <button class="clear-queue" onclick="clearMessageQueue()" title="Clear queue">✕</button>
+          </div>
+
+          <div id="${prevId}"></div>
+
+          <input type="file" id="${fileId}" accept="image/*,audio/*" multiple>
+
+          <div class="chat-input-wrapper">
+            <button class="attach-btn" onclick="document.getElementById('${fileId}').click()" title="Attach files" aria-label="Attach files">
+              <!-- clean paperclip -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 11.5 12.6 18.9a5 5 0 0 1-7.1-7.1l8.5-8.5a3.5 3.5 0 1 1 5 5l-8.5 8.5a2 2 0 0 1-2.8-2.8l7.8-7.8"/>
+              </svg>
+            </button>
+            <textarea class="chat-input" id="${inputId}" placeholder="Type a message..." rows="1" onkeydown="${prefix ? "if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendGoalChatMessage();} if(event.key==='Escape' && state.isThinking){event.preventDefault(); stopAgent(null,'goal');}" : "handleChatKey(event)"}" oninput="autoResize(this)"></textarea>
+            <button class="stop-btn" id="${stopId}" onclick="stopAgent(null, '${prefix || ''}')" disabled title="Stop">⏹</button>
+            <button class="voice-btn" id="${voiceId}" title="Record voice" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zm5 11a5 5 0 01-10 0H5a7 7 0 0014 0h-2zm-5 9a7.001 7.001 0 006.93-6H19a8.99 8.99 0 01-14 0H5.07A7.001 7.001 0 0012 21z"/>
+              </svg>
+              <span class="voice-btn-text">Rec</span>
+              <span class="recording-timer" id="${timerId}">0:00</span>
+            </button>
+            <button class="send-btn" id="${sendId}" onclick="${prefix ? 'sendGoalChatMessage()' : 'sendMessage()'}">Send</button>
+          </div>
+
+          <div class="drop-overlay" id="${dropId}">
+            <div class="drop-overlay-content">
+              <div class="drop-overlay-icon">📎</div>
+              <div class="drop-overlay-text">Drop files here</div>
+              <div class="drop-overlay-hint">Images and audio supported</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function mountComposer(mountId, prefix, opts = {}) {
+      const mount = document.getElementById(mountId);
+      if (!mount) return;
+
+      mount.innerHTML = composerTemplate(prefix);
+
+      const inputId = prefix ? `${prefix}_chatInput` : 'chatInput';
+
+      // NOTE: We deliberately do NOT attach send/keydown listeners here.
+      // The composer markup includes inline handlers as a hard fallback.
+      // Attaching listeners here can double-fire (send twice + "Nothing to send").
+
+      // Mount MediaUpload + VoiceRecorder onto this composer if supported
+      try {
+        if (window.MediaUpload && typeof window.MediaUpload.mount === 'function') {
+          window.MediaUpload.mount({
+            prefix,
+            viewId: (prefix === 'goal') ? 'goalChatPanel' : 'chatView',
+            inputId: inputId,
+            fileInputId: prefix ? `${prefix}_mediaFileInput` : 'mediaFileInput',
+            previewContainerId: prefix ? `${prefix}_mediaPreviewContainer` : 'mediaPreviewContainer',
+            dropOverlayId: prefix ? `${prefix}_dropOverlay` : 'dropOverlay',
+          });
+        }
+        if (window.VoiceRecorder && typeof window.VoiceRecorder.mount === 'function') {
+          window.VoiceRecorder.mount({
+            prefix,
+            btnId: prefix ? `${prefix}_voiceRecordBtn` : 'voiceRecordBtn',
+            timerId: prefix ? `${prefix}_voiceTimer` : 'voiceTimer',
+          });
+        }
+      } catch {}
     }
     
     function updateVerboseToggleUI() {
@@ -4335,25 +7658,24 @@ Response format:
     }
 
     async function setVerboseMode(level) {
-      if (!state.currentSession) return;
-      const key = state.currentSession.key;
+      const sessionKey = state.currentSession?.key;
+      if (!sessionKey) return;
       const normalized = (level === 'full' || level === 'on' || level === 'off') ? level : 'off';
 
-      // Persist for UI purposes (server-side is authoritative, but this keeps UX stable)
-      state.verboseBySession[key] = normalized;
-      localStorage.setItem('sharp_verbose_by_session', JSON.stringify(state.verboseBySession));
+      state.verboseBySession[sessionKey] = normalized;
+      lsSet('verbose_by_session', JSON.stringify(state.verboseBySession));
       updateVerboseToggleUI();
 
       try {
-        const idempotencyKey = `verbose-${key}-${Date.now()}`;
+        const idempotencyKey = `verbose-${sessionKey}-${Date.now()}`;
         await rpcCall('chat.send', {
-          sessionKey: key,
+          sessionKey: sessionKey,
           message: `/verbose ${normalized}`,
           idempotencyKey
         }, 10000);
-        addChatMessage('system', `Verbose → ${normalized}`);
+        addChatMessageTo('', 'system', `Verbose → ${normalized}`);
       } catch (err) {
-        addChatMessage('system', `Failed to set verbose: ${err.message}`);
+        addChatMessageTo('', 'system', `Failed to set verbose: ${err.message}`);
       }
     }
 
@@ -4362,11 +7684,13 @@ Response format:
     // ═══════════════════════════════════════════════════════════════
 
     function availableModelChoices() {
+      // MVP list: core aliases + any configured agent models.
       const base = [
         { value: 'default', label: 'default' },
         { value: 'gpt', label: 'gpt (gpt-5.2 alias)' },
         { value: 'opus', label: 'opus (Claude Opus alias)' },
       ];
+
       const seen = new Set(base.map(x => x.value));
       for (const a of (state.agents || [])) {
         const m = String(a?.model || a?.models?.primary || '').trim();
@@ -4375,6 +7699,8 @@ Response format:
         seen.add(m);
         base.push({ value: m, label: m });
       }
+
+      // Keep deterministic ordering: aliases first, then full model strings.
       const head = base.slice(0, 3);
       const tail = base.slice(3).sort((a, b) => a.label.localeCompare(b.label));
       return head.concat(tail).concat([{ value: '__custom__', label: 'Custom…' }]);
@@ -4398,6 +7724,7 @@ Response format:
         return `<option value="${escapeHtml(String(c.value))}"${selected}>${escapeHtml(String(c.label))}</option>`;
       }).join('');
 
+      // If the current model is not in the list, inject it at the top.
       if (current && !choices.some(c => c.value === current)) {
         const opt = document.createElement('option');
         opt.value = String(current);
@@ -4417,21 +7744,25 @@ Response format:
       if (chosen === '__custom__') {
         const custom = prompt('Enter model alias or full model id (e.g. opus, gpt, anthropic/claude-opus-4-5):', 'opus');
         if (!custom) {
+          // Re-render to reset selection
           renderSessionModelSelector(state.currentSession);
           return;
         }
         chosen = String(custom).trim();
       }
 
+      // No-op
       const prev = effectiveSessionModel(state.currentSession) || 'default';
       if (chosen === prev) return;
 
+      // NOTE: OpenClaw supports `/new <model>` which *resets* the session and switches model.
       const ok = confirm(`Switch model to "${chosen}"?\n\nThis will reset the session (equivalent to sending: /new ${chosen}).`);
       if (!ok) {
         renderSessionModelSelector(state.currentSession);
         return;
       }
 
+      // Optimistically update UI
       state.sessionModelOverrides[sessionKey] = chosen;
       lsSet('session_model_overrides', JSON.stringify(state.sessionModelOverrides));
       renderSessionModelSelector(state.currentSession);
@@ -4445,6 +7776,7 @@ Response format:
         }, 15000);
         showToast(`Model → ${chosen} (session reset)`, 'success', 2500);
 
+        // Refresh session metadata soon after.
         setTimeout(async () => {
           try {
             await loadSessions();
@@ -4459,19 +7791,22 @@ Response format:
       }
     }
 
-    async function stopAgent() {
-      if (!state.isThinking || !state.currentSession) return;
-      
+    async function stopAgent(sessionKeyOverride = null, prefix = '') {
+      if (!state.isThinking) return;
+
+      const sessionKey = sessionKeyOverride || state.currentSession?.key || (state.currentView === 'goal' ? state.goalChatSessionKey : null);
+      if (!sessionKey) return;
+
       try {
-        const idempotencyKey = `stop-${state.currentSession.key}-${Date.now()}`;
+        const idempotencyKey = `stop-${sessionKey}-${Date.now()}`;
         await rpcCall('chat.send', {
-          sessionKey: state.currentSession.key,
+          sessionKey,
           message: '/stop',
           idempotencyKey
         }, 10000);
-        addChatMessage('system', '⏹ Stop requested');
+        addChatMessageTo(prefix, 'system', '⏹ Stop requested');
       } catch (err) {
-        addChatMessage('system', `Failed to stop: ${err.message}`);
+        addChatMessageTo(prefix, 'system', `Failed to stop: ${err.message}`);
       }
     }
     
@@ -4568,137 +7903,6 @@ Response format:
     }
     
     // ═══════════════════════════════════════════════════════════════
-    // MULTI-SELECT MODE
-    // ═══════════════════════════════════════════════════════════════
-    function enterMultiSelect() {
-      state.multiSelectMode = true;
-      state.selectedSessions.clear();
-      document.getElementById('sessionsList').classList.add('multi-select-mode');
-      document.getElementById('selectModeBtn').style.display = 'none';
-      updateBulkActionBar();
-      renderSessions();
-    }
-    
-    function exitMultiSelect() {
-      state.multiSelectMode = false;
-      state.selectedSessions.clear();
-      document.getElementById('sessionsList').classList.remove('multi-select-mode');
-      document.getElementById('selectModeBtn').style.display = '';
-      document.getElementById('bulkActionBar').classList.remove('visible');
-      renderSessions();
-    }
-    
-    function toggleSessionSelection(key, event) {
-      if (event) {
-        event.stopPropagation();
-      }
-      
-      if (state.selectedSessions.has(key)) {
-        state.selectedSessions.delete(key);
-      } else {
-        state.selectedSessions.add(key);
-      }
-      
-      updateBulkActionBar();
-      updateCheckboxStates();
-    }
-    
-    function toggleSelectAll() {
-      const mainSessions = state.sessions.filter(s => !s.key.includes(':subagent:'));
-      
-      if (state.selectedSessions.size === mainSessions.length) {
-        // Deselect all
-        state.selectedSessions.clear();
-      } else {
-        // Select all
-        mainSessions.forEach(s => state.selectedSessions.add(s.key));
-      }
-      
-      updateBulkActionBar();
-      updateCheckboxStates();
-    }
-    
-    function updateBulkActionBar() {
-      const bar = document.getElementById('bulkActionBar');
-      const count = state.selectedSessions.size;
-      
-      if (count > 0) {
-        bar.classList.add('visible');
-        document.getElementById('bulkCount').textContent = `${count} selected`;
-      } else {
-        bar.classList.remove('visible');
-      }
-    }
-    
-    function updateCheckboxStates() {
-      // Update individual checkboxes
-      document.querySelectorAll('.session-checkbox[data-key]').forEach(checkbox => {
-        const key = checkbox.dataset.key;
-        if (state.selectedSessions.has(key)) {
-          checkbox.classList.add('checked');
-        } else {
-          checkbox.classList.remove('checked');
-        }
-      });
-      
-      // Update select all checkbox
-      const mainSessions = state.sessions.filter(s => !s.key.includes(':subagent:'));
-      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-      if (selectAllCheckbox) {
-        if (mainSessions.length > 0 && state.selectedSessions.size === mainSessions.length) {
-          selectAllCheckbox.classList.add('checked');
-        } else {
-          selectAllCheckbox.classList.remove('checked');
-        }
-      }
-    }
-    
-    async function bulkArchive() {
-      if (state.selectedSessions.size === 0) return;
-      
-      const count = state.selectedSessions.size;
-      if (!confirm(`Archive ${count} session${count > 1 ? 's' : ''}?`)) return;
-      
-      const keys = [...state.selectedSessions];
-      let archived = 0;
-      
-      for (const key of keys) {
-        try {
-          await rpcCall('sessions.archive', { sessionKey: key });
-          archived++;
-        } catch (err) {
-          console.error(`Failed to archive ${key}:`, err);
-        }
-      }
-      
-      exitMultiSelect();
-      await refresh();
-      
-      console.log(`[ClawCondos] Archived ${archived}/${count} sessions`);
-    }
-    
-    async function bulkPin() {
-      if (state.selectedSessions.size === 0) return;
-      
-      const keys = [...state.selectedSessions];
-      let pinned = 0;
-      
-      for (const key of keys) {
-        try {
-          await rpcCall('sessions.pin', { sessionKey: key, pinned: true });
-          pinned++;
-        } catch (err) {
-          console.error(`Failed to pin ${key}:`, err);
-        }
-      }
-      
-      exitMultiSelect();
-      await refresh();
-      
-      console.log(`[ClawCondos] Pinned ${pinned}/${keys.length} sessions`);
-    }
-    
-    // ═══════════════════════════════════════════════════════════════
     // OVERVIEW
     // ═══════════════════════════════════════════════════════════════
     function updateOverview() {
@@ -4712,56 +7916,127 @@ Response format:
 
     function renderGoalsGrid() {
       const container = document.getElementById('goalsGrid');
-      const countEl = document.getElementById('goalCount');
-      if (!container || !countEl) return;
+      if (!container) return;
+
+      // Dashboard "Condos Overview" (prototype): render condos with a few goal rows inside each card.
+      const visibleSessions = (state.sessions || []).filter(s => !s.key.includes(':subagent:'));
+
+      const condos = new Map();
+      for (const s of visibleSessions) {
+        const condoId = getSessionCondoId(s);
+        if (!condos.has(condoId)) {
+          condos.set(condoId, {
+            id: condoId,
+            name: getSessionCondoName(s),
+            sessions: [],
+            goals: [],
+            latest: 0,
+          });
+        }
+        const c = condos.get(condoId);
+        c.sessions.push(s);
+        c.latest = Math.max(c.latest, s.updatedAt || 0);
+      }
 
       const goals = Array.isArray(state.goals) ? state.goals : [];
-      countEl.textContent = goals.length;
+      for (const g of goals) {
+        // If condoId is missing but the goal already has sessions, infer condoId from the first session.
+        // This makes the dashboard "Condos Overview" populate correctly even for legacy goals.
+        const inferredCondoId = (!g.condoId && Array.isArray(g.sessions) && g.sessions[0])
+          ? getCondoIdForSessionKey(g.sessions[0])
+          : null;
+        const condoId = g.condoId || inferredCondoId || 'misc:default';
+        if (!condos.has(condoId)) {
+          condos.set(condoId, {
+            id: condoId,
+            name: g.condoName || (condoId.includes(':') ? condoId.split(':').pop() : condoId),
+            sessions: [],
+            goals: [],
+            latest: g.updatedAtMs || 0,
+          });
+        }
+        condos.get(condoId).goals.push(g);
+      }
 
-      if (!goals.length) {
+      const sorted = Array.from(condos.values()).sort((a, b) => (b.latest || 0) - (a.latest || 0));
+
+      if (!sorted.length) {
         container.innerHTML = `
-          <div class="goal-card empty" onclick="showCreateGoalModal()">
-            <div class="goal-card-top">
-              <div class="goal-card-icon">＋</div>
-              <div class="goal-card-title">Create your first condo</div>
+          <div class="condo-card" style="opacity:.7">
+            <div class="condo-card-header">
+              <span style="font-size:18px">🏢</span>
+              <span class="condo-card-title">No condos yet</span>
             </div>
-            <div class="goal-card-sub">Goals keep sessions, tasks, notes, and deadlines in one place.</div>
+            <div class="condo-card-goals">
+              <div class="condo-goal-row">
+                <div class="condo-goal-status pending"></div>
+                <span class="condo-goal-name">Create a goal to get started</span>
+                <span class="condo-goal-meta">+</span>
+              </div>
+            </div>
           </div>
         `;
         return;
       }
 
-      container.innerHTML = goals.map(g => {
-        const { done, total } = goalTaskStats(g);
-        const pct = total ? Math.round((done/total)*100) : 0;
-        const status = g.status || 'active';
-        const due = g.deadline ? `<span class="goal-pill">due ${escapeHtml(g.deadline)}</span>` : '';
-        const pr = g.priority ? `<span class="goal-pill pr">${escapeHtml(g.priority)}</span>` : '';
-        const sessions = Array.isArray(g.sessions) ? g.sessions.length : 0;
+      // Prototype shows a tight grid; start with up to 8 cards.
+      const maxCards = 8;
+      const cards = sorted.slice(0, maxCards).map(condo => {
+        const condoUnread = condo.sessions.filter(s => isSessionUnread(s.key)).length;
+        const condoErrors = condo.sessions.filter(s => s.lastError).length;
+        const badge = condoUnread > 0
+          ? `<span class="badge unread">${condoUnread}</span>`
+          : condoErrors > 0 ? `<span class="badge error">${condoErrors}</span>` : '';
+
+        // Pick up to 3 non-completed goals (prototype shows a few rows)
+        const goalsForCondo = (condo.goals || []).filter(g => !isGoalCompleted(g)).slice(0, 3);
+        const rows = goalsForCondo.map(g => {
+          const sessionCount = Array.isArray(g.sessions) ? g.sessions.length : 0;
+          const meta = sessionCount ? `${sessionCount} session${sessionCount === 1 ? '' : 's'}` : '';
+          return `
+            <a class="condo-goal-row" href="${escapeHtml(goalHref(g.id))}" onclick="return handleGoalLinkClick(event, '${escapeHtml(g.id)}')">
+              <div class="condo-goal-status pending"></div>
+              <span class="condo-goal-name">${escapeHtml(g.title || 'Untitled goal')}</span>
+              <span class="condo-goal-meta">${escapeHtml(meta || '—')}</span>
+            </a>
+          `;
+        }).join('');
+
+        const fallback = !rows
+          ? `
+            <a class="condo-goal-row" href="${escapeHtml(fullHref(`#/new-goal/${encodeURIComponent(condo.id)}`))}" onclick="return handleRouteLinkClick(event, 'new-goal/${encodeURIComponent(condo.id)}')">
+              <div class="condo-goal-status pending"></div>
+              <span class="condo-goal-name">New goal…</span>
+              <span class="condo-goal-meta">+</span>
+            </a>
+          `
+          : '';
+
+        // NOTE: condo cards must NOT be <a> tags because they contain goal-row <a> links.
+        // Nested anchors are invalid HTML and can explode the grid layout in some browsers.
         return `
-          <div class="goal-card ${status === 'done' ? 'done' : ''}" onclick="openGoal('${escapeHtml(g.id)}')">
-            <div class="goal-card-top">
-              <div class="goal-card-icon">🏙️</div>
-              <div>
-                <div class="goal-card-title">${escapeHtml(g.title || 'Untitled goal')}</div>
-                <div class="goal-card-sub">${status === 'done' ? 'Completed' : 'In progress'} · ${sessions} sessions</div>
-              </div>
+          <div class="condo-card" role="link" tabindex="0"
+               onclick="openCondo('${escapeHtml(condo.id)}', { fromRouter: true })"
+               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault(); openCondo('${escapeHtml(condo.id)}', { fromRouter: true });}">
+            <div class="condo-card-header">
+              <span style="font-size:18px">🏢</span>
+              <span class="condo-card-title">${escapeHtml(condo.name || 'Condo')}</span>
+              ${badge}
             </div>
-            <div class="goal-card-pills">
-              ${pr}
-              ${due}
-              <span class="goal-pill">${done}/${total} tasks</span>
-            </div>
-            <div class="goal-progress">
-              <div class="goal-progress-bar" style="width:${pct}%;"></div>
+            <div class="condo-card-goals">
+              ${rows || fallback}
             </div>
           </div>
         `;
       }).join('');
+
+      container.innerHTML = `<div class="condos-grid">${cards}</div>`;
     }
 
     function renderSessionsGrid() {
-      const goal = state.currentGoalId !== 'all' ? state.goals.find(g => g.id === state.currentGoalId) : null;
+      const goal = state.currentGoalId !== 'all' && state.currentGoalId !== 'unassigned'
+        ? state.goals.find(g => g.id === state.currentGoalId)
+        : null;
       const goalSessionSet = goal?.sessions ? new Set(goal.sessions) : null;
       
       // Build set of ALL sessions in ANY goal
@@ -4770,8 +8045,10 @@ Response format:
       
       const mainSessions = state.sessions.filter(s => {
         if (s.key.includes(':subagent:')) return false;
+        if (!matchesSearch(s)) return false;
         // When viewing specific goal, only show its sessions
         if (goalSessionSet && !goalSessionSet.has(s.key)) return false;
+        if (state.currentGoalId === 'unassigned' && allSessionsInGoals.has(s.key)) return false;
         // When viewing "all" (Overview), hide sessions in any goal - they show under Goals
         if (state.currentGoalId === 'all' && allSessionsInGoals.has(s.key)) return false;
         return true;
@@ -4799,9 +8076,9 @@ Response format:
         const agentStatus = getAgentStatus(s.key);
         const tooltip = getStatusTooltip(agentStatus);
         const g = getGoalForSession(s.key);
-        const goalPill = g ? `<span class="card-badge goal" onclick="event.stopPropagation(); openGoal('${escapeHtml(g.id)}')">🏙️ ${escapeHtml(g.title || 'Goal')}</span>` : '';
+        const goalPill = g ? `<button type="button" class="card-badge goal" onclick="event.preventDefault(); event.stopPropagation(); openGoal('${escapeHtml(g.id)}', { fromRouter: true })">🏙️ ${escapeHtml(g.title || 'Goal')}</button>` : '';
         return `
-          <div class="session-card" onclick="openSession('${escapeHtml(s.key)}')">
+          <a class="session-card" href="${escapeHtml(sessionHref(s.key))}" onclick="return handleSessionLinkClick(event, '${escapeHtml(s.key)}')">
             <div class="card-top">
               <div class="card-icon">${getSessionIcon(s)}</div>
               <div class="card-info">
@@ -4815,7 +8092,7 @@ Response format:
               <span>${timeAgo(s.updatedAt)}</span>
               <span class="card-footer-right">${goalPill}<span class="card-badge">${(s.totalTokens || 0).toLocaleString()} tokens</span></span>
             </div>
-          </div>
+          </a>
         `;
       }).join('');
     }
@@ -4891,7 +8168,7 @@ Response format:
         const agentStatus = getAgentStatus(s.key);
         const tooltip = getStatusTooltip(agentStatus);
         return `
-          <div class="session-card" onclick="openSession('${escapeHtml(s.key)}')">
+          <a class="session-card" href="${escapeHtml(sessionHref(s.key))}" onclick="return handleSessionLinkClick(event, '${escapeHtml(s.key)}')">
             <div class="card-top">
               <div class="card-icon">⚡</div>
               <div class="card-info">
@@ -4904,7 +8181,7 @@ Response format:
             <div class="card-footer">
               <span>${timeAgo(s.updatedAt)}</span>
             </div>
-          </div>
+          </a>
         `;
       }).join('');
     }
@@ -4938,10 +8215,10 @@ Response format:
     // ═══════════════════════════════════════════════════════════════
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (state.multiSelectMode) {
+        if (false) {
           exitMultiSelect();
         } else if (state.currentView === 'chat') {
-          showOverview();
+          navigateTo('dashboard');
         }
       }
     });
@@ -4949,15 +8226,163 @@ Response format:
     // ═══════════════════════════════════════════════════════════════
     // INIT
     // ═══════════════════════════════════════════════════════════════
-    function init() {
+    function initChatUX() {
+      // Main session chat
+      const container = document.getElementById('chatMessages');
+      if (container && !container.dataset.scrollListenerAttached) {
+        container.dataset.scrollListenerAttached = '1';
+        container.addEventListener('scroll', () => {
+          const nearBottom = isNearChatBottom(container);
+          state.chatAutoScroll = nearBottom;
+          if (nearBottom) {
+            state.chatUnseenCount = 0;
+            setJumpToLatestVisible(false);
+          }
+        }, { passive: true });
+      }
+
+      const jumpBtn = document.getElementById('jumpToLatest');
+      if (jumpBtn && !jumpBtn.dataset.clickAttached) {
+        jumpBtn.dataset.clickAttached = '1';
+        jumpBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          state.chatAutoScroll = true;
+          state.chatUnseenCount = 0;
+          scrollChatToBottom(true);
+        });
+      }
+
+      // Goal chat (reuse same UX)
+      const g = document.getElementById('goal_chatMessages');
+      if (g && !g.dataset.scrollListenerAttached) {
+        g.dataset.scrollListenerAttached = '1';
+        g.addEventListener('scroll', () => {
+          const nearBottom = isNearChatBottom(g);
+          state.goalChatAutoScroll = nearBottom;
+          if (nearBottom) {
+            state.goalChatUnseenCount = 0;
+            const jump = document.getElementById('goal_jumpToLatest');
+            if (jump) jump.style.display = 'none';
+            const cnt = document.getElementById('goal_jumpToLatestCount');
+            if (cnt) cnt.style.display = 'none';
+          }
+        }, { passive: true });
+      }
+
+      const gj = document.getElementById('goal_jumpToLatest');
+      if (gj && !gj.dataset.clickAttached) {
+        gj.dataset.clickAttached = '1';
+        gj.addEventListener('click', (e) => {
+          e.preventDefault();
+          state.goalChatAutoScroll = true;
+          state.goalChatUnseenCount = 0;
+          scrollChatPanelToBottom('goal', true);
+        });
+      }
+
+      // Compat for shared modules
+      if (typeof window.showNotification !== 'function' && typeof window.showToast === 'function') {
+        window.showNotification = (msg, type) => window.showToast(msg, type || 'info', 4000);
+      }
+
+      // Mount reusable composers (chat + goal)
+      // The composer mounts dynamically, so MediaUpload sometimes runs before the elements exist.
+      // We retry the mount a few times to guarantee the file input is wired.
+      try {
+        const ensureMounted = (mountId, prefix, opts) => {
+          let attempts = 0;
+          const maxAttempts = 30; // ~3s
+          const tick = () => {
+            attempts++;
+            try {
+              mountComposer(mountId, prefix, opts);
+              // If MediaUpload exposes a boolean return, use it to detect missing DOM.
+              if (window.MediaUpload && typeof window.MediaUpload.mount === 'function') {
+                const ok = window.MediaUpload.mount({
+                  prefix,
+                  viewId: (prefix === 'goal') ? 'goalChatPanel' : 'chatView',
+                  inputId: prefix ? `${prefix}_chatInput` : 'chatInput',
+                  fileInputId: prefix ? `${prefix}_mediaFileInput` : 'mediaFileInput',
+                  previewContainerId: prefix ? `${prefix}_mediaPreviewContainer` : 'mediaPreviewContainer',
+                  dropOverlayId: prefix ? `${prefix}_dropOverlay` : 'dropOverlay',
+                });
+                if (ok) return;
+              }
+            } catch {}
+            if (attempts < maxAttempts) setTimeout(tick, 100);
+          };
+          tick();
+        };
+
+        ensureMounted('composerMountChat', '', {
+          onSend: () => sendMessage(),
+          onKeyDown: (e) => handleChatKey(e),
+        });
+
+        ensureMounted('composerMountGoal', 'goal', {
+          onSend: () => sendGoalChatMessage(),
+          onKeyDown: (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              sendGoalChatMessage();
+              return;
+            }
+            if (e.key === 'Escape' && state.isThinking) {
+              e.preventDefault();
+              stopAgent();
+            }
+          },
+        });
+      } catch {}
+    }
+
+    async function init() {
+      // Prevent browser from restoring scroll positions between hash routes.
+      // ClawCondos manages its own scroll behavior per-view.
+      try { if ('scrollRestoration' in history) history.scrollRestoration = 'manual'; } catch {}
+
+      // Best-effort: load config.json (async) and allow it to provide an auth token for localhost.
+      try {
+        if (window.ClawCondosConfig?.initConfig) {
+          const cfg = await window.ClawCondosConfig.initConfig();
+          const tok = cfg?.authToken || cfg?.gatewayToken || cfg?.token || null;
+          if (!state.token && tok) state.token = tok;
+          if (cfg?.gatewayWsUrl) state.gatewayUrl = cfg.gatewayWsUrl;
+        }
+      } catch {}
+
       // Restore active runs from localStorage (before connecting)
       restoreActiveRuns();
-      
+
       // Initialize auto-archive dropdown UI
       initAutoArchiveUI();
-      
-      connectWebSocket();
-      
+
+      // Attach chat UX listeners (safe to call early)
+      initChatUX();
+
+      // If no stored token, try a best-effort connect on localhost (common dev setup = no auth).
+      // If auth is required, the socket will close with 1008 and we’ll prompt.
+      const host = window.location.hostname;
+      const isLocal = host === 'localhost' || host === '127.0.0.1';
+      if (!state.token && !isLocal) {
+        setConnectionStatus('error');
+        showLoginModal();
+      } else {
+        connectWebSocket();
+      }
+
+      // Hash-router: rely on hashchange (popstate can double-fire on back/forward in some browsers)
+      window.addEventListener('hashchange', () => {
+        handleRoute();
+        // Route changes can swap views; re-attach if needed
+        initChatUX();
+        // Ensure main scroll container doesn't preserve a stale offset between routes.
+        try { const main = document.querySelector('.content-main'); if (main) main.scrollTop = 0; } catch {}
+      });
+      handleRoute();
+      // Initial route may render with a stale scrollTop (browser restore). Reset.
+      try { const main = document.querySelector('.content-main'); if (main) main.scrollTop = 0; } catch {}
+
       // Auto-refresh sessions every 30s
       setInterval(() => {
         if (state.connected) {
@@ -4966,4 +8391,5 @@ Response format:
       }, 30000);
     }
     
-    init();
+    try { console.log('[ClawCondos] build', window.__v2_build); } catch {}
+    init().catch((e) => console.error('[init] failed', e));

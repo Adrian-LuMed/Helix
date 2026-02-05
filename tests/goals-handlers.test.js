@@ -1,0 +1,221 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, rmSync } from 'fs';
+import { join } from 'path';
+import { createGoalsStore } from '../openclaw-plugin/lib/goals-store.js';
+import { createGoalHandlers } from '../openclaw-plugin/lib/goals-handlers.js';
+
+const TEST_DIR = join(import.meta.dirname, '__fixtures__', 'goals-handlers-test');
+
+function makeResponder() {
+  let result = null;
+  const respond = (ok, payload, error) => { result = { ok, payload, error }; };
+  return { respond, getResult: () => result };
+}
+
+describe('GoalHandlers', () => {
+  let store, handlers;
+
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    store = createGoalsStore(TEST_DIR);
+    handlers = createGoalHandlers(store);
+  });
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  describe('goals.create', () => {
+    it('creates a goal with required fields', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.create']({ params: { title: 'Ship v2' }, respond });
+      const r = getResult();
+      expect(r.ok).toBe(true);
+      expect(r.payload.goal.title).toBe('Ship v2');
+      expect(r.payload.goal.id).toMatch(/^goal_/);
+      expect(r.payload.goal.status).toBe('active');
+      expect(r.payload.goal.sessions).toEqual([]);
+      expect(r.payload.goal.tasks).toEqual([]);
+    });
+
+    it('rejects missing title', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.create']({ params: {}, respond });
+      expect(getResult().ok).toBe(false);
+    });
+
+    it('accepts optional fields', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.create']({
+        params: { title: 'G', condoId: 'condo:test', priority: 'P0', deadline: '2026-03-01' },
+        respond,
+      });
+      const goal = getResult().payload.goal;
+      expect(goal.condoId).toBe('condo:test');
+      expect(goal.priority).toBe('P0');
+      expect(goal.deadline).toBe('2026-03-01');
+    });
+  });
+
+  describe('goals.list', () => {
+    it('returns empty list initially', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.list']({ params: {}, respond });
+      expect(getResult().payload.goals).toEqual([]);
+    });
+
+    it('returns created goals', () => {
+      const r1 = makeResponder();
+      handlers['goals.create']({ params: { title: 'A' }, respond: r1.respond });
+      handlers['goals.create']({ params: { title: 'B' }, respond: makeResponder().respond });
+
+      const r2 = makeResponder();
+      handlers['goals.list']({ params: {}, respond: r2.respond });
+      expect(r2.getResult().payload.goals).toHaveLength(2);
+    });
+  });
+
+  describe('goals.get', () => {
+    it('returns a goal by id', () => {
+      const r1 = makeResponder();
+      handlers['goals.create']({ params: { title: 'Find me' }, respond: r1.respond });
+      const id = r1.getResult().payload.goal.id;
+
+      const r2 = makeResponder();
+      handlers['goals.get']({ params: { id }, respond: r2.respond });
+      expect(r2.getResult().payload.goal.title).toBe('Find me');
+    });
+
+    it('returns error for missing goal', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.get']({ params: { id: 'goal_nonexistent' }, respond });
+      expect(getResult().ok).toBe(false);
+    });
+  });
+
+  describe('goals.update', () => {
+    it('patches goal fields', () => {
+      const r1 = makeResponder();
+      handlers['goals.create']({ params: { title: 'Original' }, respond: r1.respond });
+      const id = r1.getResult().payload.goal.id;
+
+      const r2 = makeResponder();
+      handlers['goals.update']({
+        params: { id, title: 'Updated', priority: 'P1' },
+        respond: r2.respond,
+      });
+      const updated = r2.getResult().payload.goal;
+      expect(updated.title).toBe('Updated');
+      expect(updated.priority).toBe('P1');
+      expect(updated.updatedAtMs).toBeGreaterThanOrEqual(updated.createdAtMs);
+    });
+
+    it('syncs completed and status fields', () => {
+      const r1 = makeResponder();
+      handlers['goals.create']({ params: { title: 'G' }, respond: r1.respond });
+      const id = r1.getResult().payload.goal.id;
+
+      const r2 = makeResponder();
+      handlers['goals.update']({ params: { id, status: 'done' }, respond: r2.respond });
+      expect(r2.getResult().payload.goal.completed).toBe(true);
+    });
+  });
+
+  describe('goals.delete', () => {
+    it('deletes a goal and cleans up session index', () => {
+      const r1 = makeResponder();
+      handlers['goals.create']({ params: { title: 'Doomed' }, respond: r1.respond });
+      const id = r1.getResult().payload.goal.id;
+
+      // Assign a session first
+      handlers['goals.addSession']({
+        params: { id, sessionKey: 'agent:main:main' },
+        respond: makeResponder().respond,
+      });
+
+      const r2 = makeResponder();
+      handlers['goals.delete']({ params: { id }, respond: r2.respond });
+      expect(r2.getResult().ok).toBe(true);
+
+      // Session index should be cleaned up
+      const r3 = makeResponder();
+      handlers['goals.list']({ params: {}, respond: r3.respond });
+      expect(r3.getResult().payload.goals).toHaveLength(0);
+    });
+  });
+
+  describe('goals.addSession', () => {
+    it('assigns a session to a goal', () => {
+      const r1 = makeResponder();
+      handlers['goals.create']({ params: { title: 'G' }, respond: r1.respond });
+      const id = r1.getResult().payload.goal.id;
+
+      const r2 = makeResponder();
+      handlers['goals.addSession']({
+        params: { id, sessionKey: 'agent:main:main' },
+        respond: r2.respond,
+      });
+      expect(r2.getResult().ok).toBe(true);
+      expect(r2.getResult().payload.goal.sessions).toContain('agent:main:main');
+    });
+
+    it('enforces 1-session-to-1-goal invariant (moves session)', () => {
+      const r1 = makeResponder();
+      const r2 = makeResponder();
+      handlers['goals.create']({ params: { title: 'A' }, respond: r1.respond });
+      handlers['goals.create']({ params: { title: 'B' }, respond: r2.respond });
+      const idA = r1.getResult().payload.goal.id;
+      const idB = r2.getResult().payload.goal.id;
+
+      // Assign to A
+      handlers['goals.addSession']({
+        params: { id: idA, sessionKey: 'agent:main:main' },
+        respond: makeResponder().respond,
+      });
+      // Move to B
+      handlers['goals.addSession']({
+        params: { id: idB, sessionKey: 'agent:main:main' },
+        respond: makeResponder().respond,
+      });
+
+      // A should no longer have the session
+      const r3 = makeResponder();
+      handlers['goals.get']({ params: { id: idA }, respond: r3.respond });
+      expect(r3.getResult().payload.goal.sessions).not.toContain('agent:main:main');
+
+      // B should have it
+      const r4 = makeResponder();
+      handlers['goals.get']({ params: { id: idB }, respond: r4.respond });
+      expect(r4.getResult().payload.goal.sessions).toContain('agent:main:main');
+    });
+  });
+
+  describe('goals.sessionLookup', () => {
+    it('returns goal for a session', () => {
+      const r1 = makeResponder();
+      handlers['goals.create']({ params: { title: 'G' }, respond: r1.respond });
+      const id = r1.getResult().payload.goal.id;
+      handlers['goals.addSession']({
+        params: { id, sessionKey: 'agent:main:main' },
+        respond: makeResponder().respond,
+      });
+
+      const r2 = makeResponder();
+      handlers['goals.sessionLookup']({
+        params: { sessionKey: 'agent:main:main' },
+        respond: r2.respond,
+      });
+      expect(r2.getResult().payload.goalId).toBe(id);
+    });
+
+    it('returns null for unassigned session', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.sessionLookup']({
+        params: { sessionKey: 'agent:orphan:main' },
+        respond,
+      });
+      expect(getResult().payload.goalId).toBeNull();
+    });
+  });
+});

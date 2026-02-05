@@ -218,4 +218,55 @@ describe('GoalHandlers', () => {
       expect(getResult().payload.goalId).toBeNull();
     });
   });
+
+  describe('goals.setSessionCondo', () => {
+    it('maps a session to a condo', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.setSessionCondo']({
+        params: { sessionKey: 'agent:main:main', condoId: 'condo:genlayer' },
+        respond,
+      });
+      expect(getResult().ok).toBe(true);
+    });
+  });
+
+  describe('goals.getSessionCondo', () => {
+    it('returns condo for a mapped session', () => {
+      handlers['goals.setSessionCondo']({
+        params: { sessionKey: 'agent:main:main', condoId: 'condo:test' },
+        respond: makeResponder().respond,
+      });
+      const { respond, getResult } = makeResponder();
+      handlers['goals.getSessionCondo']({
+        params: { sessionKey: 'agent:main:main' },
+        respond,
+      });
+      expect(getResult().payload.condoId).toBe('condo:test');
+    });
+
+    it('returns null for unmapped session', () => {
+      const { respond, getResult } = makeResponder();
+      handlers['goals.getSessionCondo']({
+        params: { sessionKey: 'agent:nobody:main' },
+        respond,
+      });
+      expect(getResult().payload.condoId).toBeNull();
+    });
+  });
+
+  describe('goals.listSessionCondos', () => {
+    it('returns all session-condo mappings', () => {
+      handlers['goals.setSessionCondo']({
+        params: { sessionKey: 'a', condoId: 'c1' },
+        respond: makeResponder().respond,
+      });
+      handlers['goals.setSessionCondo']({
+        params: { sessionKey: 'b', condoId: 'c2' },
+        respond: makeResponder().respond,
+      });
+      const { respond, getResult } = makeResponder();
+      handlers['goals.listSessionCondos']({ params: {}, respond });
+      expect(Object.keys(getResult().payload.sessionCondoIndex)).toHaveLength(2);
+    });
+  });
 });

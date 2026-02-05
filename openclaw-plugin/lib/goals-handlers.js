@@ -171,5 +171,39 @@ export function createGoalHandlers(store) {
         respond(false, undefined, { message: String(err) });
       }
     },
+
+    'goals.setSessionCondo': ({ params, respond }) => {
+      try {
+        const { sessionKey, condoId } = params;
+        if (!sessionKey || !condoId) {
+          respond(false, undefined, { message: 'sessionKey and condoId are required' });
+          return;
+        }
+        const data = loadData();
+        data.sessionCondoIndex[sessionKey] = condoId;
+        saveData(data);
+        respond(true, { ok: true, sessionKey, condoId });
+      } catch (err) {
+        respond(false, undefined, { message: String(err) });
+      }
+    },
+
+    'goals.getSessionCondo': ({ params, respond }) => {
+      try {
+        const data = loadData();
+        respond(true, { condoId: data.sessionCondoIndex[params.sessionKey] ?? null });
+      } catch (err) {
+        respond(false, undefined, { message: String(err) });
+      }
+    },
+
+    'goals.listSessionCondos': ({ params, respond }) => {
+      try {
+        const data = loadData();
+        respond(true, { sessionCondoIndex: data.sessionCondoIndex });
+      } catch (err) {
+        respond(false, undefined, { message: String(err) });
+      }
+    },
   };
 }

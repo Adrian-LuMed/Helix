@@ -1,8 +1,8 @@
 # Sharp .gitignore
 
 # User-specific configuration (contains secrets)
-config.json
-Caddyfile
+/config.json
+/Caddyfile
 
 # Apps registry (user-specific)
 .registry/apps.json
@@ -20,6 +20,9 @@ Caddyfile
 *.swo
 *~
 .DS_Store
+
+# Claude Code metadata
+.claude/
 
 # Node
 node_modules/

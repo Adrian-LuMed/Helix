@@ -5013,7 +5013,7 @@ Response format:
           <div class="session-group ${expanded ? 'expanded' : ''}">
             <div class="session-group-header" onclick="toggleAgentExpanded('${escapeHtml(agent.id)}')">
               <span class="group-expand-icon">${expanded ? '▼' : '▶'}</span>
-              <span class="group-icon">${emoji}</span>
+              <span class="group-icon">${escapeHtml(emoji)}</span>
               <span class="group-name">${escapeHtml(name)}${isDefault}</span>
               <span class="group-count">${group.sessions.length + group.subsessions.length}</span>
               <button class="session-action-btn" onclick="event.stopPropagation(); startNewSession('${escapeHtml(agent.id)}')" title="New session">＋</button>
@@ -5054,14 +5054,14 @@ Response format:
       setActiveNav(null);
       setBreadcrumbs([
         { label: '🏠', onClick: "navigateTo('dashboard')" },
-        { label: `${emoji} ${escapeHtml(name)}`, current: true }
+        { label: `${escapeHtml(emoji)} ${escapeHtml(name)}`, current: true }
       ]);
       
       const contentArea = document.getElementById('overviewArea');
       contentArea.innerHTML = `
         <div class="agent-details" style="padding: 24px;">
           <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 24px;">
-            <div style="font-size: 3rem;">${emoji}</div>
+            <div style="font-size: 3rem;">${escapeHtml(emoji)}</div>
             <div>
               <h2 style="margin: 0;">${escapeHtml(name)}</h2>
               <div style="color: var(--text-dim);">ID: ${escapeHtml(agent.id)}</div>
@@ -5346,7 +5346,7 @@ Response format:
       
       container.innerHTML = state.apps.map(app => `
         <a href="/app?id=${escapeHtml(app.id)}" target="_blank" class="item">
-          <div class="item-icon">${app.icon || '📦'}</div>
+          <div class="item-icon">${escapeHtml(app.icon || '📦')}</div>
           <div class="item-content">
             <div class="item-name">${escapeHtml(app.name)}</div>
             <div class="item-meta">:${app.port}</div>
@@ -6094,7 +6094,7 @@ Response format:
         panel.innerHTML = `
           <div class="detail-section">
             <div class="detail-label">Agent</div>
-            <div class="detail-value">${emoji} ${escapeHtml(name)}</div>
+            <div class="detail-value">${escapeHtml(emoji)} ${escapeHtml(name)}</div>
           </div>
           <div class="detail-section">
             <div class="detail-label">High-level</div>
@@ -8129,7 +8129,7 @@ Response format:
       container.innerHTML = state.apps.map(app => `
         <a href="/app?id=${escapeHtml(app.id)}" target="_blank" class="app-card" style="text-decoration: none; color: inherit;">
           <div class="card-top">
-            <div class="card-icon">${app.icon || '📦'}</div>
+            <div class="card-icon">${escapeHtml(app.icon || '📦')}</div>
             <div class="card-info">
               <div class="card-name">${escapeHtml(app.name)}</div>
               <div class="card-desc">${escapeHtml(app.description || '')}</div>

@@ -980,9 +980,10 @@ const server = createServer(async (req, res) => {
   }
 
   if (!existsSync(filePath)) {
-    // Fallback to repo-root relative paths only when needed (still traversal-safe)
-    // Block dotfiles and hidden directories (e.g. .env, .registry/) from repo root
-    if (isDotfilePath(rel)) {
+    // Fallback to repo-root for specific asset directories only.
+    // Blocks access to serve.js, package.json, docs/, tests/, CLAUDE.md, etc.
+    const allowedRootPrefixes = ['js/', 'styles/', 'lib/', 'media/'];
+    if (!allowedRootPrefixes.some(p => rel.startsWith(p))) {
       res.writeHead(404);
       res.end('Not Found');
       return;

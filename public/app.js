@@ -6255,7 +6255,7 @@ Response format:
             <div class="item-name">${escapeHtml(app.name)}</div>
             <div class="item-meta">:${app.port}</div>
           </div>
-          <div class="item-status idle" id="app-status-${escapeHtml(app.id)}"></div>
+          <div class="item-status idle" id="app-status-${escapeHtml(app.id)}" title="Checking..."></div>
         </a>
       `).join('');
     }
@@ -6272,17 +6272,20 @@ Response format:
       try {
         if (isLocal) {
           dot.className = 'item-status idle';
+          dot.title = 'Unknown (localhost)';
           app.statusClass = 'unknown';
           app.statusLabel = 'Unknown';
         } else {
           const res = await fetch(`/${app.id}/`, { method: 'HEAD' });
           const ok = res.ok || res.status === 401;
           dot.className = 'item-status ' + (ok ? 'active' : 'error');
+          dot.title = ok ? 'App is running' : 'App is not responding';
           app.statusClass = ok ? 'running' : 'stopped';
           app.statusLabel = ok ? 'Running' : 'Stopped';
         }
       } catch {
         dot.className = 'item-status idle';
+        dot.title = 'App is not responding';
         app.statusClass = 'unknown';
         app.statusLabel = 'Unknown';
       }

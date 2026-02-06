@@ -4035,7 +4035,7 @@ Response format:
             <div class="item-name">${escapeHtml(app.name)}</div>
             <div class="item-meta">:${app.port}</div>
           </div>
-          <div class="item-status idle" id="app-status-${escapeHtml(app.id)}"></div>
+          <div class="item-status idle" id="app-status-${escapeHtml(app.id)}" title="Checking..."></div>
         </a>
       `).join('');
     }
@@ -4046,9 +4046,12 @@ Response format:
       
       try {
         const res = await fetch(`/${app.id}/`, { method: 'HEAD' });
-        dot.className = 'item-status ' + (res.ok || res.status === 401 ? 'active' : 'error');
+        const ok = res.ok || res.status === 401;
+        dot.className = 'item-status ' + (ok ? 'active' : 'error');
+        dot.title = ok ? 'App is running' : 'App is not responding';
       } catch {
         dot.className = 'item-status error';
+        dot.title = 'App is not responding';
       }
     }
     

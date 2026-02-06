@@ -2520,6 +2520,13 @@ function initAutoArchiveUI() {
       }
 
       state.currentView = 'goal';
+      // Clear goal file state when switching goals
+      if (state.currentGoalOpenId !== goalId) {
+        state.selectedGoalFile = null;
+        state.goalFileContent = null;
+        state.goalFileSearch = '';
+        state.goalFileTreeExpanded = {};
+      }
       state.currentGoalOpenId = goalId;
       state.currentGoalId = goalId;
       if (goal.condoId) state.currentCondoId = goal.condoId;
@@ -3187,7 +3194,7 @@ function initAutoArchiveUI() {
       if (!goal || !pane) return;
 
       if ((state.goalTab || 'tasks') === 'files') {
-        pane.innerHTML = `<div class="empty-state" style="padding:14px;">Files view is coming soon. (We can wire it to a goal “files” field or to session artifacts.)</div>`;
+        renderGoalFilesPane();
         return;
       }
 
@@ -3249,6 +3256,268 @@ function initAutoArchiveUI() {
           <button class="ghost-btn" onclick="addGoalTaskFromGoalPane()">Add</button>
         </div>
       `;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // GOAL FILES TAB
+    // ═══════════════════════════════════════════════════════════════
+
+    async function loadGoalFiles(goalId) {
+      const goal = state.goals.find(g => g.id === goalId);
+      if (!goal) return;
+      if (state.goalFileLoading) return;
+
+      const sessions = Array.isArray(goal.sessions) ? goal.sessions : [];
+      const agentIds = [...new Set(
+        sessions
+          .filter(s => s.startsWith('agent:'))
+          .map(s => s.split(':')[1])
+      )];
+
+      if (!agentIds.length) {
+        state.goalFileEntries = {};
+        state.goalFilesGoalId = goalId;
+        renderGoalPane();
+        return;
+      }
+
+      state.goalFileLoading = true;
+      state.goalFilesGoalId = goalId;
+      renderGoalPane();
+
+      const entries = {};
+      for (const agentId of agentIds) {
+        try {
+          const res = await fetch(`/api/agents/files?agentId=${encodeURIComponent(agentId)}`);
+          const data = await res.json();
+          if (data?.ok) entries[agentId] = data.entries || [];
+        } catch (e) {
+          console.warn('goal files load failed', agentId, e?.message || e);
+        }
+      }
+
+      if (state.goalFilesGoalId === goalId) {
+        state.goalFileEntries = entries;
+        state.goalFileLoading = false;
+        renderGoalPane();
+      }
+    }
+
+    function renderGoalFilesPane() {
+      const pane = document.getElementById('goalPane');
+      if (!pane) return;
+
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+
+      // Auto-load if not cached for this goal
+      if (state.goalFilesGoalId !== goal.id && !state.goalFileLoading) {
+        loadGoalFiles(goal.id);
+        return;
+      }
+
+      if (state.goalFileLoading) {
+        pane.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 8px 0;">Loading files\u2026</div>';
+        return;
+      }
+
+      const entries = state.goalFileEntries || {};
+      const agentIds = Object.keys(entries);
+      const totalFiles = agentIds.reduce((n, id) => n + (entries[id]?.length || 0), 0);
+
+      if (!totalFiles) {
+        const sessions = Array.isArray(goal.sessions) ? goal.sessions : [];
+        const msg = sessions.length
+          ? 'No browsable files in the workspace.'
+          : 'No sessions attached to this goal yet.';
+        pane.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 8px 0;">' + escapeHtml(msg) + '</div>';
+        return;
+      }
+
+      // If a file is selected, show inline viewer
+      if (state.selectedGoalFile) {
+        renderGoalFileViewerInline(pane);
+        return;
+      }
+
+      const search = state.goalFileSearch || '';
+      const sort = state.goalFileSort || 'name';
+
+      // Toolbar
+      let html = '<div class="agent-file-toolbar">' +
+        '<input class="agent-file-search" type="text" placeholder="Search files\u2026" value="' + escapeHtml(search) + '" oninput="setGoalFileSearch(this.value)">' +
+        '<select class="agent-file-sort" onchange="setGoalFileSort(this.value)">' +
+          '<option value="name"' + (sort === 'name' ? ' selected' : '') + '>Name</option>' +
+          '<option value="size"' + (sort === 'size' ? ' selected' : '') + '>Size</option>' +
+          '<option value="modified"' + (sort === 'modified' ? ' selected' : '') + '>Modified</option>' +
+        '</select>' +
+      '</div>';
+
+      if (agentIds.length === 1) {
+        const agentId = agentIds[0];
+        const agentEntries = entries[agentId] || [];
+        html += '<div class="agent-file-list agent-file-tree">';
+        if (search.trim()) {
+          html += renderGoalFlatResults(agentEntries, search.trim(), agentId);
+        } else {
+          const tree = buildFileTree(agentEntries);
+          html += renderGoalFileTree(tree, 0, state.goalFileTreeExpanded, agentId);
+        }
+        html += '</div>';
+      } else {
+        // Multiple agents: show sections
+        for (const agentId of agentIds) {
+          const agentEntries = entries[agentId] || [];
+          if (!agentEntries.length) continue;
+          html += '<div style="margin-top: 8px; margin-bottom: 4px; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em;">' + escapeHtml(agentId) + '</div>';
+          html += '<div class="agent-file-list agent-file-tree">';
+          if (search.trim()) {
+            html += renderGoalFlatResults(agentEntries, search.trim(), agentId);
+          } else {
+            const tree = buildFileTree(agentEntries);
+            html += renderGoalFileTree(tree, 0, state.goalFileTreeExpanded, agentId);
+          }
+          html += '</div>';
+        }
+      }
+
+      pane.innerHTML = html;
+    }
+
+    function sortGoalFileTreeItems(items) {
+      const sort = state.goalFileSort || 'name';
+      return items.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        if (sort === 'size') return (b.size || 0) - (a.size || 0);
+        if (sort === 'modified') return (b.mtimeMs || 0) - (a.mtimeMs || 0);
+        return a.name.localeCompare(b.name);
+      });
+    }
+
+    function renderGoalFileTree(node, depth, expanded, agentId) {
+      const selected = state.selectedGoalFile;
+      let html = '';
+      const items = sortGoalFileTreeItems(Object.values(node.children));
+      for (const item of items) {
+        const indent = depth * 18;
+        const escapedPath = escapeHtml(item.path.replace(/'/g, "\\'"));
+        const escapedAgent = escapeHtml((agentId || '').replace(/'/g, "\\'"));
+        if (item.type === 'dir') {
+          const isExpanded = !!expanded[item.path];
+          const icon = isExpanded ? '\uD83D\uDCC2' : '\uD83D\uDCC1';
+          const chevron = isExpanded ? '\u25BE' : '\u25B8';
+          html += '<div class="agent-file-item dir' + (isExpanded ? ' expanded' : '') + '" style="padding-left:' + indent + 'px" onclick="toggleGoalFileDir(\'' + escapedPath + '\')">' +
+            '<span class="agent-tree-chevron">' + chevron + '</span>' +
+            '<span class="agent-file-icon">' + icon + '</span>' +
+            '<span class="agent-file-name">' + escapeHtml(item.name) + '</span>' +
+          '</div>';
+          if (isExpanded && item.node) {
+            html += renderGoalFileTree(item.node, depth + 1, expanded, agentId);
+          }
+        } else {
+          const sizeStr = item.size != null ? formatFileSize(item.size) : '';
+          const isActive = selected && selected.agentId === agentId && selected.path === item.path;
+          const ext = (item.name.match(/\.(\w+)$/)?.[1] || '').toLowerCase();
+          const icon = { md: '\uD83D\uDCDD', json: '\uD83D\uDCCB', py: '\uD83D\uDC0D', js: '\uD83D\uDCDC', mjs: '\uD83D\uDCDC', sh: '\u2699\uFE0F', log: '\uD83D\uDCC3', txt: '\uD83D\uDCC3' }[ext] || '\uD83D\uDCC4';
+          html += '<div class="agent-file-item' + (isActive ? ' active' : '') + '" style="padding-left:' + indent + 'px" onclick="selectGoalFile(\'' + escapedAgent + '\',\'' + escapedPath + '\')">' +
+            '<span class="agent-tree-chevron" style="visibility:hidden">\u25B8</span>' +
+            '<span class="agent-file-icon">' + icon + '</span>' +
+            '<span class="agent-file-name">' + escapeHtml(item.name) + '</span>' +
+            (sizeStr ? '<span class="agent-file-size">' + escapeHtml(sizeStr) + '</span>' : '') +
+          '</div>';
+        }
+      }
+      return html;
+    }
+
+    function renderGoalFlatResults(entries, query, agentId) {
+      const selected = state.selectedGoalFile;
+      const q = query.toLowerCase();
+      const matches = entries.filter(e => e.type === 'file' && e.path.toLowerCase().includes(q));
+      if (!matches.length) {
+        return '<div style="color: var(--text-muted); font-size: 12px; padding: 8px 0;">No files matching \u201C' + escapeHtml(query) + '\u201D</div>';
+      }
+      let html = '';
+      for (const f of matches) {
+        const isActive = selected && selected.agentId === agentId && selected.path === f.path;
+        const name = f.path.split('/').pop();
+        const ext = (name.match(/\.(\w+)$/)?.[1] || '').toLowerCase();
+        const icon = { md: '\uD83D\uDCDD', json: '\uD83D\uDCCB', py: '\uD83D\uDC0D', js: '\uD83D\uDCDC', mjs: '\uD83D\uDCDC', sh: '\u2699\uFE0F', log: '\uD83D\uDCC3', txt: '\uD83D\uDCC3' }[ext] || '\uD83D\uDCC4';
+        const sizeStr = f.size != null ? formatFileSize(f.size) : '';
+        const escapedPath = escapeHtml(f.path.replace(/'/g, "\\'"));
+        const escapedAgent = escapeHtml((agentId || '').replace(/'/g, "\\'"));
+        const idx = f.path.toLowerCase().indexOf(q);
+        let pathHtml;
+        if (idx >= 0) {
+          pathHtml = escapeHtml(f.path.slice(0, idx)) +
+            '<mark class="agent-file-match">' + escapeHtml(f.path.slice(idx, idx + query.length)) + '</mark>' +
+            escapeHtml(f.path.slice(idx + query.length));
+        } else {
+          pathHtml = escapeHtml(f.path);
+        }
+        html += '<div class="agent-file-item' + (isActive ? ' active' : '') + '" onclick="selectGoalFile(\'' + escapedAgent + '\',\'' + escapedPath + '\')">' +
+          '<span class="agent-file-icon">' + icon + '</span>' +
+          '<span class="agent-file-name">' + pathHtml + '</span>' +
+          (sizeStr ? '<span class="agent-file-size">' + escapeHtml(sizeStr) + '</span>' : '') +
+        '</div>';
+      }
+      return html;
+    }
+
+    async function selectGoalFile(agentId, relPath) {
+      state.selectedGoalFile = { agentId, path: relPath };
+      state.goalFileContent = null;
+      renderGoalPane();
+      try {
+        const res = await fetch(`/api/agents/file?agentId=${encodeURIComponent(agentId)}&path=${encodeURIComponent(relPath)}`);
+        const data = await res.json();
+        if (data?.ok) state.goalFileContent = data.content || '';
+        else state.goalFileContent = data?.error || 'Failed to load file';
+      } catch (e) {
+        state.goalFileContent = `Failed to load file: ${e?.message || e}`;
+      }
+      renderGoalPane();
+    }
+
+    function renderGoalFileViewerInline(pane) {
+      const sel = state.selectedGoalFile;
+      if (!sel) return;
+      const content = state.goalFileContent != null ? state.goalFileContent : 'Loading\u2026';
+      const isMarkdown = /\.md$/i.test(sel.path);
+      const bodyHtml = isMarkdown && state.goalFileContent != null
+        ? '<div class="goal-file-viewer-content goal-file-viewer-md">' + renderMarkdownToHtml(content) + '</div>'
+        : '<pre class="goal-file-viewer-content">' + escapeHtml(String(content)) + '</pre>';
+
+      pane.innerHTML =
+        '<div class="goal-file-viewer">' +
+          '<div class="goal-file-viewer-header">' +
+            '<span class="goal-file-back" onclick="closeGoalFileViewer()" title="Back to files">\u2190 Files</span>' +
+            '<span class="goal-file-viewer-path">' + escapeHtml(sel.path) + '</span>' +
+          '</div>' +
+          bodyHtml +
+        '</div>';
+    }
+
+    function closeGoalFileViewer() {
+      state.selectedGoalFile = null;
+      state.goalFileContent = null;
+      renderGoalPane();
+    }
+
+    function setGoalFileSearch(val) {
+      state.goalFileSearch = val;
+      renderGoalPane();
+    }
+
+    function setGoalFileSort(val) {
+      state.goalFileSort = val;
+      renderGoalPane();
+    }
+
+    function toggleGoalFileDir(dirPath) {
+      if (state.goalFileTreeExpanded[dirPath]) delete state.goalFileTreeExpanded[dirPath];
+      else state.goalFileTreeExpanded[dirPath] = true;
+      renderGoalPane();
     }
 
     async function addGoalTaskFromGoalPane() {
@@ -5004,6 +5273,16 @@ Response format:
     if (!state.agentFileTreeExpanded) state.agentFileTreeExpanded = {};
     if (!state.agentFileSearch) state.agentFileSearch = '';
     if (!state.agentFileSort) state.agentFileSort = 'name'; // 'name' | 'size' | 'modified'
+
+    // ── Goal file tree state ──
+    if (!state.goalFileEntries) state.goalFileEntries = {};    // { [agentId]: entries[] }
+    if (!state.goalFilesGoalId) state.goalFilesGoalId = null;
+    if (!state.goalFileLoading) state.goalFileLoading = false;
+    if (!state.goalFileTreeExpanded) state.goalFileTreeExpanded = {};
+    if (!state.goalFileSearch) state.goalFileSearch = '';
+    if (!state.goalFileSort) state.goalFileSort = 'name';
+    if (!state.selectedGoalFile) state.selectedGoalFile = null; // { agentId, path }
+    if (!state.goalFileContent) state.goalFileContent = null;
 
     function toggleFileTreeDir(dirPath) {
       const agentId = state.agentFilesAgentId || '';

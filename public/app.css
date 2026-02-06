@@ -2081,3 +2081,68 @@ a.condo-header, a.goal-item, a.session-item, a.item-link, a.condo-goal-row, a.co
 a.condo-goal-card, a.session-card, a.goal-card, a.condo-card {
   display: block;
 }
+
+/* ── Goal file viewer (inline in goal pane) ── */
+
+.goal-file-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.goal-file-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.goal-file-back {
+  cursor: pointer;
+  color: var(--accent-blue, #5b9cf4);
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.goal-file-back:hover {
+  text-decoration: underline;
+}
+
+.goal-file-viewer-path {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-file-viewer-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  padding: 0;
+  scrollbar-color: var(--border) transparent;
+  scrollbar-width: thin;
+}
+
+.goal-file-viewer-md {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: normal;
+}

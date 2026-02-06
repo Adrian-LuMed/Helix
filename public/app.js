@@ -2045,13 +2045,16 @@ function initAutoArchiveUI() {
         updateOverview();
         updateStatsGrid();
         
-        // Restore previous session if any
-        const savedSessionKey = localStorage.getItem('sharp_current_session');
-        if (savedSessionKey) {
-          const session = state.sessions.find(s => s.key === savedSessionKey);
-          if (session) {
-            console.log('[ClawCondos] Restoring session:', savedSessionKey);
-            openSession(savedSessionKey);
+        // Restore previous session ONLY if no route in URL (don't override deeplinks)
+        const hasRoute = window.location.hash && window.location.hash !== '#/' && window.location.hash !== '#';
+        if (!hasRoute) {
+          const savedSessionKey = localStorage.getItem('sharp_current_session');
+          if (savedSessionKey) {
+            const session = state.sessions.find(s => s.key === savedSessionKey);
+            if (session) {
+              console.log('[ClawCondos] Restoring session from localStorage:', savedSessionKey);
+              openSession(savedSessionKey);
+            }
           }
         }
       } catch (err) {
@@ -2908,7 +2911,7 @@ function initAutoArchiveUI() {
     function openGoalChatInFull() {
       const key = state.goalChatSessionKey;
       if (!key) return;
-      openSession(key, { fromRouter: true });
+      openSession(key);
     }
 
     async function sendGoalChatMessage() {
@@ -6840,7 +6843,7 @@ Response format:
         sessionsEl.innerHTML = condoSessions.length ? condoSessions.map(s => {
           const preview = getMessagePreview(s);
           const g = getGoalForSession(s.key);
-          const goalPill = g ? `<button type="button" class="card-badge goal" onclick="event.preventDefault(); event.stopPropagation(); openGoal('${escapeHtml(g.id)}', { fromRouter: true })">🏙️ ${escapeHtml(g.title || 'Goal')}</button>` : '';
+          const goalPill = g ? `<button type="button" class="card-badge goal" onclick="event.preventDefault(); event.stopPropagation(); openGoal('${escapeHtml(g.id)}')">🏙️ ${escapeHtml(g.title || 'Goal')}</button>` : '';
           return `
             <a class="session-card" href="${escapeHtml(sessionHref(s.key))}" onclick="return handleSessionLinkClick(event, '${escapeHtml(s.key)}')">
               <div class="card-top">
@@ -8734,8 +8737,8 @@ Response format:
         // Nested anchors are invalid HTML and can explode the grid layout in some browsers.
         return `
           <div class="condo-card" role="link" tabindex="0"
-               onclick="openCondo('${escapeHtml(condo.id)}', { fromRouter: true })"
-               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault(); openCondo('${escapeHtml(condo.id)}', { fromRouter: true });}">
+               onclick="openCondo('${escapeHtml(condo.id)}')"
+               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault(); openCondo('${escapeHtml(condo.id)}');}">
             <div class="condo-card-header">
               <span style="font-size:18px">🏢</span>
               <span class="condo-card-title">${escapeHtml(condo.name || 'Condo')}</span>
@@ -8794,7 +8797,7 @@ Response format:
         const agentStatus = getAgentStatus(s.key);
         const tooltip = getStatusTooltip(agentStatus);
         const g = getGoalForSession(s.key);
-        const goalPill = g ? `<button type="button" class="card-badge goal" onclick="event.preventDefault(); event.stopPropagation(); openGoal('${escapeHtml(g.id)}', { fromRouter: true })">🏙️ ${escapeHtml(g.title || 'Goal')}</button>` : '';
+        const goalPill = g ? `<button type="button" class="card-badge goal" onclick="event.preventDefault(); event.stopPropagation(); openGoal('${escapeHtml(g.id)}')">🏙️ ${escapeHtml(g.title || 'Goal')}</button>` : '';
         return `
           <a class="session-card" href="${escapeHtml(sessionHref(s.key))}" onclick="return handleSessionLinkClick(event, '${escapeHtml(s.key)}')">
             <div class="card-top">

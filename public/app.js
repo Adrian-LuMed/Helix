@@ -1831,6 +1831,7 @@ function initAutoArchiveUI() {
       localStorage.setItem('sharp_session_agent_status', JSON.stringify(state.sessionAgentStatus));
       renderSessions();
       renderSessionsGrid();
+      updateStatsGrid();
       updateHeaderStatus();
       if (state.currentView === 'goal' && state.goalChatSessionKey === key) {
         const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
@@ -2137,6 +2138,7 @@ function initAutoArchiveUI() {
         });
         renderGoals();
         renderGoalsGrid();
+        updateStatsGrid();
         updateUncategorizedCount();
 
         if (state.pendingRouteGoalId) {
@@ -4783,6 +4785,7 @@ Response format:
           checkAutoArchive();
           renderSessions();
           renderSessionsGrid();
+          updateStatsGrid();
           updateUncategorizedCount();
           if (state.pendingRouteSessionKey) {
             const pending = state.pendingRouteSessionKey;

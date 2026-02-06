@@ -283,6 +283,10 @@
       });
     }
 
+    async function copyToClipboard(text) {
+      await navigator.clipboard.writeText(text);
+    }
+
     async function init() {
       const params = new URLSearchParams(window.location.search);
       const appId = params.get('id');
@@ -451,20 +455,13 @@ Window URL: ${window.location.href}
 `;
       
       try {
-        await navigator.clipboard.writeText(errorText);
+        await copyToClipboard(errorText);
         const btn = document.getElementById('copyErrorBtn');
         const originalText = btn.innerHTML;
         btn.innerHTML = '✅ Copied!';
         setTimeout(() => { btn.innerHTML = originalText; }, 2000);
       } catch (err) {
-        // Fallback for older browsers
-        const textarea = document.createElement('textarea');
-        textarea.value = errorText;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-        showToast('Error details copied to clipboard!', 'success');
+        showToast('Clipboard copy failed', 'error');
       }
     }
     

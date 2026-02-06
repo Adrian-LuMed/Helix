@@ -922,19 +922,8 @@ function initAutoArchiveUI() {
       }, durationMs);
     }
     
-    /** Copy text to clipboard with execCommand fallback for HTTP contexts. */
     async function copyToClipboard(text) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        try { await navigator.clipboard.writeText(text); return; } catch {}
-      }
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
+      await navigator.clipboard.writeText(text);
     }
 
     // ═══════════════════════════════════════════════════════════════

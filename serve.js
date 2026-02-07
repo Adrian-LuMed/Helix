@@ -880,23 +880,6 @@ server.on('upgrade', (req, socket, head) => {
             ? (Buffer.isBuffer(data) ? data.toString('utf-8') : String(data))
             : (typeof data === 'string' ? data : (Buffer.isBuffer(data) ? data.toString('utf-8') : String(data)));
           
-          // DEBUG: Log goals.list responses to diagnose missing tasks issue
-          try {
-            const parsed = JSON.parse(payload);
-            if (parsed?.type === 'res' && parsed?.payload?.goals) {
-              const testGoal = parsed.payload.goals.find(g => g.id === 'goal_a835b8ae971e5597f4ce8b5f');
-              if (testGoal) {
-                console.log('[DEBUG] goals.list response for test goal:', {
-                  id: testGoal.id,
-                  title: testGoal.title?.slice(0, 40),
-                  tasks_count: testGoal.tasks?.length || 0,
-                  has_tasks_array: Array.isArray(testGoal.tasks),
-                  first_task_id: testGoal.tasks?.[0]?.id || null
-                });
-              }
-            }
-          } catch (parseErr) { /* ignore parse errors - just diagnostic */ }
-          
           if (clientWs.readyState === WebSocket.OPEN) clientWs.send(payload);
         } catch {
           closeBoth(1011, 'proxy send failed');

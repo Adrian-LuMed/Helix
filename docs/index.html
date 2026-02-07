@@ -300,6 +300,47 @@
       color: var(--blue);
     }
 
+    /* Tabs */
+    .tabs {
+      display: flex;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 4px;
+      margin-bottom: 20px;
+    }
+
+    .tab {
+      flex: 1;
+      padding: 10px 16px;
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border-radius: 7px;
+      transition: all 0.15s;
+    }
+
+    .tab:hover {
+      color: var(--text);
+    }
+
+    .tab.active {
+      background: var(--blue);
+      color: var(--bg);
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
     /* Footer */
     footer {
       padding: 20px 32px;
@@ -421,28 +462,64 @@
       <div class="setup-card">
         <h2>Get Started</h2>
         
-        <div class="curl-box">
-          <code>curl -s https://acastellana.github.io/clawcondos/skill.md</code>
-          <button onclick="copySkill()" title="Copy">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2"/>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-          </button>
+        <div class="tabs">
+          <button class="tab active" onclick="showTab('agent')">🤖 I'm an agent</button>
+          <button class="tab" onclick="showTab('human')">👤 I'm human</button>
         </div>
 
-        <div class="steps">
-          <div class="step">
-            <div class="step-num">1</div>
-            <div class="step-text"><strong>Run the command</strong> to get the skill instructions for your agent</div>
+        <!-- Agent Tab -->
+        <div class="tab-content active" id="tab-agent">
+          <div class="curl-box">
+            <code>curl -s https://acastellana.github.io/clawcondos/skill.md</code>
+            <button onclick="copyText('curl -s https://acastellana.github.io/clawcondos/skill.md')" title="Copy">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            </button>
           </div>
-          <div class="step">
-            <div class="step-num">2</div>
-            <div class="step-text"><strong>Clone and install</strong> ClawCondos, configure your gateway connection</div>
+
+          <div class="steps">
+            <div class="step">
+              <div class="step-num">1</div>
+              <div class="step-text"><strong>Run the command</strong> to get setup instructions</div>
+            </div>
+            <div class="step">
+              <div class="step-num">2</div>
+              <div class="step-text"><strong>Ask your human</strong> to deploy ClawCondos</div>
+            </div>
+            <div class="step">
+              <div class="step-num">3</div>
+              <div class="step-text"><strong>Use goal_update</strong> to track your work</div>
+            </div>
           </div>
-          <div class="step">
-            <div class="step-num">3</div>
-            <div class="step-text"><strong>Start organizing</strong> — create condos, set goals, let agents work</div>
+        </div>
+
+        <!-- Human Tab -->
+        <div class="tab-content" id="tab-human">
+          <div class="curl-box">
+            <code>git clone https://github.com/acastellana/clawcondos</code>
+            <button onclick="copyText('git clone https://github.com/acastellana/clawcondos')" title="Copy">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="steps">
+            <div class="step">
+              <div class="step-num">1</div>
+              <div class="step-text"><strong>Clone and install</strong> — npm install in the repo</div>
+            </div>
+            <div class="step">
+              <div class="step-num">2</div>
+              <div class="step-text"><strong>Configure</strong> — set up env file + systemd service</div>
+            </div>
+            <div class="step">
+              <div class="step-num">3</div>
+              <div class="step-text"><strong>Connect</strong> — point to your OpenClaw gateway</div>
+            </div>
           </div>
         </div>
 
@@ -464,12 +541,18 @@
   </footer>
 
   <script>
-    function copySkill() {
-      navigator.clipboard.writeText('curl -s https://acastellana.github.io/clawcondos/skill.md');
-      const btn = document.querySelector('.curl-box button');
-      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+    function showTab(tab) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
+      document.getElementById('tab-' + tab).classList.add('active');
+    }
+
+    function copyText(text) {
+      navigator.clipboard.writeText(text);
+      event.target.closest('button').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
       setTimeout(() => {
-        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+        event.target.closest('button').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
       }, 2000);
     }
   </script>

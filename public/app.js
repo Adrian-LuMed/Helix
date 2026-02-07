@@ -3254,17 +3254,20 @@ function initAutoArchiveUI() {
       }
 
       // Tasks: grouped by stage (prototype direction). If no stage metadata yet, they land in Backlog.
+      // Note: goal_update tool uses 'in-progress' stage, so we normalize both 'doing' and 'in-progress' to the same bucket.
       const stages = [
         { k: 'backlog', l: 'Backlog' },
+        { k: 'in-progress', l: 'In Progress' },
         { k: 'blocked', l: 'Blocked' },
-        { k: 'doing', l: 'Doing' },
         { k: 'review', l: 'Review' },
         { k: 'done', l: 'Done' },
       ];
 
       const by = new Map(stages.map(s => [s.k, []]));
       for (const t of tasks) {
-        const key = t.blocked ? 'blocked' : (t.stage || (t.done ? 'done' : 'backlog'));
+        let key = t.blocked ? 'blocked' : (t.stage || (t.done ? 'done' : 'backlog'));
+        // Normalize 'doing' to 'in-progress' for consistency with goal_update tool
+        if (key === 'doing') key = 'in-progress';
         if (!by.has(key)) by.set(key, []);
         by.get(key).push(t);
       }

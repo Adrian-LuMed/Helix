@@ -224,68 +224,27 @@
     /* Hero Visual */
     .hero-visual {
       display: flex;
-      justify-content: center;
+      flex-direction: column;
       align-items: center;
+      gap: 24px;
+    }
+
+    .hero-visual .code-block {
+      width: 100%;
+      max-width: 480px;
     }
 
     .mascot {
-      width: 280px;
-      height: 280px;
+      width: 140px;
+      height: 140px;
       object-fit: contain;
       animation: float 4s ease-in-out infinite;
-      filter: drop-shadow(0 20px 40px rgba(0,0,0,0.4));
+      filter: drop-shadow(0 16px 32px rgba(0,0,0,0.4));
     }
 
     @keyframes float {
       0%, 100% { transform: translateY(0); }
       50% { transform: translateY(-10px); }
-    }
-
-    /* Quick Start */
-    .quickstart {
-      padding: 60px 24px;
-      background: var(--bg-surface);
-      border-top: 1px solid var(--border);
-    }
-
-    .quickstart-inner {
-      display: grid;
-      grid-template-columns: 1fr 1.4fr;
-      gap: 40px;
-      align-items: start;
-    }
-
-    .quickstart-text h2 {
-      font-size: 24px;
-      font-weight: 800;
-      margin-bottom: 12px;
-    }
-
-    .quickstart-text p {
-      color: var(--text-secondary);
-      font-size: 15px;
-      line-height: 1.7;
-      margin-bottom: 16px;
-    }
-
-    .prereq {
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-    }
-
-    .prereq-item {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 13px;
-      color: var(--text-muted);
-    }
-
-    .prereq-item svg {
-      width: 16px;
-      height: 16px;
-      color: var(--accent-green);
     }
 
     /* Tabs */
@@ -699,7 +658,6 @@
     /* Responsive */
     @media (max-width: 900px) {
       .hero-grid,
-      .quickstart-inner,
       .api-grid {
         grid-template-columns: 1fr;
       }
@@ -707,13 +665,10 @@
       .hero-content { text-align: center; max-width: 100%; }
       .hero-actions { justify-content: center; }
       .hero-visual { margin-top: 32px; }
-      .mascot { width: 200px; height: 200px; }
+      .mascot { width: 120px; height: 120px; }
 
       .hierarchy { grid-template-columns: 1fr; }
       .hierarchy-card::after { display: none; }
-
-      .quickstart-text { text-align: center; }
-      .prereq { justify-content: center; }
     }
 
     @media (max-width: 600px) {
@@ -772,78 +727,59 @@
           <a href="https://github.com/acastellana/clawcondos" class="btn-secondary" target="_blank">View on GitHub</a>
         </div>
       </div>
-      <div class="hero-visual">
+      <div class="hero-visual" id="start">
         <img src="https://raw.githubusercontent.com/acastellana/clawcondos/master/public/media/clawcondos-logo.png" alt="ClawCondos" class="mascot">
-      </div>
-    </div>
-  </section>
-
-  <!-- Quick Start -->
-  <section class="quickstart" id="start">
-    <div class="quickstart-inner container">
-      <div class="quickstart-text">
-        <h2>Up and running in 2 minutes</h2>
-        <p>Clone the repo, install, and start the server. Connect to your OpenClaw gateway and you're live.</p>
-        <div class="prereq">
-          <div class="prereq-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-            Node.js 18+
+        
+        <div class="code-block">
+          <div class="tabs" id="tab-container">
+            <button class="tab active" onclick="showTab('agent')">
+              <span class="tab-icon">🤖</span>
+              <span>I'm an agent</span>
+            </button>
+            <button class="tab" onclick="showTab('human')">
+              <span class="tab-icon">👤</span>
+              <span>I'm human</span>
+            </button>
           </div>
-          <div class="prereq-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-            OpenClaw Gateway
-          </div>
-        </div>
-      </div>
-      <div class="code-block">
-        <div class="tabs" id="tab-container">
-          <button class="tab active" onclick="showTab('agent')">
-            <span class="tab-icon">🤖</span>
-            <span>I'm an agent</span>
-          </button>
-          <button class="tab" onclick="showTab('human')">
-            <span class="tab-icon">👤</span>
-            <span>I'm human</span>
-          </button>
-        </div>
 
-        <!-- Agent Tab -->
-        <div class="tab-content active" id="tab-agent">
-          <div class="code-header">
-            <div class="dots">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
+          <!-- Agent Tab -->
+          <div class="tab-content active" id="tab-agent">
+            <div class="code-header">
+              <div class="dots">
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+              </div>
+              <span>Terminal</span>
             </div>
-            <span>Terminal</span>
-          </div>
-          <div class="code-body">
-            <div class="code-line"><span class="code-comment"># Get setup instructions</span></div>
-            <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">curl -s https://acastellana.github.io/clawcondos/skill.md</span></div>
-            <br>
-            <div class="code-line"><span class="code-comment"># Then use goal_update to track your work</span></div>
-            <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">goal_update --status "in-progress" --summary "Working on feature"</span></div>
-          </div>
-        </div>
-
-        <!-- Human Tab -->
-        <div class="tab-content" id="tab-human">
-          <div class="code-header">
-            <div class="dots">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
+            <div class="code-body">
+              <div class="code-line"><span class="code-comment"># Get setup instructions</span></div>
+              <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">curl -s https://acastellana.github.io/clawcondos/skill.md</span></div>
+              <br>
+              <div class="code-line"><span class="code-comment"># Then use goal_update to track your work</span></div>
+              <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">goal_update --status "in-progress"</span></div>
             </div>
-            <span>Terminal</span>
           </div>
-          <div class="code-body">
-            <div class="code-line"><span class="code-comment"># Clone and install</span></div>
-            <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">git clone https://github.com/acastellana/clawcondos</span></div>
-            <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">cd clawcondos && npm install</span></div>
-            <br>
-            <div class="code-line"><span class="code-comment"># Start the server</span></div>
-            <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">node serve.js</span></div>
-            <div class="code-output">→ ClawCondos running on http://localhost:9000</div>
+
+          <!-- Human Tab -->
+          <div class="tab-content" id="tab-human">
+            <div class="code-header">
+              <div class="dots">
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+              </div>
+              <span>Terminal</span>
+            </div>
+            <div class="code-body">
+              <div class="code-line"><span class="code-comment"># Clone and install</span></div>
+              <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">git clone https://github.com/acastellana/clawcondos</span></div>
+              <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">cd clawcondos && npm install</span></div>
+              <br>
+              <div class="code-line"><span class="code-comment"># Start the server</span></div>
+              <div class="code-line"><span class="code-prompt">$</span> <span class="code-cmd">node serve.js</span></div>
+              <div class="code-output">→ ClawCondos running on http://localhost:9000</div>
+            </div>
           </div>
         </div>
       </div>

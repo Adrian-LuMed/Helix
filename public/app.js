@@ -1063,6 +1063,13 @@ function initAutoArchiveUI() {
         handleAgentEvent(msg.payload);
         return;
       }
+      
+      // Goals changed event (real-time sync from serve.js file watcher)
+      if (msg.type === 'event' && msg.event === 'goals.changed') {
+        console.log('[ClawCondos] goals.changed event received, refetching goals...');
+        loadGoals();
+        return;
+      }
     }
     
     function sendConnect() {
@@ -2127,12 +2134,23 @@ function initAutoArchiveUI() {
     async function loadGoals() {
       try {
         const data = await rpcCall('goals.list', {});
+        // DEBUG: Log goals data to trace tasks issue
+        console.log('[DEBUG loadGoals] received', data?.goals?.length, 'goals');
+        const testGoal = data?.goals?.find(g => g.id === 'goal_a835b8ae971e5597f4ce8b5f');
+        if (testGoal) {
+          console.log('[DEBUG loadGoals] test goal tasks:', testGoal.tasks?.length, 'hasArray:', Array.isArray(testGoal.tasks));
+        }
         state.goals = (data.goals || []).map(g => {
           if (!g.condoId && Array.isArray(g.sessions) && g.sessions.length > 0) {
             g.condoId = getCondoIdForSessionKey(g.sessions[0]);
           }
           return g;
         });
+        // DEBUG: Verify state.goals has tasks
+        const testGoalInState = state.goals.find(g => g.id === 'goal_a835b8ae971e5597f4ce8b5f');
+        if (testGoalInState) {
+          console.log('[DEBUG loadGoals] state goal tasks:', testGoalInState.tasks?.length);
+        }
         renderGoals();
         renderGoalsGrid();
         updateStatsGrid();
@@ -3214,12 +3232,16 @@ function initAutoArchiveUI() {
       const pane = document.getElementById('goalPane');
       if (!goal || !pane) return;
 
+      // DEBUG: Log goal tasks in renderGoalPane
+      console.log('[DEBUG renderGoalPane] goalId:', state.currentGoalOpenId, 'goal.tasks:', goal.tasks?.length, 'isArray:', Array.isArray(goal.tasks));
+
       if ((state.goalTab || 'tasks') === 'files') {
         renderGoalFilesPane();
         return;
       }
 
       const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+      console.log('[DEBUG renderGoalPane] extracted tasks:', tasks.length);
       if (!tasks.length) {
         pane.innerHTML = `
           <div class="empty-state" style="padding:14px;">No tasks yet. Add the next physical step.</div>

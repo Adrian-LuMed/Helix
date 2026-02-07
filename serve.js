@@ -395,6 +395,47 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 })
 const MAX_WS_CONNECTIONS = 50;
 let wsConnectionCount = 0;
 
+// ── Real-time goal sync: watch goals.json and broadcast changes to all clients ──
+import { watchFile, unwatchFile } from 'fs';
+const connectedClients = new Set();
+const GOALS_FILE = join(__dirname, 'clawcondos/condo-management/.data/goals.json');
+let lastGoalsMtime = 0;
+
+function broadcastGoalsChanged() {
+  const msg = JSON.stringify({ type: 'event', event: 'goals.changed', payload: {} });
+  let count = 0;
+  for (const ws of connectedClients) {
+    try {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
+        count++;
+      }
+    } catch {}
+  }
+  console.log(`[goals-sync] Broadcast goals.changed to ${count} clients`);
+}
+
+function initGoalsWatcher() {
+  if (!existsSync(GOALS_FILE)) {
+    console.log(`[goals-sync] Goals file not found, skipping watcher`);
+    return;
+  }
+  try {
+    lastGoalsMtime = statSync(GOALS_FILE).mtimeMs;
+    // Use watchFile with polling (more reliable for atomic writes)
+    watchFile(GOALS_FILE, { interval: 500 }, (curr, prev) => {
+      if (curr.mtimeMs !== lastGoalsMtime) {
+        lastGoalsMtime = curr.mtimeMs;
+        broadcastGoalsChanged();
+      }
+    });
+    console.log(`[goals-sync] Watching ${GOALS_FILE} for changes (polling mode)`);
+  } catch (err) {
+    console.error(`[goals-sync] Failed to watch goals file: ${err.message}`);
+  }
+}
+initGoalsWatcher();
+
 function getGatewayWsUrl() {
   const host = process.env.GATEWAY_HTTP_HOST || '127.0.0.1';
   const port = Number(process.env.GATEWAY_HTTP_PORT || 18789);
@@ -788,7 +829,13 @@ server.on('upgrade', (req, socket, head) => {
 
     wss.handleUpgrade(req, socket, head, (clientWs) => {
       wsConnectionCount++;
-      clientWs.on('close', () => { wsConnectionCount--; });
+      connectedClients.add(clientWs);
+      console.log(`[ws] Client connected, total: ${connectedClients.size}`);
+      clientWs.on('close', () => {
+        wsConnectionCount--;
+        connectedClients.delete(clientWs);
+        console.log(`[ws] Client disconnected, total: ${connectedClients.size}`);
+      });
       const upstreamUrl = getGatewayWsUrl();
       const gatewayHost = process.env.GATEWAY_HTTP_HOST || '127.0.0.1';
       const gatewayPort = Number(process.env.GATEWAY_HTTP_PORT || 18789);
@@ -832,6 +879,24 @@ server.on('upgrade', (req, socket, head) => {
           const payload = isBinary
             ? (Buffer.isBuffer(data) ? data.toString('utf-8') : String(data))
             : (typeof data === 'string' ? data : (Buffer.isBuffer(data) ? data.toString('utf-8') : String(data)));
+          
+          // DEBUG: Log goals.list responses to diagnose missing tasks issue
+          try {
+            const parsed = JSON.parse(payload);
+            if (parsed?.type === 'res' && parsed?.payload?.goals) {
+              const testGoal = parsed.payload.goals.find(g => g.id === 'goal_a835b8ae971e5597f4ce8b5f');
+              if (testGoal) {
+                console.log('[DEBUG] goals.list response for test goal:', {
+                  id: testGoal.id,
+                  title: testGoal.title?.slice(0, 40),
+                  tasks_count: testGoal.tasks?.length || 0,
+                  has_tasks_array: Array.isArray(testGoal.tasks),
+                  first_task_id: testGoal.tasks?.[0]?.id || null
+                });
+              }
+            }
+          } catch (parseErr) { /* ignore parse errors - just diagnostic */ }
+          
           if (clientWs.readyState === WebSocket.OPEN) clientWs.send(payload);
         } catch {
           closeBoth(1011, 'proxy send failed');

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildGoalContext, buildCondoContext, buildProjectSummary } from '../clawcondos/condo-management/lib/context-builder.js';
+import { buildGoalContext, buildCondoContext, buildProjectSummary, buildCondoMenuContext } from '../clawcondos/condo-management/lib/context-builder.js';
 
 describe('buildGoalContext', () => {
   const baseGoal = {
@@ -342,5 +342,26 @@ describe('buildCondoContext', () => {
     const ctx = buildCondoContext(condo, []);
     expect(ctx).toContain('Website Redesign');
     expect(ctx).toContain('Active: 0 goals, 0 pending tasks');
+  });
+});
+
+describe('buildCondoMenuContext', () => {
+  it('builds menu from condos list', () => {
+    const condos = [
+      { id: 'condo:alpha', name: 'Alpha', description: 'Alpha project' },
+      { id: 'condo:beta', name: 'Beta', description: '' },
+    ];
+    const goals = [
+      { condoId: 'condo:alpha', title: 'Goal A', status: 'active', tasks: [] },
+    ];
+    const menu = buildCondoMenuContext(condos, goals);
+    expect(menu).toContain('Alpha');
+    expect(menu).toContain('Beta');
+    expect(menu).toContain('condo_bind');
+    expect(menu).toContain('Goal A');
+  });
+
+  it('returns null for empty condos', () => {
+    expect(buildCondoMenuContext([], [])).toBeNull();
   });
 });

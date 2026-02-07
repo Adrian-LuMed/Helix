@@ -82,6 +82,32 @@ export function getProjectSummaryForGoal(goal, data) {
   return buildProjectSummary(condo, siblingGoals, goal.id);
 }
 
+export function buildCondoMenuContext(condos, goals) {
+  if (!condos?.length) return null;
+
+  const lines = [
+    '## Session Not Yet Assigned to a Project',
+    '',
+    'Based on the user\'s message, determine the most relevant project and use the `condo_bind` tool to assign this session.',
+    '',
+    '### Available Projects',
+  ];
+
+  for (const condo of condos) {
+    const condoGoals = goals.filter(g => g.condoId === condo.id && g.status === 'active');
+    lines.push(`- **${condo.name}** (${condo.id})`);
+    if (condo.description) lines.push(`  ${condo.description}`);
+    if (condoGoals.length > 0) {
+      const goalNames = condoGoals.slice(0, 3).map(g => g.title);
+      lines.push(`  Active goals: ${goalNames.join(', ')}${condoGoals.length > 3 ? ` (+${condoGoals.length - 3} more)` : ''}`);
+    }
+  }
+
+  lines.push('', 'If none of these projects match, proceed without binding.');
+
+  return lines.join('\n');
+}
+
 export function buildCondoContext(condo, goals, opts = {}) {
   if (!condo) return null;
   const { currentSessionKey } = opts;

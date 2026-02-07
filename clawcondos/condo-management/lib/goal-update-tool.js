@@ -77,6 +77,7 @@ export function createGoalUpdateExecutor(store) {
       }
       task.done = status === 'done';
       task.status = status;
+      if (status === 'done') task.stage = 'done';
       if (summary) task.summary = summary;
       task.updatedAtMs = Date.now();
       results.push(`task ${taskId} → ${status}`);

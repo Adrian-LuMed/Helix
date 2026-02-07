@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url';
 import { createGoalsStore } from './lib/goals-store.js';
 import { createGoalHandlers } from './lib/goals-handlers.js';
 import { createCondoHandlers } from './lib/condos-handlers.js';
-import { buildGoalContext, buildCondoContext, getProjectSummaryForGoal } from './lib/context-builder.js';
+import { buildGoalContext, buildCondoContext, buildCondoMenuContext, getProjectSummaryForGoal } from './lib/context-builder.js';
 import { createGoalUpdateExecutor } from './lib/goal-update-tool.js';
 import { createTaskSpawnHandler } from './lib/task-spawn.js';
 import {
@@ -12,12 +12,42 @@ import {
   createCondoAddTaskExecutor,
   createCondoSpawnTaskExecutor,
 } from './lib/condo-tools.js';
+import {
+  CLASSIFIER_CONFIG,
+  extractLastUserMessage,
+  parseTelegramContext,
+  isSkippableMessage,
+  tier1Classify,
+  detectGoalIntent,
+} from './lib/classifier.js';
+import { createClassificationLog } from './lib/classification-log.js';
+import { analyzeCorrections, applyLearning } from './lib/learning.js';
 
 export default function register(api) {
   const dataDir = api.pluginConfig?.dataDir
     || join(dirname(fileURLToPath(import.meta.url)), '.data');
   const store = createGoalsStore(dataDir);
+  const classificationLog = createClassificationLog(dataDir);
   const handlers = createGoalHandlers(store);
+
+  // Wrap setSessionCondo to track reclassifications
+  const originalSetSessionCondo = handlers['goals.setSessionCondo'];
+  handlers['goals.setSessionCondo'] = (msg) => {
+    const { params } = msg;
+    if (params?.sessionKey && params?.condoId) {
+      try {
+        const data = store.load();
+        const previousCondo = data.sessionCondoIndex[params.sessionKey];
+        if (previousCondo && previousCondo !== params.condoId) {
+          classificationLog.recordReclassification(params.sessionKey, previousCondo, params.condoId);
+          api.logger.info(`clawcondos-goals: reclassification ${params.sessionKey}: ${previousCondo} → ${params.condoId}`);
+        }
+      } catch (err) {
+        api.logger.error(`clawcondos-goals: reclassification tracking failed: ${err.message}`);
+      }
+    }
+    return originalSetSessionCondo(msg);
+  };
 
   for (const [method, handler] of Object.entries(handlers)) {
     api.registerGatewayMethod(method, handler);
@@ -29,6 +59,39 @@ export default function register(api) {
   }
 
   api.registerGatewayMethod('goals.spawnTaskSession', createTaskSpawnHandler(store));
+
+  // Classification RPC methods
+  api.registerGatewayMethod('classification.stats', ({ respond }) => {
+    try {
+      const stats = classificationLog.getStats();
+      respond(true, { stats });
+    } catch (err) {
+      api.logger.error(`clawcondos-goals: classification.stats error: ${err.message}`);
+      respond(false, null, err.message);
+    }
+  });
+
+  api.registerGatewayMethod('classification.learningReport', ({ respond }) => {
+    try {
+      const suggestions = analyzeCorrections(classificationLog);
+      respond(true, { suggestions });
+    } catch (err) {
+      api.logger.error(`clawcondos-goals: classification.learningReport error: ${err.message}`);
+      respond(false, null, err.message);
+    }
+  });
+
+  api.registerGatewayMethod('classification.applyLearning', ({ params, respond }) => {
+    try {
+      const dryRun = params?.dryRun !== false;
+      const suggestions = analyzeCorrections(classificationLog);
+      const applied = applyLearning(store, suggestions, dryRun);
+      respond(true, { dryRun, applied });
+    } catch (err) {
+      api.logger.error(`clawcondos-goals: classification.applyLearning error: ${err.message}`);
+      respond(false, null, err.message);
+    }
+  });
 
   // Hook: inject goal/condo context into agent prompts
   api.registerHook('before_agent_start', async (event) => {
@@ -49,41 +112,102 @@ export default function register(api) {
 
     // 2. Check sessionIndex (individual goal path — includes project summary if in a condo)
     const entry = data.sessionIndex[sessionKey];
-    if (!entry) return;
-    const goal = data.goals.find(g => g.id === entry.goalId);
-    if (!goal) return;
-    const projectSummary = getProjectSummaryForGoal(goal, data);
-    const context = buildGoalContext(goal, { currentSessionKey: sessionKey });
-    if (!context) return;
-    return { prependContext: projectSummary ? `${projectSummary}\n\n${context}` : context };
+    if (entry) {
+      const goal = data.goals.find(g => g.id === entry.goalId);
+      if (goal) {
+        const projectSummary = getProjectSummaryForGoal(goal, data);
+        const context = buildGoalContext(goal, { currentSessionKey: sessionKey });
+        if (context) {
+          return { prependContext: projectSummary ? `${projectSummary}\n\n${context}` : context };
+        }
+      }
+    }
+
+    // 3. Auto-classification for unbound sessions
+    if (!CLASSIFIER_CONFIG.enabled) return;
+
+    try {
+      const message = extractLastUserMessage(event.messages);
+      if (!message || isSkippableMessage(message)) return;
+
+      const telegramCtx = parseTelegramContext(sessionKey) || {};
+      const startMs = Date.now();
+      const classification = tier1Classify(message, telegramCtx, data.condos);
+      const latencyMs = Date.now() - startMs;
+
+      // Log classification attempt
+      classificationLog.append({
+        sessionKey,
+        tier: classification.tier,
+        predictedCondo: classification.condoId,
+        confidence: classification.confidence,
+        reasoning: classification.reasoning,
+        latencyMs,
+      });
+
+      // High confidence → auto-bind
+      if (classification.condoId && classification.confidence >= CLASSIFIER_CONFIG.autoRouteThreshold) {
+        data.sessionCondoIndex[sessionKey] = classification.condoId;
+        store.save(data);
+
+        const condo = data.condos.find(c => c.id === classification.condoId);
+        if (condo) {
+          const goals = data.goals.filter(g => g.condoId === classification.condoId);
+          const context = buildCondoContext(condo, goals, { currentSessionKey: sessionKey });
+
+          // Goal intent detection
+          if (context) {
+            const goalIntent = detectGoalIntent(message);
+            const hint = goalIntent.isGoal
+              ? '\n\n> This message looks like a goal or multi-step task. Consider using `condo_create_goal` to track it.'
+              : '';
+            api.logger.info(`clawcondos-goals: auto-routed ${sessionKey} → ${condo.name} (confidence: ${classification.confidence.toFixed(2)}, reason: ${classification.reasoning})`);
+            return { prependContext: context + hint };
+          }
+        }
+      }
+
+      // Low confidence → inject condo menu for agent to decide
+      if (data.condos.length > 0) {
+        const menu = buildCondoMenuContext(data.condos, data.goals);
+        if (menu) return { prependContext: menu };
+      }
+    } catch (err) {
+      api.logger.error(`clawcondos-goals: classification error for ${sessionKey}: ${err.message}`);
+    }
   });
 
   // Hook: track session activity on goals and condos
   api.registerHook('agent_end', async (event) => {
     const sessionKey = event.context?.sessionKey;
     if (!sessionKey || !event.success) return;
-    const data = store.load();
 
-    // Update condo timestamp if session is bound to one
-    const condoId = data.sessionCondoIndex[sessionKey];
-    if (condoId) {
-      const condo = data.condos.find(c => c.id === condoId);
-      if (condo) {
-        condo.updatedAtMs = Date.now();
-        store.save(data);
-        api.logger.info(`clawcondos-goals: agent_end for session ${sessionKey} (condo: ${condo.name})`);
-        return;
+    try {
+      const data = store.load();
+
+      // Update condo timestamp if session is bound to one
+      const condoId = data.sessionCondoIndex[sessionKey];
+      if (condoId) {
+        const condo = data.condos.find(c => c.id === condoId);
+        if (condo) {
+          condo.updatedAtMs = Date.now();
+          store.save(data);
+          api.logger.info(`clawcondos-goals: agent_end for session ${sessionKey} (condo: ${condo.name})`);
+          return;
+        }
       }
-    }
 
-    // Update goal timestamp if session is assigned to one
-    const entry = data.sessionIndex[sessionKey];
-    if (!entry) return;
-    const goal = data.goals.find(g => g.id === entry.goalId);
-    if (!goal) return;
-    goal.updatedAtMs = Date.now();
-    store.save(data);
-    api.logger.info(`clawcondos-goals: agent_end for session ${sessionKey} (goal: ${goal.title})`);
+      // Update goal timestamp if session is assigned to one
+      const entry = data.sessionIndex[sessionKey];
+      if (!entry) return;
+      const goal = data.goals.find(g => g.id === entry.goalId);
+      if (!goal) return;
+      goal.updatedAtMs = Date.now();
+      store.save(data);
+      api.logger.info(`clawcondos-goals: agent_end for session ${sessionKey} (goal: ${goal.title})`);
+    } catch (err) {
+      api.logger.error(`clawcondos-goals: agent_end error for ${sessionKey}: ${err.message}`);
+    }
   });
 
   // Tool: goal_update for agents to report task status
@@ -269,6 +393,6 @@ export default function register(api) {
     { names: ['condo_spawn_task'] }
   );
 
-  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + 1;
+  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + 1 + 3; // +3 for classification RPC methods
   api.logger.info(`clawcondos-goals: registered ${totalMethods} gateway methods, 5 tools, data at ${dataDir}`);
 }

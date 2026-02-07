@@ -17,6 +17,8 @@ export function createCondoHandlers(store) {
           name: name.trim(),
           description: typeof description === 'string' ? description : '',
           color: color || null,
+          keywords: Array.isArray(params.keywords) ? params.keywords : [],
+          telegramTopicIds: Array.isArray(params.telegramTopicIds) ? params.telegramTopicIds : [],
           createdAtMs: now,
           updatedAtMs: now,
         };
@@ -73,9 +75,13 @@ export function createCondoHandlers(store) {
         }
 
         // Whitelist allowed patch fields (prevent overwriting internal fields)
-        const allowed = ['name', 'description', 'color'];
+        const allowed = ['name', 'description', 'color', 'keywords', 'telegramTopicIds'];
         for (const f of allowed) {
-          if (f in params) condo[f] = params[f];
+          if (f in params) {
+            // Validate array fields
+            if ((f === 'keywords' || f === 'telegramTopicIds') && !Array.isArray(params[f])) continue;
+            condo[f] = params[f];
+          }
         }
         if (typeof condo.name === 'string') condo.name = condo.name.trim();
         condo.updatedAtMs = Date.now();

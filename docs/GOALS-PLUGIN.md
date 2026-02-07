@@ -20,7 +20,7 @@ An OpenClaw plugin that manages goals, tasks, condos, and session-goal mappings 
 │  │ clawcondos-goals   │  │
 │  │ plugin             │  │
 │  │                    │  │
-│  │  21 RPC methods    │  │
+│  │  26 RPC methods    │  │
 │  │  2 lifecycle hooks │  │
 │  │  5 agent tools     │  │
 │  └────────┬───────────┘  │
@@ -62,6 +62,8 @@ All data lives in a single JSON file (`clawcondos/condo-management/.data/goals.j
 
 **Condos** group goals. Each condo has:
 - `id`, `name`, `description`, `color`
+- `keywords` (array of strings for auto-classification)
+- `telegramTopicIds` (array of strings for topic-based routing)
 - `createdAtMs`, `updatedAtMs`
 
 **Indexes** provide fast lookups:
@@ -84,8 +86,16 @@ clawcondos/condo-management/
     goal-update-tool.js     # Agent tool executor for reporting task status
     condo-tools.js          # Agent tools for condo binding, goal creation, task management
     task-spawn.js           # Spawn subagent session for a task
+    classifier.js           # Tier 1 pattern-based session classifier
+    classification-log.js   # Classification attempt logging with feedback
+    learning.js             # Correction analysis and keyword suggestions
+  scripts/
+    populate-condos.js      # Populate condos from goal references
+    seed-keywords.js        # Seed condo keywords from goal content
+    weekly-learn.js         # Weekly learning pipeline (--dry-run/--apply)
   .data/
     goals.json              # Data file (gitignored)
+    classification-log.json # Classification log (gitignored)
 ```
 
 ## Gateway RPC Methods
@@ -132,13 +142,30 @@ All methods follow the standard OpenClaw JSON-RPC protocol over WebSocket.
 |--------|--------|---------|-------|
 | `goals.spawnTaskSession` | `goalId`, `taskId`, `agentId?`, `model?` | `{ sessionKey, taskContext, agentId, model, goalId, taskId }` | Generates session key, links to goal, builds context, guards against re-spawning |
 
+### Classification
+
+| Method | Params | Returns | Notes |
+|--------|--------|---------|-------|
+| `classification.stats` | — | `{ stats }` | Returns `{ total, withFeedback, accepted, corrected, accuracy }` |
+| `classification.learningReport` | — | `{ suggestions }` | Analyzes corrections and suggests keyword updates |
+| `classification.applyLearning` | `dryRun?` | `{ dryRun, applied }` | Applies keyword suggestions to condos (`dryRun` defaults to `true`) |
+
 ## Lifecycle Hooks
 
 ### `before_agent_start`
 
-Fires before an agent processes a message. If the session is assigned to a goal, injects goal/task context into the agent's prompt via `prependContext`.
+Fires before an agent processes a message. Checks in order:
 
-The injected context includes:
+1. **Condo-bound session** — If `sessionCondoIndex[sessionKey]` exists, injects condo context with all goals
+2. **Goal-bound session** — If `sessionIndex[sessionKey]` exists, injects goal context (with project summary if in a condo)
+3. **Auto-classification** — For unbound sessions (when `CLAWCONDOS_CLASSIFICATION !== 'off'`):
+   - Extracts the last user message and parses Telegram context (topic ID) from the session key
+   - Runs tier 1 pattern matching: `@condo:name` mentions (1.0), topic ID match (0.95), keyword match (0.15 each, max 0.45), condo name match (0.3)
+   - High confidence (>=0.8) → auto-binds session to condo, injects condo context. Also checks for goal intent and appends a hint if detected.
+   - Low confidence → injects a condo menu listing available projects for agent-mediated selection via `condo_bind`
+   - All classification attempts are logged to `classification-log.json`
+
+The injected goal context includes:
 - Goal title, description, status, priority, deadline
 - Task checklist with completion markers (`[x]` / `[ ]`)
 - Session assignments (marks tasks as "you", "assigned: <key>", or "unassigned")
@@ -147,7 +174,7 @@ The injected context includes:
 
 ### `agent_end`
 
-Fires after a successful agent response. Updates `goal.updatedAtMs` to track last activity.
+Fires after a successful agent response. Updates `goal.updatedAtMs` or `condo.updatedAtMs` to track last activity. Wrapped in try-catch so errors don't break the agent lifecycle.
 
 ## Agent Tools
 
@@ -231,7 +258,7 @@ All handlers follow consistent validation:
 
 ## Testing
 
-283 tests across 11 test files. Run with `npm test`.
+Tests across 14 test files. Run with `npm test`.
 
 | Test File | Coverage |
 |-----------|----------|
@@ -242,7 +269,10 @@ All handlers follow consistent validation:
 | `task-spawn.test.js` | Spawn config, session linking, project summary, re-spawn guard |
 | `context-builder.test.js` | Goal context, project summary, condo context, null safety |
 | `goals-store.test.js` | Load/save, atomic writes, data migration, ID generation, condos array |
-| `plugin-index.test.js` | Plugin registration, hook integration, tool factory |
+| `classifier.test.js` | Tier 1 classification, topic/keyword/name scoring, ambiguity detection, goal intent |
+| `classification-log.test.js` | Append, feedback, corrections, stats, reclassification, load error safety |
+| `learning.test.js` | Correction analysis, keyword suggestion, apply learning with dry run |
+| `plugin-index.test.js` | Plugin registration, hook integration, tool factory, classification wiring |
 | `config.test.js` | Config loader (not plugin-specific) |
 | `message-shaping.test.js` | Message formatting (not plugin-specific) |
 | `serve-helpers.test.js` | Server helpers (not plugin-specific) |

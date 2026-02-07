@@ -127,6 +127,26 @@ describe('CondoHandlers', () => {
       expect(condo.color).toBeNull();
     });
 
+    it('accepts optional keywords array', () => {
+      const condo = createCondo(handlers, { name: 'KW', keywords: ['investor', 'pipeline'] });
+      expect(condo.keywords).toEqual(['investor', 'pipeline']);
+    });
+
+    it('defaults keywords to empty array', () => {
+      const condo = createCondo(handlers, { name: 'NoKW' });
+      expect(condo.keywords).toEqual([]);
+    });
+
+    it('accepts optional telegramTopicIds array', () => {
+      const condo = createCondo(handlers, { name: 'TG', telegramTopicIds: [2212, 3001] });
+      expect(condo.telegramTopicIds).toEqual([2212, 3001]);
+    });
+
+    it('defaults telegramTopicIds to empty array', () => {
+      const condo = createCondo(handlers, { name: 'NoTG' });
+      expect(condo.telegramTopicIds).toEqual([]);
+    });
+
     it('generates unique IDs across creates', () => {
       const c1 = createCondo(handlers, { name: 'A' });
       const c2 = createCondo(handlers, { name: 'B' });
@@ -495,6 +515,35 @@ describe('CondoHandlers', () => {
       const { respond, getResult } = makeResponder();
       handlers['condos.get']({ params: { id: c2.id }, respond });
       expect(getResult().payload.condo.name).toBe('Bystander');
+    });
+
+    it('patches keywords', () => {
+      const condo = createCondo(handlers, { name: 'C' });
+      const { respond, getResult } = makeResponder();
+      handlers['condos.update']({
+        params: { id: condo.id, keywords: ['new', 'words'] },
+        respond,
+      });
+      expect(getResult().payload.condo.keywords).toEqual(['new', 'words']);
+    });
+
+    it('patches telegramTopicIds', () => {
+      const condo = createCondo(handlers, { name: 'C' });
+      const { respond, getResult } = makeResponder();
+      handlers['condos.update']({
+        params: { id: condo.id, telegramTopicIds: [100] },
+        respond,
+      });
+      expect(getResult().payload.condo.telegramTopicIds).toEqual([100]);
+    });
+
+    it('keywords persist across reload', () => {
+      const condo = createCondo(handlers, { name: 'Persist', keywords: ['alpha'] });
+      const freshStore = createGoalsStore(TEST_DIR);
+      const freshHandlers = createCondoHandlers(freshStore);
+      const { respond, getResult } = makeResponder();
+      freshHandlers['condos.get']({ params: { id: condo.id }, respond });
+      expect(getResult().payload.condo.keywords).toEqual(['alpha']);
     });
 
     it('persists updates across store reload', () => {

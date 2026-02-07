@@ -78,6 +78,7 @@ Sessions are identified by structured keys:
 - `agent:main:main` - Primary agent
 - `agent:app-assistant:app:<appId>` - App assistant
 - `agent:main:subagent:<taskId>` - Background task
+- `agent:main:telegram:group:<groupId>:topic:<topicId>` - Telegram topic session
 - `cron:<jobId>` - Scheduled job
 
 ### State management
@@ -89,26 +90,30 @@ The frontend uses a single global `state` object. WebSocket events drive UI upda
 Goals, tasks, and session-goal mappings are managed by an OpenClaw plugin at `clawcondos/condo-management/`. The plugin registers gateway RPC methods that the frontend calls over WebSocket.
 
 **Plugin files:**
-- `clawcondos/condo-management/index.js` - Plugin entry point, registers 21 gateway methods + 2 hooks + 5 tools
+- `clawcondos/condo-management/index.js` - Plugin entry point, registers 26 gateway methods + 2 hooks + 5 tools
 - `clawcondos/condo-management/lib/goals-store.js` - File-backed JSON storage for goals and condos
 - `clawcondos/condo-management/lib/goals-handlers.js` - Gateway method handlers for goals CRUD, tasks, and sessions
 - `clawcondos/condo-management/lib/condos-handlers.js` - Gateway method handlers for condos CRUD
-- `clawcondos/condo-management/lib/context-builder.js` - Builds goal/condo context for agent prompt injection
+- `clawcondos/condo-management/lib/context-builder.js` - Builds goal/condo context and condo menu for agent prompt injection
 - `clawcondos/condo-management/lib/goal-update-tool.js` - Agent tool for reporting task status
 - `clawcondos/condo-management/lib/condo-tools.js` - Agent tools for condo binding, goal creation, task management, and subagent spawning
 - `clawcondos/condo-management/lib/task-spawn.js` - Spawns subagent sessions for task execution
+- `clawcondos/condo-management/lib/classifier.js` - Tier 1 pattern-based session classifier (keyword/topic matching)
+- `clawcondos/condo-management/lib/classification-log.js` - Classification attempt logging with feedback tracking
+- `clawcondos/condo-management/lib/learning.js` - Analyzes classification corrections and suggests keyword updates
 - `clawcondos/condo-management/migrate.js` - Migration script from `.registry/goals.json`
 
-**Gateway methods (21):**
+**Gateway methods (26):**
 - Goals: `goals.list`, `goals.create`, `goals.get`, `goals.update`, `goals.delete`
 - Sessions: `goals.addSession`, `goals.removeSession`, `goals.sessionLookup`
 - Session-condo mapping: `goals.setSessionCondo`, `goals.getSessionCondo`, `goals.listSessionCondos`, `goals.removeSessionCondo`
 - Tasks: `goals.addTask`, `goals.updateTask`, `goals.deleteTask`
 - Condos: `condos.create`, `condos.list`, `condos.get`, `condos.update`, `condos.delete`
 - Spawning: `goals.spawnTaskSession`
+- Classification: `classification.stats`, `classification.learningReport`, `classification.applyLearning`
 
 **Plugin hooks:**
-- `before_agent_start` - Injects goal/condo context when a session belongs to a goal or condo
+- `before_agent_start` - Injects goal/condo context when a session belongs to a goal or condo. For unbound sessions, auto-classifies via tier 1 pattern matching (keyword/topic) and either auto-routes (high confidence) or injects a condo menu for agent-mediated selection.
 - `agent_end` - Tracks session activity timestamps on goals and condos
 
 **Plugin tools:**
@@ -125,6 +130,7 @@ App registrations persist in `.registry/` (gitignored):
 
 Goals data lives in the plugin:
 - `clawcondos/condo-management/.data/goals.json` - Goals storage (gitignored)
+- `clawcondos/condo-management/.data/classification-log.json` - Classification log (gitignored)
 
 ## Testing
 
@@ -154,6 +160,7 @@ Tests use **Vitest 2.0** in Node environment. Test files live in `tests/` and ma
 - `CLAWCONDOS_AGENT_WORKSPACES` - JSON mapping agent IDs to workspace paths for introspection (default: `{}`)
 - `CLAWCONDOS_SKILLS_DIRS` - Colon-separated skill directory paths (default: empty)
 - `CLAWCONDOS_UPLOAD_DIR` - Additional upload directory allowed for Whisper transcription
+- `CLAWCONDOS_CLASSIFICATION` - Set to `off` to disable auto-classification of unbound sessions (default: enabled)
 
 ## Reference Files
 

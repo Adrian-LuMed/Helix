@@ -1,6 +1,6 @@
 # ClawCondos Goals Plugin (`clawcondos-goals`)
 
-An [OpenClaw](https://github.com/acastellana/openclaw) plugin for managing goals, tasks, and condos (projects). Provides 21 gateway RPC methods, 2 lifecycle hooks, and 5 agent tools.
+An [OpenClaw](https://github.com/acastellana/openclaw) plugin for managing goals, tasks, and condos (projects). Provides 26 gateway RPC methods, 2 lifecycle hooks, and 5 agent tools.
 
 ## Features
 
@@ -9,6 +9,8 @@ An [OpenClaw](https://github.com/acastellana/openclaw) plugin for managing goals
 - **Session Binding** — Map agent sessions to goals or condos for context injection
 - **Agent Tools** — Agents can report progress, create goals, and spawn sub-agents
 - **Context Injection** — Automatically prepend goal/project context to agent prompts
+- **Session Classification** — Auto-route unbound sessions to condos via keyword/topic pattern matching
+- **Learning Loop** — Track classification corrections and suggest keyword improvements
 - **File-backed Storage** — JSON storage with atomic writes, no database required
 
 ## Installation
@@ -46,6 +48,7 @@ Default data directory: `.data/` inside the plugin directory.
 | Tasks | `goals.addTask`, `goals.updateTask`, `goals.deleteTask` |
 | Condos CRUD | `condos.create`, `condos.list`, `condos.get`, `condos.update`, `condos.delete` |
 | Spawning | `goals.spawnTaskSession` |
+| Classification | `classification.stats`, `classification.learningReport`, `classification.applyLearning` |
 
 **Hooks:** `before_agent_start` (context injection), `agent_end` (activity tracking)
 

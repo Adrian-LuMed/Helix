@@ -575,6 +575,54 @@ body {
   font-size: 0.9rem;
 }
 
+/* Selection checkbox */
+.search-row-check {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+  margin: 0;
+}
+.search-view-row.checked {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+/* Selection action bar */
+.search-view-actions {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+}
+.search-view-actions.visible {
+  display: flex;
+}
+.search-view-sel-count {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.search-view-action-btn {
+  padding: 6px 16px;
+  font-size: 0.82rem;
+  border-radius: var(--radius-md);
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+  white-space: nowrap;
+}
+.search-view-action-btn:hover {
+  opacity: 0.85;
+}
+
 /* --- Form Elements --- */
 .form-group {
   margin-bottom: var(--space-lg);

@@ -532,6 +532,10 @@
           <button class="ghost-btn" onclick="closeSearchView()" title="Close (Esc)" style="background:none;border:none;color:var(--text-dim);font-size:1.1rem;cursor:pointer;padding:4px 8px;">&#x2715;</button>
         </div>
         <div class="search-view-results" id="searchViewResults"></div>
+        <div class="search-view-actions" id="searchViewActions">
+          <span class="search-view-sel-count" id="searchViewSelCount">0 selected</span>
+          <button class="btn-primary search-view-action-btn" onclick="startSessionWithSelected()">New Session &#x2192;</button>
+        </div>
       </div>
 
       <!-- ═══════════════════════════════════════════════════════════════
@@ -6244,6 +6248,7 @@ Response format:
     let _searchSelectedIdx = -1;
     let _searchResults = []; // flat array of { type, data }
     let _searchPreviousView = null; // remember where to go back
+    let _searchChecked = new Set(); // selected session keys for batch actions
 
     function openSearchView() {
       // Remember current view to restore on close
@@ -6270,6 +6275,8 @@ Response format:
       input.focus();
       _searchSelectedIdx = -1;
       _searchResults = [];
+      _searchChecked.clear();
+      updateSearchSelectionBar();
       showSearchRecentItems();
     }
 
@@ -6417,7 +6424,7 @@ Response format:
           _searchResults.push({ type: 'session', data: a });
           var meta = buildSessionMeta(a);
           var subs = subagentsByParent[a.key] || [];
-          var row = buildSearchRow(idx, getSessionIcon(a), getSessionName(a), meta, false);
+          var row = buildSearchRow(idx, getSessionIcon(a), getSessionName(a), meta, false, a.key);
           if (subs.length > 0) {
             var badge = document.createElement('span');
             badge.className = 'search-row-badge';
@@ -6430,7 +6437,7 @@ Response format:
           subs.forEach(function(sub) {
             var si = _searchResults.length;
             _searchResults.push({ type: 'session', data: sub });
-            container.appendChild(buildSearchRow(si, getSessionIcon(sub), getSessionName(sub), buildSessionMeta(sub), true));
+            container.appendChild(buildSearchRow(si, getSessionIcon(sub), getSessionName(sub), buildSessionMeta(sub), true, sub.key));
           });
         });
 
@@ -6466,7 +6473,7 @@ Response format:
           subs.forEach(function(sub) {
             var si = _searchResults.length;
             _searchResults.push({ type: 'session', data: sub });
-            container.appendChild(buildSearchRow(si, getSessionIcon(sub), getSessionName(sub), buildSessionMeta(sub), true));
+            container.appendChild(buildSearchRow(si, getSessionIcon(sub), getSessionName(sub), buildSessionMeta(sub), true, sub.key));
           });
         });
       }
@@ -6495,12 +6502,29 @@ Response format:
       return parts.join(' \u00B7 ');
     }
 
-    function buildSearchRow(idx, icon, name, meta, isSubagent) {
+    function buildSearchRow(idx, icon, name, meta, isSubagent, sessionKey) {
       var item = document.createElement('div');
       item.className = 'search-view-row' + (isSubagent ? ' subagent' : '');
+      if (sessionKey && _searchChecked.has(sessionKey)) item.classList.add('checked');
       item.dataset.idx = idx;
       item.onclick = function() { selectSearchResult(idx); };
       item.onmouseenter = function() { highlightSearchResult(idx); };
+
+      if (sessionKey) {
+        var check = document.createElement('input');
+        check.type = 'checkbox';
+        check.className = 'search-row-check';
+        check.dataset.key = sessionKey;
+        check.checked = _searchChecked.has(sessionKey);
+        check.onclick = function(e) {
+          e.stopPropagation();
+          if (_searchChecked.has(sessionKey)) { _searchChecked.delete(sessionKey); item.classList.remove('checked'); }
+          else { _searchChecked.add(sessionKey); item.classList.add('checked'); }
+          this.checked = _searchChecked.has(sessionKey);
+          updateSearchSelectionBar();
+        };
+        item.appendChild(check);
+      }
 
       var iconEl = document.createElement('span');
       iconEl.className = 'search-row-icon';
@@ -6575,6 +6599,49 @@ Response format:
         e.stopPropagation();
         closeSearchView();
       }
+    }
+
+    function updateSearchSelectionBar() {
+      var bar = document.getElementById('searchViewActions');
+      var count = _searchChecked.size;
+      if (count > 0) {
+        bar.classList.add('visible');
+        document.getElementById('searchViewSelCount').textContent = count + ' session' + (count > 1 ? 's' : '') + ' selected';
+      } else {
+        bar.classList.remove('visible');
+      }
+    }
+
+    function startSessionWithSelected() {
+      if (_searchChecked.size === 0) return;
+      var lines = [];
+      _searchChecked.forEach(function(key) {
+        var s = (state.sessions || []).find(function(x) { return x.key === key; });
+        lines.push('- ' + (s ? getSessionName(s) : key) + '  (`' + key + '`)');
+      });
+      var mainKey = 'agent:main:main';
+      var mainSession = (state.sessions || []).find(function(s) { return s.key === mainKey; });
+      if (!mainSession) {
+        // Main session might not be loaded yet — inject a stub
+        mainSession = { key: mainKey, displayName: 'Main Agent' };
+        state.sessions.push(mainSession);
+      }
+      _searchChecked.clear();
+      updateSearchSelectionBar();
+      openSession(mainKey);
+      // Pre-fill the composer after the view transition
+      setTimeout(function() {
+        var input = document.getElementById('chatInput');
+        if (input) {
+          input.value = 'I want to work with these sessions:\n' + lines.join('\n') + '\n\n';
+          input.focus();
+          // Move cursor to end
+          input.setSelectionRange(input.value.length, input.value.length);
+          // Auto-resize textarea
+          input.style.height = 'auto';
+          input.style.height = input.scrollHeight + 'px';
+        }
+      }, 400);
     }
 
     function scrollSearchSelectedIntoView() {

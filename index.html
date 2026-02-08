@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   
-  <link rel="stylesheet" href="/styles/main.css?v=8">
+  <link rel="stylesheet" href="/styles/main.css?v=9">
   <link rel="stylesheet" href="/styles/media-upload.css">
   <link rel="stylesheet" href="/styles/voice-recorder.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1/themes/prism-tomorrow.min.css">
@@ -260,7 +260,7 @@
           <button class="section-action" onclick="refresh()" title="Refresh">↻</button>
         </div>
         <div id="goalsList" style="padding: 4px 0;"></div>
-        <div id="uncategorizedLink" class="uncategorized-link" style="display: none;" onclick="showOverview(); scrollToSection('condoStatusSection')"></div>
+        <div id="uncategorizedLink" class="uncategorized-link" style="display: none;" onclick="showOverview(); scrollToSection('recentActivitySection')"></div>
         <div id="sessionsList" style="display: none;"></div>
       </div>
       
@@ -311,7 +311,7 @@
         <div class="overview-content">
           <!-- Stats Grid -->
           <div class="stats-grid" id="statsGrid">
-            <div class="stat-card clickable accent-blue" onclick="scrollToSection('condoStatusSection')" title="View condos">
+            <div class="stat-card clickable accent-blue" onclick="scrollToSection('recentActivitySection')" title="View sessions">
               <div class="stat-label">Active Sessions</div>
               <div class="stat-value" id="statActiveSessions">-</div>
               <div class="stat-trend" id="statSessionsTrend"></div>
@@ -330,107 +330,84 @@
             </div>
           </div>
 
-          <!-- Condo Status Board -->
-          <div class="grid-section" id="condoStatusSection">
+          <!-- Recent Sessions -->
+          <div class="grid-section" id="recentActivitySection">
             <div class="grid-header">
-              <h2 class="grid-title">🏙️ Condos</h2>
-              <span class="grid-count" id="condoCount">0</span>
-              <span class="uncategorized-count" id="uncategorizedCount" onclick="autoCategorize()" title="Sessions not assigned to any goal"></span>
-            </div>
-            <div id="condoStatusBoard"></div>
-          </div>
-
-          <!-- Recent Activity (uncategorized sessions) -->
-          <div class="grid-section" id="recentActivitySection" style="display: none;">
-            <div class="grid-header">
-              <h2 class="grid-title">💬 Recent Sessions</h2>
+              <h2 class="grid-title">Recent Sessions</h2>
               <span class="grid-count" id="recentSessionCount">0</span>
             </div>
             <div class="cards-grid" id="recentSessionsGrid"></div>
-          </div>
-          
-          <!-- Apps Grid -->
-          <div class="grid-section">
-            <div class="grid-header">
-              <h2 class="grid-title">🚀 Apps</h2>
-              <span class="grid-count" id="appCount">0</span>
-            </div>
-            <div class="cards-grid" id="appsGrid"></div>
-          </div>
-          
-          <!-- Sub-agents Grid -->
-          <div class="grid-section" id="subagentsSection" style="display: none;">
-            <div class="grid-header">
-              <h2 class="grid-title">⚡ Background Tasks</h2>
-              <span class="grid-count" id="taskCount">0</span>
-            </div>
-            <div class="cards-grid" id="subagentsGrid"></div>
           </div>
         </div>
       </div>
       
       <!-- Goal View -->
       <div class="view" id="goalView">
-        <div class="goal-shell">
-          <div class="goal-hero">
-            <div class="goal-hero-top">
-              <button class="goal-back" onclick="closeGoalView()">← Lobby</button>
-              <div class="goal-hero-meta">
-                <div class="goal-hero-title" id="goalHeroTitle">Goal</div>
-                <div class="goal-hero-sub" id="goalHeroSub">—</div>
+        <div class="goal-shell" id="goalShell">
+          <section class="goal-chat" id="goalChatPanel">
+            <div class="goal-chat-header">
+              <div style="display:flex; gap:10px; align-items:baseline; min-width:0;">
+                <div>Chat</div>
+                <div class="goal-chat-meta" id="goalChatMeta" style="min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</div>
               </div>
-              <div class="goal-hero-actions">
-                <button class="header-btn" id="goalMarkDoneBtn" onclick="toggleGoalDone()">Mark done</button>
-                <button class="header-btn" onclick="showAttachSessionModal(null)">Attach session</button>
-                <button class="header-btn" style="background: var(--bg-input); border: 1px solid var(--border);" onclick="promptDeleteGoal()">Delete</button>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <div class="goal-history" id="goalHistoryWrap" style="display:none;">
+                  <span class="goal-history-label">History</span>
+                  <select class="goal-history-select" id="goalHistorySelect" onchange="handleGoalHistoryChange(this.value)"></select>
+                </div>
+                <div class="session-state-pill" id="goalSessionStatePill" title="Status">
+                  <span class="session-state-dot blink-idle" id="goalSessionStateDot"></span>
+                  <span class="session-state-label" id="goalSessionStateLabel">Idle</span>
+                </div>
+                <button class="ghost-btn" id="goalOpenBtn" onclick="openGoalChatInFull()">Open →</button>
               </div>
             </div>
-          </div>
-
-          <div class="goal-columns">
-            <section class="goal-panel">
-              <div class="panel-title">Tasks</div>
-              <div class="goal-tasks" id="goalTasks"></div>
-              <div class="goal-task-new">
-                <input class="form-input" id="goalNewTaskInput" placeholder="Add a task…" onkeypress="if(event.key==='Enter')addGoalTask()">
-                <button class="form-btn" onclick="addGoalTask()">Add</button>
+            <div class="goal-chat-body">
+              <div id="goalKickoffOverlay" style="display:none; padding:18px 14px; border-bottom:1px solid rgba(255,255,255,0.06);">
+                <div style="font-weight:600; margin-bottom:6px;">This goal hasn't started yet</div>
+                <div style="color: var(--text-dim); font-size:0.9rem; margin-bottom:12px;">Kick off to create the first session and begin execution.</div>
+                <button class="ghost-btn" style="border-color: rgba(96,165,250,.55);" onclick="kickOffGoal()">Kick Off Goal</button>
               </div>
-            </section>
+              <div class="chat-messages" id="goal_chatMessages"></div>
+            </div>
+            <div id="composerMountGoal"></div>
+          </section>
 
-            <section class="goal-panel">
-              <div class="panel-title">Notes</div>
-              <textarea class="goal-notes" id="goalNotes" placeholder="Working notes, links, decisions…" oninput="debouncedSaveGoal()"></textarea>
-              <div class="goal-meta-row">
-                <div class="goal-meta-card">
-                  <div class="meta-label">Deadline</div>
-                  <input class="form-input" id="goalDeadlineInput" placeholder="YYYY-MM-DD or freeform" oninput="debouncedSaveGoal()">
-                </div>
-                <div class="goal-meta-card">
-                  <div class="meta-label">Priority</div>
-                  <select class="form-input" id="goalPriorityInput" onchange="saveGoalNow()">
-                    <option value="">—</option>
-                    <option value="P0">P0</option>
-                    <option value="P1">P1</option>
-                    <option value="P2">P2</option>
-                    <option value="P3">P3</option>
-                  </select>
+          <section class="goal-right" id="goalRightPanel">
+            <div class="goal-right-header">
+              <div>
+                <div class="goal-right-title" id="goalHeroTitle">Goal</div>
+                <div class="goal-right-meta">
+                  <span id="goalCondoName">Condo</span>
+                  <span>·</span>
+                  <span>Updated: <b id="goalLastUpdated">—</b></span>
                 </div>
               </div>
-              <div class="goal-save-hint" id="goalSaveHint">Saved</div>
-            </section>
+              <div class="goal-right-actions">
+                <button class="ghost-btn" id="goalMarkDoneBtn" onclick="toggleGoalDone()">Mark done</button>
+                <button class="ghost-btn" onclick="showAttachSessionModal(null)">⛓</button>
+                <button class="ghost-btn danger" onclick="promptDeleteGoal()" title="Delete goal">Delete</button>
+              </div>
+            </div>
 
-            <section class="goal-panel">
-              <div class="panel-title">Attached sessions</div>
-              <div class="goal-sessions" id="goalSessions"></div>
-              <div class="goal-sessions-hint">Tip: move sessions between condos from any session card's ⛓ button.</div>
-            </section>
+            <div class="goal-def">
+              <div class="goal-def-display" id="goalDefDisplay" onclick="startGoalDefEdit()">Click to add a definition… <small>(click to edit)</small></div>
+              <div class="goal-def-edit" id="goalDefEdit">
+                <textarea id="goalDefTA" rows="6"></textarea>
+                <div class="goal-def-actions">
+                  <button class="ghost-btn" onclick="saveGoalDefEdit()">Save</button>
+                  <button class="ghost-btn" onclick="cancelGoalDefEdit()">Cancel</button>
+                </div>
+              </div>
+            </div>
 
-            <section class="goal-panel goal-files-panel">
-              <div class="panel-title">Tracked files</div>
-              <div class="goal-files" id="goalFiles"></div>
-              <div class="goal-sessions-hint">Files reported by agents via goal_update appear here.</div>
-            </section>
-          </div>
+            <div class="goal-tabs">
+              <div class="goal-tab active" id="goalTabTasks" onclick="setGoalTab('tasks')">Tasks</div>
+              <div class="goal-tab" id="goalTabFiles" onclick="setGoalTab('files')">Files</div>
+            </div>
+
+            <div class="goal-pane" id="goalPane"></div>
+          </section>
         </div>
       </div>
 
@@ -521,6 +498,20 @@
           <div class="voice-hint" id="voiceHint">Recording… click mic to stop</div>
         </div>
       </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           SESSION DETAIL PANEL (slides in on right, inside main-content)
+           ═══════════════════════════════════════════════════════════════ -->
+      <div id="sessionDetailPanel" class="session-detail-panel">
+        <div class="detail-panel-header">
+          <span class="detail-panel-title" id="detailPanelTitle">Session</span>
+          <button class="ghost-btn" onclick="closeDetailPanel()" title="Close panel" style="background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer;padding:4px 8px;">✕</button>
+        </div>
+        <div class="detail-panel-body">
+          <div class="chat-messages" id="detailChatMessages"></div>
+        </div>
+        <div id="detailComposerMount"></div>
+      </div>
     </div>
   </main>
 
@@ -561,6 +552,7 @@
       chatHistory: [],
       isThinking: false,
       messageQueue: [],  // Queued messages when agent is busy
+      detailPanelSessionKey: null,  // Session key shown in detail panel
 
       // Per-session model overrides (UI-level; model switch is triggered by sending /new <model>)
       sessionModelOverrides: (() => {
@@ -641,6 +633,11 @@
       // Goal time filter (sidebar): days to show
       goalTimeFilter: localStorage.getItem('sharp_goal_time_filter') || '7',
       goalPanelOpen: false,
+      goalChatSessionKey: null,
+      goalTab: 'tasks',
+      pendingRouteGoalId: null,
+      pendingRouteSessionKey: null,
+      pendingRouteDetailKey: null,
       
       // Track when sessions were last viewed (for unread indicator)
       lastViewedAt: JSON.parse(localStorage.getItem('sharp_last_viewed') || '{}'),
@@ -1634,7 +1631,7 @@
         clearActiveRun(sessionKey);
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, runState === 'error' ? 'error' : 'idle');
-        
+
         if (state.currentSession?.key === sessionKey) {
           state.isThinking = false;
           updateSendButton();
@@ -1644,6 +1641,15 @@
             addChatMessage('system', `Error: ${data.errorMessage}`);
           }
         }
+      }
+
+      // Refresh detail panel if it's showing this session
+      if (state.detailPanelSessionKey === sessionKey && (runState === 'final' || runState === 'error')) {
+        openDetailPanel(sessionKey, { fromRouter: true });
+      }
+      // Refresh goal chat if it's showing this session
+      if (state.goalChatSessionKey === sessionKey && (runState === 'final' || runState === 'error')) {
+        renderGoalChat();
       }
     }
     
@@ -1974,15 +1980,40 @@
         await Promise.all([loadCondos(), loadGoals(), loadSessions(), loadApps(), loadAgents()]);
         updateOverview();
         updateStatsGrid();
-        
-        // Restore previous session if any
-        const savedSessionKey = localStorage.getItem('sharp_current_session');
-        if (savedSessionKey) {
-          const session = state.sessions.find(s => s.key === savedSessionKey);
-          if (session) {
-            console.log('[ClawCondos] Restoring session:', savedSessionKey);
-            openSession(savedSessionKey);
+
+        // Route from hash or restore saved session
+        var hasRoute = window.location.hash && window.location.hash !== '#/' && window.location.hash !== '#';
+        if (hasRoute) {
+          handleRoute();
+        } else {
+          // Fall back to localStorage session restore
+          var savedSessionKey = localStorage.getItem('sharp_current_session');
+          if (savedSessionKey) {
+            var session = state.sessions.find(function(s) { return s.key === savedSessionKey; });
+            if (session) {
+              console.log('[ClawCondos] Restoring session:', savedSessionKey);
+              openSession(savedSessionKey);
+            }
           }
+        }
+
+        // Handle deferred routes (data wasn't loaded when route was first parsed)
+        if (state.pendingRouteGoalId) {
+          var gid = state.pendingRouteGoalId;
+          state.pendingRouteGoalId = null;
+          openGoal(gid, { fromRouter: true });
+        }
+        if (state.pendingRouteSessionKey) {
+          var sk = state.pendingRouteSessionKey;
+          state.pendingRouteSessionKey = null;
+          var s = state.sessions.find(function(x) { return x.key === sk; });
+          if (s) openSession(sk, { fromRouter: true });
+        }
+        if (state.pendingRouteDetailKey) {
+          var dk = state.pendingRouteDetailKey;
+          state.pendingRouteDetailKey = null;
+          var ds = state.sessions.find(function(x) { return x.key === dk; });
+          if (ds) openDetailPanel(dk, { fromRouter: true });
         }
       } catch (err) {
         console.error('Failed to load initial data:', err);
@@ -2149,9 +2180,7 @@
 
     // Filter goals grid by status (pending/done)
     function filterGoalsByStatus(status) {
-      const condoSection = document.getElementById('condoStatusSection');
-      if (condoSection) condoSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      // TODO: Add actual filtering UI (highlight matching goals)
+      scrollToSection('recentActivitySection');
       showToast(`Showing ${status === 'done' ? 'completed' : 'pending'} goals`, 'info');
     }
 
@@ -2160,16 +2189,14 @@
       const sessions = state.sessions || [];
       const runs = state.runs || {};
       const errorSessions = sessions.filter(s => s.lastError || (runs[s.key] && runs[s.key] === 'error'));
-      
+
       if (errorSessions.length === 0) {
         showToast('No sessions with errors', 'info');
         return;
       }
-      
-      // Scroll to sessions and show toast with count
-      scrollToSection('condoStatusSection');
+
+      scrollToSection('recentActivitySection');
       showToast(`${errorSessions.length} session(s) with errors`, 'error');
-      // TODO: Add visual highlighting of error sessions
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2329,17 +2356,8 @@
         const latestSession = getGoalLatestSession(g);
         const agentStatus = latestSession ? getAgentStatus(latestSession.key) : '';
         const isThinking = agentStatus === 'thinking';
-
-        // Build compact meta line
-        let meta = '';
-        if (isDone) {
-          meta = 'done';
-        } else if (total > 0) {
-          meta = done + '/' + total;
-          if (activityStr) meta += ' \u00b7 ' + activityStr;
-        } else if (activityStr) {
-          meta = activityStr;
-        }
+        const sessionCount = Array.isArray(g.sessions) ? g.sessions.length : 0;
+        const nextTask = (g.nextTask || '').trim();
 
         const classes = ['goal-item'];
         if (nested) classes.push('condo-nested');
@@ -2347,11 +2365,42 @@
         if (isDone) classes.push('goal-done');
         if (isThinking) classes.push('goal-thinking');
 
+        // Progress bar
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        const progressBar = total > 0
+          ? '<div class="goal-progress"><div class="goal-progress-fill' + (isThinking ? ' thinking' : '') + '" style="width:' + pct + '%;"></div></div>'
+          : '';
+
+        // Meta line: task count + time ago
+        let metaParts = [];
+        if (isDone) {
+          metaParts.push('done');
+        } else if (total > 0) {
+          metaParts.push(done + '/' + total + ' tasks');
+        }
+        if (activityStr) metaParts.push(activityStr);
+        const metaLine = metaParts.length
+          ? '<div class="goal-meta-line">' + metaParts.map(p => '<span>' + escapeHtml(p) + '</span>').join('') + '</div>'
+          : '';
+
+        // Next task preview
+        const nextTaskEl = nextTask
+          ? '<div class="goal-next-task">Next: ' + escapeHtml(nextTask) + '</div>'
+          : '';
+
+        // Session count badge
+        const countBadge = '<span class="goal-session-count">' + sessionCount + '</span>';
+
         return '<div class="' + classes.join(' ') + '" onclick="openGoal(\'' + escapeHtml(g.id) + '\')" title="' + escapeHtml(g.title || '') + '">' +
           '<div class="goal-item-dot ' + attention + '"></div>' +
           '<div class="goal-item-content">' +
-            '<div class="goal-item-title">' + escapeHtml(g.title || 'Untitled goal') + '</div>' +
-            '<div class="goal-item-meta">' + escapeHtml(meta) + '</div>' +
+            '<div style="display:flex;align-items:center;gap:6px;">' +
+              '<div class="goal-item-title" style="flex:1;">' + escapeHtml(g.title || 'Untitled goal') + '</div>' +
+              countBadge +
+            '</div>' +
+            progressBar +
+            metaLine +
+            nextTaskEl +
           '</div>' +
         '</div>';
       }).join('');
@@ -2391,13 +2440,26 @@
       return null;
     }
 
-    function openGoal(goalId) {
+    function openGoal(goalId, opts) {
       const goal = state.goals.find(g => g.id === goalId);
       if (!goal) return;
+
+      if (!(opts && opts.fromRouter)) {
+        navigateTo('goal/' + encodeURIComponent(goalId));
+        return;
+      }
+
+      // Close detail panel if open (suppress route — we're already navigating via router)
+      closeDetailPanel({ fromRouter: true });
 
       // Mark latest session as read
       const latest = getGoalLatestSession(goal);
       if (latest) markSessionRead(latest.key);
+
+      // Reset goal chat session if switching goals
+      if (state.currentGoalOpenId !== goalId) {
+        state.goalChatSessionKey = null;
+      }
 
       state.currentView = 'goal';
       state.currentGoalOpenId = goalId;
@@ -2424,14 +2486,16 @@
       const goal = state.goals.find(g => g.id === goalId);
       if (!goal) return;
 
-      // Mark latest session as read
       const latest = getGoalLatestSession(goal);
       if (latest) markSessionRead(latest.key);
+
+      if (state.currentGoalOpenId !== goalId) {
+        state.goalChatSessionKey = null;
+      }
 
       state.goalPanelOpen = true;
       state.currentGoalOpenId = goalId;
 
-      // Show both overview and goal views side by side
       const mainContent = document.querySelector('.main-content');
       mainContent.classList.add('split-view');
       document.getElementById('overviewView').classList.add('active');
@@ -2445,9 +2509,9 @@
 
     function closeGoalView() {
       if (state.goalPanelOpen) {
-        // Close split panel, return to dashboard
         state.goalPanelOpen = false;
         state.currentGoalOpenId = null;
+        state.goalChatSessionKey = null;
         document.querySelector('.main-content').classList.remove('split-view');
         document.getElementById('goalView').classList.remove('active');
         document.getElementById('goalView').classList.remove('panel-mode');
@@ -2457,104 +2521,360 @@
       }
     }
 
+    // ── Goal chat helpers ──
+
+    function getLatestGoalSessionKey(goal) {
+      const keys = Array.isArray(goal && goal.sessions) ? goal.sessions : [];
+      if (!keys.length) return null;
+      const byKey = new Map((state.sessions || []).map(function(s) { return [s.key, s]; }));
+      var best = keys[0], bestT = 0;
+      for (var i = 0; i < keys.length; i++) {
+        var s = byKey.get(keys[i]);
+        var t = Number((s && (s.updatedAt || s.updatedAtMs)) || 0);
+        if (t > bestT) { bestT = t; best = keys[i]; }
+      }
+      return best;
+    }
+
+    function setGoalChatLocked(locked) {
+      var overlay = document.getElementById('goalKickoffOverlay');
+      var composer = document.getElementById('composerMountGoal');
+      if (overlay) overlay.style.display = locked ? 'block' : 'none';
+      if (composer) composer.style.display = locked ? 'none' : 'block';
+      var btns = [document.getElementById('goalOpenBtn')].filter(Boolean);
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].disabled = !!locked;
+        btns[i].style.opacity = locked ? '0.45' : '1';
+        btns[i].style.pointerEvents = locked ? 'none' : 'auto';
+      }
+    }
+
+    function renderGoalHistoryPicker(goal) {
+      var wrap = document.getElementById('goalHistoryWrap');
+      var select = document.getElementById('goalHistorySelect');
+      if (!wrap || !select) return;
+      var sess = Array.isArray(goal && goal.sessions) ? goal.sessions.slice() : [];
+      if (sess.length < 2) { wrap.style.display = 'none'; return; }
+      var byKey = new Map((state.sessions || []).map(function(s) { return [s.key, s]; }));
+      // All values escaped via escapeHtml() — safe against XSS
+      select.innerHTML = sess.map(function(key) {
+        var s = byKey.get(key);
+        var label = s ? getSessionName(s) + ' \u00b7 ' + getSessionMeta(s) : key;
+        return '<option value="' + escapeHtml(key) + '">' + escapeHtml(label) + '</option>';
+      }).join('');
+      var current = state.goalChatSessionKey && sess.includes(state.goalChatSessionKey) ? state.goalChatSessionKey : sess[0];
+      if (current) select.value = current;
+      wrap.style.display = 'flex';
+    }
+
+    function handleGoalHistoryChange(value) {
+      if (!value || value === state.goalChatSessionKey) return;
+      state.goalChatSessionKey = value;
+      renderGoalChat();
+      updateGoalChatMeta();
+      updateGoalSessionStatePill();
+    }
+
+    function updateGoalChatMeta() {
+      var el = document.getElementById('goalChatMeta');
+      if (!el) return;
+      var key = state.goalChatSessionKey;
+      if (!key) { el.textContent = 'No session yet'; return; }
+      var s = (state.sessions || []).find(function(x) { return x.key === key; });
+      el.textContent = s ? getSessionName(s) + ' \u00b7 ' + getSessionMeta(s) : key;
+    }
+
+    function updateGoalSessionStatePill() {
+      var dot = document.getElementById('goalSessionStateDot');
+      var label = document.getElementById('goalSessionStateLabel');
+      if (!dot || !label) return;
+      var key = state.goalChatSessionKey;
+      if (!key) {
+        dot.className = 'session-state-dot blink-idle';
+        label.textContent = 'Not started';
+        return;
+      }
+      var run = state.activeRuns.get(key);
+      if (run) {
+        dot.className = 'session-state-dot blink-thinking';
+        label.textContent = 'Thinking';
+      } else {
+        dot.className = 'session-state-dot blink-idle';
+        label.textContent = 'Idle';
+      }
+    }
+
+    async function renderGoalChat() {
+      var container = document.getElementById('goal_chatMessages');
+      if (!container) return;
+      var sessionKey = state.goalChatSessionKey;
+      if (!sessionKey) {
+        container.innerHTML = '<div class="empty-state" style="padding:24px;">No session selected. Kick off or attach a session to start chatting.</div>';
+        return;
+      }
+      container.innerHTML = '<div class="message system">Loading...</div>';
+      try {
+        var result = await rpcCall('chat.history', { sessionKey: sessionKey, limit: 100 });
+        var messages = (result && result.messages) || [];
+        if (messages.length > 0) {
+          // All user-generated content is escaped via formatMessage/escapeHtml
+          container.innerHTML = messages.map(function(m) {
+            var text = extractText(m.content);
+            if (!text) return '';
+            var timeHtml = m.timestamp ? '<div class="message-time">' + formatMessageTime(new Date(m.timestamp)) + '</div>' : '';
+            if (m.role === 'user') {
+              return '<div class="message user"><div class="message-content">' + formatMessage(text) + '</div>' + timeHtml + '</div>';
+            } else if (m.role === 'assistant') {
+              return '<div class="message assistant"><div class="message-content">' + formatMessage(text) + '</div>' + timeHtml + '</div>';
+            }
+            return '';
+          }).filter(Boolean).join('');
+        } else {
+          container.innerHTML = '<div class="empty-state" style="padding:24px;">No messages yet.</div>';
+        }
+        // Scroll the parent .goal-chat-body (the actual overflow container)
+        var scrollParent = container.parentElement;
+        setTimeout(function() {
+          container.scrollTop = container.scrollHeight;
+          if (scrollParent) scrollParent.scrollTop = scrollParent.scrollHeight;
+        }, 50);
+      } catch (err) {
+        container.innerHTML = '<div class="message system">Error: ' + escapeHtml(err.message) + '</div>';
+      }
+
+      // Render composer
+      renderGoalComposer();
+    }
+
+    function renderGoalComposer() {
+      var mount = document.getElementById('composerMountGoal');
+      if (!mount) return;
+      var sessionKey = state.goalChatSessionKey;
+      if (!sessionKey) { mount.innerHTML = ''; return; }
+      // Static safe HTML — sessionKey escaped
+      mount.innerHTML = '<div class="chat-input-area" style="border-top:1px solid var(--border-subtle);padding:10px 14px;">' +
+        '<div style="display:flex;gap:8px;">' +
+          '<input type="text" class="chat-input" id="goalChatInput" placeholder="Message..." style="flex:1;" onkeypress="if(event.key===\'Enter\')sendGoalMessage()">' +
+          '<button class="send-btn" onclick="sendGoalMessage()" style="padding:8px 16px;">Send</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    async function sendGoalMessage() {
+      var input = document.getElementById('goalChatInput');
+      if (!input) return;
+      var text = input.value.trim();
+      if (!text || !state.goalChatSessionKey) return;
+      input.value = '';
+      try {
+        await rpcCall('chat.send', { sessionKey: state.goalChatSessionKey, message: text });
+        await renderGoalChat();
+      } catch (err) {
+        showToast('Send failed: ' + err.message, 'error');
+      }
+    }
+
+    function openGoalChatInFull() {
+      if (state.goalChatSessionKey) {
+        openSession(state.goalChatSessionKey);
+      }
+    }
+
+    async function kickOffGoal() {
+      var goalId = state.currentGoalOpenId;
+      var goal = state.goals.find(function(g) { return g.id === goalId; });
+      if (!goal) return;
+      try {
+        var condoId = goal.condoId || null;
+        var result = await rpcCall('sessions.create', {
+          agentId: 'main',
+          channelId: 'main',
+          meta: { title: goal.title || 'Goal session' }
+        });
+        var sessionKey = result && result.sessionKey;
+        if (!sessionKey) { showToast('Failed to create session', 'error'); return; }
+        await rpcCall('goals.addSession', { goalId: goalId, sessionKey: sessionKey });
+        if (condoId) {
+          await rpcCall('goals.setSessionCondo', { sessionKey: sessionKey, condoId: condoId });
+        }
+        // Send goal context as first message
+        var msg = 'Goal: ' + (goal.title || '') + '\n';
+        if (goal.notes) msg += '\n' + goal.notes;
+        var tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+        if (tasks.length) {
+          msg += '\n\nTasks:\n' + tasks.map(function(t) { return '- ' + (t.text || ''); }).join('\n');
+        }
+        await rpcCall('chat.send', { sessionKey: sessionKey, message: msg });
+        state.goalChatSessionKey = sessionKey;
+        await loadGoals();
+        renderGoalView();
+      } catch (err) {
+        showToast('Kick-off failed: ' + err.message, 'error');
+      }
+    }
+
+    // ── Goal definition editing ──
+
+    function startGoalDefEdit() {
+      var display = document.getElementById('goalDefDisplay');
+      var edit = document.getElementById('goalDefEdit');
+      var ta = document.getElementById('goalDefTA');
+      if (!display || !edit || !ta) return;
+      var goal = state.goals.find(function(g) { return g.id === state.currentGoalOpenId; });
+      ta.value = (goal && (goal.notes || goal.description)) || '';
+      display.style.display = 'none';
+      edit.style.display = 'block';
+      ta.focus();
+    }
+
+    async function saveGoalDefEdit() {
+      var ta = document.getElementById('goalDefTA');
+      if (!ta) return;
+      var goalId = state.currentGoalOpenId;
+      if (!goalId) return;
+      try {
+        await rpcCall('goals.update', { goalId: goalId, notes: ta.value });
+        await loadGoals();
+        renderGoalView();
+      } catch (err) {
+        showToast('Save failed: ' + err.message, 'error');
+      }
+    }
+
+    function cancelGoalDefEdit() {
+      var display = document.getElementById('goalDefDisplay');
+      var edit = document.getElementById('goalDefEdit');
+      if (display) display.style.display = 'block';
+      if (edit) edit.style.display = 'none';
+    }
+
+    // ── Goal tab switching ──
+
+    function setGoalTab(which) {
+      state.goalTab = which;
+      var tabTasks = document.getElementById('goalTabTasks');
+      var tabFiles = document.getElementById('goalTabFiles');
+      if (tabTasks) tabTasks.classList.toggle('active', which === 'tasks');
+      if (tabFiles) tabFiles.classList.toggle('active', which === 'files');
+      renderGoalPane();
+    }
+
+    function renderGoalPane() {
+      var pane = document.getElementById('goalPane');
+      if (!pane) return;
+      var goal = state.goals.find(function(g) { return g.id === state.currentGoalOpenId; });
+      if (!goal) { pane.innerHTML = ''; return; }
+
+      if (state.goalTab === 'files') {
+        // Tracked files — all values escaped via escapeHtml()
+        var files = Array.isArray(goal.files) ? goal.files : [];
+        if (!files.length) {
+          pane.innerHTML = '<div class="empty-state">No files tracked yet.</div>';
+        } else {
+          pane.innerHTML = files.map(function(f) {
+            var filePath = typeof f === 'string' ? f : (f.path || '');
+            var ext = filePath.split('.').pop().toLowerCase();
+            var source = (typeof f === 'object' && f.source) ? escapeHtml(f.source) : '';
+            var addedAt = (typeof f === 'object' && f.addedAtMs) ? timeAgo(f.addedAtMs) : '';
+            var meta = [source, addedAt].filter(Boolean).join(' \u00b7 ');
+            return '<div class="goal-file-row">' +
+              '<div class="goal-file-icon">' + getFileIcon(ext) + '</div>' +
+              '<div class="goal-file-path" title="' + escapeHtml(filePath) + '">' + escapeHtml(filePath) + '</div>' +
+              '<div class="goal-file-meta">' + meta + '</div>' +
+              '<button class="goal-file-del" onclick="removeGoalFile(\'' + escapeHtml(goal.id) + '\',\'' + escapeHtml(filePath) + '\')" title="Remove">\u00d7</button>' +
+            '</div>';
+          }).join('');
+        }
+      } else {
+        // Tasks
+        var tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+        if (!tasks.length) {
+          pane.innerHTML = '<div class="empty-state">No tasks yet.</div>' +
+            '<div class="goal-task-compose"><input class="chat-input" id="goalNewTaskInput" placeholder="Add a task\u2026" style="flex:1;" onkeypress="if(event.key===\'Enter\')addGoalTask()"><button class="ghost-btn" onclick="addGoalTask()">Add</button></div>';
+        } else {
+          // All values escaped via escapeHtml() — safe against XSS
+          pane.innerHTML = tasks.map(function(t, idx) {
+            var id = escapeHtml(t.id || String(idx));
+            var taskStatus = t.status || (t.done ? 'done' : 'pending');
+            var isDone = t.done || taskStatus === 'done';
+            var hasSession = t.sessionKey ? 'has-session' : '';
+            var spawnBtn = (!t.sessionKey && !isDone)
+              ? '<button class="goal-task-spawn" onclick="event.stopPropagation(); openSpawnTaskModal(\'' + escapeHtml(goal.id) + '\',\'' + id + '\')" title="Spawn agent session">\u25b6</button>'
+              : '';
+            var tooltipParts = [taskStatus];
+            if (t.sessionKey) tooltipParts.push('session: ' + t.sessionKey);
+            if (t.summary) tooltipParts.push(t.summary);
+            var tooltip = escapeHtml(tooltipParts.join(' \u00b7 '));
+            return '<div class="goal-task ' + (isDone ? 'done' : '') + '">' +
+              '<div class="goal-task-status ' + escapeHtml(taskStatus) + ' ' + hasSession + '"' +
+              ' onclick="cycleTaskStatus(\'' + id + '\')"' +
+              ' oncontextmenu="showTaskStatusMenu(event,\'' + id + '\')"' +
+              ' title="' + tooltip + '"></div>' +
+              '<span class="goal-task-text">' + escapeHtml(t.text || '') + '</span>' +
+              spawnBtn +
+              '<button class="goal-task-del" onclick="deleteGoalTask(\'' + id + '\')" title="Delete">\u00d7</button>' +
+            '</div>';
+          }).join('') +
+          '<div class="goal-task-compose"><input class="chat-input" id="goalNewTaskInput" placeholder="Add a task\u2026" style="flex:1;" onkeypress="if(event.key===\'Enter\')addGoalTask()"><button class="ghost-btn" onclick="addGoalTask()">Add</button></div>';
+        }
+      }
+    }
+
     function renderGoalView() {
       const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
       if (!goal) return;
 
-      const status = goal.status || 'active';
-      const pr = goal.priority || '';
-      const deadline = goal.deadline || '';
+      const completed = (goal.status === 'done');
       const { done, total } = goalTaskStats(goal);
 
+      // Right panel header
       document.getElementById('goalHeroTitle').textContent = goal.title || 'Untitled goal';
-      document.getElementById('goalHeroSub').textContent = `${status.toUpperCase()}${pr ? ` · ${pr}` : ''}${deadline ? ` · due ${deadline}` : ''} · ${done}/${total} tasks`;
 
-      const btn = document.getElementById('goalMarkDoneBtn');
-      btn.textContent = status === 'done' ? 'Mark active' : 'Mark done';
-
-      const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
-      const tasksEl = document.getElementById('goalTasks');
-      if (!tasks.length) {
-        tasksEl.innerHTML = `<div class="empty-state">No tasks yet. Add the next physical step.</div>`;
-      } else {
-        // All values are escaped via escapeHtml() before insertion — safe against XSS
-        tasksEl.innerHTML = tasks.map((t, idx) => {
-          const id = escapeHtml(t.id || String(idx));
-          const taskStatus = t.status || (t.done ? 'done' : 'pending');
-          const isDone = t.done || taskStatus === 'done';
-          const hasSession = t.sessionKey ? 'has-session' : '';
-          const spawnBtn = (!t.sessionKey && !isDone)
-            ? `<button class="goal-task-spawn" onclick="event.stopPropagation(); openSpawnTaskModal('${escapeHtml(goal.id)}','${id}')" title="Spawn agent session">▶</button>`
-            : '';
-          const tooltipParts = [taskStatus];
-          if (t.sessionKey) tooltipParts.push('session: ' + t.sessionKey);
-          if (t.summary) tooltipParts.push(t.summary);
-          const tooltip = escapeHtml(tooltipParts.join(' · '));
-          return `
-            <div class="goal-task ${isDone ? 'done' : ''}">
-              <div class="goal-task-status ${escapeHtml(taskStatus)} ${hasSession}"
-                onclick="cycleTaskStatus('${id}')"
-                oncontextmenu="showTaskStatusMenu(event,'${id}')"
-                title="${tooltip}"></div>
-              <span class="goal-task-text">${escapeHtml(t.text || '')}</span>
-              ${spawnBtn}
-              <button class="goal-task-del" onclick="deleteGoalTask('${id}')" title="Delete">×</button>
-            </div>
-          `;
-        }).join('');
-      }
-
-      document.getElementById('goalNotes').value = goal.notes || '';
-      document.getElementById('goalDeadlineInput').value = goal.deadline || '';
-      document.getElementById('goalPriorityInput').value = goal.priority || '';
-
-      const sess = Array.isArray(goal.sessions) ? goal.sessions : [];
-      const sessEl = document.getElementById('goalSessions');
-      if (!sess.length) {
-        sessEl.innerHTML = `<div class="empty-state">No sessions attached. Attach one to keep the work located.</div>`;
-      } else {
-        const byKey = new Map(state.sessions.map(s => [s.key, s]));
-        sessEl.innerHTML = sess.map(k => {
-          const s = byKey.get(k);
-          const name = s ? getSessionName(s) : k;
-          const meta = s ? getSessionMeta(s) : 'unknown';
-          return `
-            <div class="goal-session-row" onclick="openSession('${escapeHtml(k)}')">
-              <div class="goal-session-icon">${s ? getSessionIcon(s) : '💬'}</div>
-              <div class="goal-session-main">
-                <div class="goal-session-name">${escapeHtml(name)}</div>
-                <div class="goal-session-meta">${escapeHtml(meta)}</div>
-              </div>
-              <button class="goal-session-move" onclick="event.stopPropagation(); showAttachSessionModal('${escapeHtml(k)}')" title="Move">⛓</button>
-            </div>
-          `;
-        }).join('');
-      }
-
-      // Tracked files — all values escaped via escapeHtml() before insertion
-      const files = Array.isArray(goal.files) ? goal.files : [];
-      const filesEl = document.getElementById('goalFiles');
-      if (filesEl) {
-        if (!files.length) {
-          filesEl.innerHTML = `<div class="empty-state">No files tracked yet.</div>`;
-        } else {
-          filesEl.innerHTML = files.map(f => {
-            const filePath = typeof f === 'string' ? f : (f.path || '');
-            const ext = filePath.split('.').pop().toLowerCase();
-            const source = (typeof f === 'object' && f.source) ? escapeHtml(f.source) : '';
-            const addedAt = (typeof f === 'object' && f.addedAtMs) ? timeAgo(f.addedAtMs) : '';
-            const meta = [source, addedAt].filter(Boolean).join(' \u00b7 ');
-            return `
-              <div class="goal-file-row">
-                <div class="goal-file-icon">${getFileIcon(ext)}</div>
-                <div class="goal-file-path" title="${escapeHtml(filePath)}">${escapeHtml(filePath)}</div>
-                <div class="goal-file-meta">${meta}</div>
-                <button class="goal-file-del" onclick="removeGoalFile('${escapeHtml(goal.id)}','${escapeHtml(filePath)}')" title="Remove">\u00d7</button>
-              </div>
-            `;
-          }).join('');
+      var condoNameEl = document.getElementById('goalCondoName');
+      if (condoNameEl) {
+        var condoName = 'Condo';
+        if (goal.condoId) {
+          var condo = (state.condos || []).find(function(c) { return c.id === goal.condoId; });
+          condoName = condo ? (condo.name || goal.condoId) : (goal.condoId.split(':').pop() || 'Condo');
         }
+        condoNameEl.textContent = condoName;
       }
+
+      var lastEl = document.getElementById('goalLastUpdated');
+      if (lastEl) lastEl.textContent = timeAgo(goal.updatedAtMs || goal.updatedAt || goal.createdAtMs || Date.now());
+
+      var btn = document.getElementById('goalMarkDoneBtn');
+      if (btn) btn.textContent = completed ? 'Mark active' : 'Mark done';
+
+      // Definition display
+      var defDisplay = document.getElementById('goalDefDisplay');
+      var notes = ((goal.notes || goal.description) || '').trim();
+      if (defDisplay) {
+        // Notes rendered via formatMessage (markdown), safe HTML
+        defDisplay.innerHTML = notes
+          ? '<div class="goal-def-rendered">' + formatMessage(notes) + '</div><small>(click to edit)</small>'
+          : 'Click to add a definition\u2026 <small>(click to edit)</small>';
+        defDisplay.style.display = 'block';
+      }
+      var defEdit = document.getElementById('goalDefEdit');
+      if (defEdit) defEdit.style.display = 'none';
+
+      // Goal chat: select latest session
+      var sess = Array.isArray(goal.sessions) ? goal.sessions : [];
+      var latestKey = getLatestGoalSessionKey(goal);
+      if (!state.goalChatSessionKey || !sess.includes(state.goalChatSessionKey)) {
+        state.goalChatSessionKey = latestKey;
+      }
+      setGoalChatLocked(!state.goalChatSessionKey);
+
+      updateGoalChatMeta();
+      renderGoalHistoryPicker(goal);
+      updateGoalSessionStatePill();
+      renderGoalChat();
+
+      // Tabs + pane
+      if (!state.goalTab) state.goalTab = 'tasks';
+      setGoalTab(state.goalTab);
     }
 
     function getFileIcon(ext) {
@@ -2783,17 +3103,7 @@
     }
 
     async function saveGoalNow() {
-      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
-      if (!goal) return;
-      const notes = document.getElementById('goalNotes').value;
-      const deadline = document.getElementById('goalDeadlineInput').value.trim();
-      const priority = document.getElementById('goalPriorityInput').value || null;
-      await updateGoal(goal.id, { notes, deadline: deadline || null, priority });
-      const hint = document.getElementById('goalSaveHint');
-      if (hint) {
-        hint.textContent = 'Saved';
-        hint.classList.remove('saving');
-      }
+      // Notes are now saved through saveGoalDefEdit()
     }
 
     async function promptDeleteGoal() {
@@ -4294,18 +4604,31 @@ Response format:
     }
     
     function goBack() {
-      showOverview();
+      if (window.history.length > 1) {
+        history.back();
+      } else {
+        showOverview();
+      }
     }
     
     // ═══════════════════════════════════════════════════════════════
     // VIEWS
     // ═══════════════════════════════════════════════════════════════
-    function showOverview() {
+    function showOverview(opts) {
+      if (!(opts && opts.fromRouter)) {
+        navigateTo('dashboard');
+        return;
+      }
+
       state.currentView = 'overview';
       state.currentSession = null;
       state.goalPanelOpen = false;
       state.currentGoalOpenId = null;
+      state.goalChatSessionKey = null;
       localStorage.removeItem('sharp_current_session');
+
+      // Close detail panel if open (suppress route push since we're already routing)
+      closeDetailPanel({ fromRouter: true });
 
       document.getElementById('overviewView').classList.add('active');
       document.getElementById('chatView').classList.remove('active');
@@ -4323,16 +4646,125 @@ Response format:
       closeSidebar();
     }
     
-    async function openSession(key) {
+    // ═══════════════════════════════════════════════════════════════
+    // SESSION DETAIL PANEL (inline third column)
+    // ═══════════════════════════════════════════════════════════════
+    async function openDetailPanel(sessionKey, opts) {
+      const session = state.sessions.find(s => s.key === sessionKey);
+      if (!session) return;
+
+      if (!(opts && opts.fromRouter)) {
+        navigateTo('detail/' + encodeURIComponent(sessionKey));
+        return;
+      }
+
+      state.detailPanelSessionKey = sessionKey;
+      markSessionRead(sessionKey);
+
+      document.getElementById('detailPanelTitle').textContent = getSessionName(session);
+      document.querySelector('.main-content').classList.add('detail-open');
+
+      const chatContainer = document.getElementById('detailChatMessages');
+      // Static safe HTML — no user content
+      chatContainer.innerHTML = '<div class="message system">Loading...</div>';
+
+      try {
+        const result = await rpcCall('chat.history', { sessionKey: sessionKey, limit: 50 });
+        const messages = result?.messages || [];
+        if (messages.length > 0) {
+          renderDetailChatHistory(chatContainer, messages);
+        } else {
+          // Static safe HTML — no user content
+          chatContainer.innerHTML = '<div class="message system">No messages yet</div>';
+        }
+        // Scroll to bottom — try both container and parent for reliability
+        setTimeout(function() {
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+          if (chatContainer.parentElement) chatContainer.parentElement.scrollTop = chatContainer.parentElement.scrollHeight;
+        }, 50);
+      } catch (err) {
+        chatContainer.innerHTML = '<div class="message system">Error: ' + escapeHtml(err.message) + '</div>';
+      }
+
+      // Add composer for sending messages
+      renderDetailComposer(sessionKey);
+    }
+
+    function closeDetailPanel(opts) {
+      if (!state.detailPanelSessionKey) return;
+      state.detailPanelSessionKey = null;
+      document.querySelector('.main-content').classList.remove('detail-open');
+      document.getElementById('detailChatMessages').innerHTML = '';
+      document.getElementById('detailComposerMount').innerHTML = '';
+      // Navigate back to dashboard (unless called from router)
+      if (!(opts && opts.fromRouter)) {
+        navigateTo('dashboard', true);
+      }
+    }
+
+    function renderDetailChatHistory(container, messages) {
+      // All user-generated content is escaped via escapeHtml() before insertion
+      container.innerHTML = messages.map(function(m, idx) {
+        var text = extractText(m.content);
+        if (!text) return '';
+        var timeHtml = m.timestamp ? '<div class="message-time">' + formatMessageTime(new Date(m.timestamp)) + '</div>' : '';
+        if (m.role === 'user') {
+          return '<div class="message user"><div class="message-content">' + formatMessage(text) + '</div>' + timeHtml + '</div>';
+        } else if (m.role === 'assistant') {
+          return '<div class="message assistant"><div class="message-content">' + formatMessage(text) + '</div>' + timeHtml + '</div>';
+        }
+        return '';
+      }).filter(Boolean).join('');
+    }
+
+    function renderDetailComposer(sessionKey) {
+      var mount = document.getElementById('detailComposerMount');
+      // All values are escaped or static
+      mount.innerHTML = '<div class="chat-input-area" style="border-top:1px solid var(--border-subtle);padding:var(--space-md) var(--space-lg);">' +
+        '<div style="display:flex;gap:8px;">' +
+          '<input type="text" class="chat-input" id="detailChatInput" placeholder="Message..." style="flex:1;" onkeypress="if(event.key===\'Enter\')sendDetailMessage(\'' + escapeHtml(sessionKey) + '\')">' +
+          '<button class="send-btn" onclick="sendDetailMessage(\'' + escapeHtml(sessionKey) + '\')" style="padding:8px 16px;">Send</button>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px;margin-top:6px;">' +
+          '<button class="ghost-btn" onclick="openSession(\'' + escapeHtml(sessionKey) + '\')" style="font-size:11px;color:var(--text-dim);background:none;border:none;cursor:pointer;padding:2px 0;">Open full view</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    async function sendDetailMessage(sessionKey) {
+      var input = document.getElementById('detailChatInput');
+      if (!input) return;
+      var text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+
+      try {
+        await rpcCall('chat.send', { sessionKey: sessionKey, message: text });
+        // Reload panel chat (suppress route push — just a refresh)
+        await openDetailPanel(sessionKey, { fromRouter: true });
+      } catch (err) {
+        console.error('[ClawCondos] Detail send error:', err);
+      }
+    }
+
+    async function openSession(key, opts) {
       const session = state.sessions.find(s => s.key === key);
       if (!session) return;
-      
+
+      if (!(opts && opts.fromRouter)) {
+        navigateTo('session/' + encodeURIComponent(key));
+        return;
+      }
+
+      // Close detail panel if open (suppress route — already navigating via router)
+      closeDetailPanel({ fromRouter: true });
+
       // Save to localStorage for restore on refresh
       localStorage.setItem('sharp_current_session', key);
-      
+
       // Mark session as read
       markSessionRead(key);
-      
+
       // Clear tool activity from previous session
       clearAllTools();
       
@@ -5458,10 +5890,7 @@ Response format:
     // OVERVIEW
     // ═══════════════════════════════════════════════════════════════
     function updateOverview() {
-      renderCondoStatusBoard();
       renderRecentSessions();
-      renderAppsGrid();
-      renderSubagentsGrid();
       updateStatsGrid();
     }
 
@@ -5598,33 +6027,36 @@ Response format:
       const countEl = document.getElementById('recentSessionCount');
       if (!container || !section) return;
 
-      // Sessions NOT assigned to any goal (orphans), excluding subagents
-      const assignedKeys = new Set();
-      (state.goals || []).forEach(g => (g.sessions || []).forEach(k => assignedKeys.add(k)));
-
-      const orphanSessions = state.sessions
-        .filter(s => !s.key.includes(':subagent:') && !assignedKeys.has(s.key))
+      // Show ALL recent sessions (top 20), sorted by updatedAt, excluding subagents
+      const recentSessions = state.sessions
+        .filter(s => !s.key.includes(':subagent:'))
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-        .slice(0, 12);
+        .slice(0, 20);
 
-      if (countEl) countEl.textContent = orphanSessions.length;
+      if (countEl) countEl.textContent = recentSessions.length;
 
-      if (!orphanSessions.length) {
-        section.style.display = 'none';
+      if (!recentSessions.length) {
+        // Static safe HTML — no user content
+        container.innerHTML = '<div class="session-card" style="border-style:dashed;opacity:.6"><div class="card-top"><div class="card-icon">\uD83D\uDCAC</div><div class="card-info"><div class="card-name">No recent sessions</div><div class="card-desc">Start a conversation to see it here</div></div></div></div>';
         return;
       }
 
-      section.style.display = 'block';
-
-      // All user content escaped via escapeHtml()
-      container.innerHTML = orphanSessions.map(function(s) {
+      // All user-generated content is escaped via escapeHtml() before insertion
+      container.innerHTML = recentSessions.map(function(s) {
         var preview = getMessagePreview(s);
         var agentStatus = getAgentStatus(s.key);
         var tooltip = getStatusTooltip(agentStatus);
         var hasUnread = isSessionUnread(s.key);
         var needsInput = hasUnread && (agentStatus === 'idle' || agentStatus === 'error');
         var attentionClass = needsInput ? 'needs-input' : (hasUnread ? 'unread' : '');
-        return '<div class="session-card ' + (attentionClass ? 'card-attention-' + attentionClass : '') + '" onclick="openSession(\'' + escapeHtml(s.key) + '\')">' +
+
+        // Show condo badge if session belongs to a goal
+        var goal = getGoalForSession(s.key);
+        var condoBadge = goal
+          ? '<span class="card-badge goal" onclick="event.stopPropagation(); openGoal(\'' + escapeHtml(goal.id) + '\')">' + escapeHtml(goal.condoName || goal.title || 'Goal') + '</span>'
+          : '';
+
+        return '<div class="session-card ' + (attentionClass ? 'card-attention-' + attentionClass : '') + '" onclick="openDetailPanel(\'' + escapeHtml(s.key) + '\')">' +
           '<div class="card-top">' +
             (attentionClass ? '<div class="card-attention ' + attentionClass + '"></div>' : '') +
             '<div class="card-icon">' + getSessionIcon(s) + '</div>' +
@@ -5637,19 +6069,21 @@ Response format:
           (preview ? '<div class="card-preview">' + escapeHtml(preview) + '</div>' : '') +
           '<div class="card-footer">' +
             '<span>' + timeAgo(s.updatedAt) + '</span>' +
-            '<span class="card-badge">' + (s.totalTokens || 0).toLocaleString() + ' tokens</span>' +
+            '<span class="card-footer-right">' + condoBadge + '<span class="card-badge">' + (s.totalTokens || 0).toLocaleString() + ' tokens</span></span>' +
           '</div>' +
         '</div>';
       }).join('');
     }
 
     // Keep old function names as aliases for straggling call sites
-    function renderGoalsGrid() { renderCondoStatusBoard(); }
-    function renderSessionsGrid() { renderCondoStatusBoard(); renderRecentSessions(); }
+    function renderGoalsGrid() { renderRecentSessions(); }
+    function renderSessionsGrid() { renderRecentSessions(); }
     
     function renderAppsGrid() {
       const container = document.getElementById('appsGrid');
-      document.getElementById('appCount').textContent = state.apps.length;
+      if (!container) return;
+      const countEl = document.getElementById('appCount');
+      if (countEl) countEl.textContent = state.apps.length;
       
       if (state.apps.length === 0) {
         container.innerHTML = `
@@ -5707,8 +6141,10 @@ Response format:
       const subagents = state.sessions.filter(s => s.key.includes(':subagent:'));
       const section = document.getElementById('subagentsSection');
       const container = document.getElementById('subagentsGrid');
-      document.getElementById('taskCount').textContent = subagents.length;
-      
+      if (!section || !container) return;
+      const countEl = document.getElementById('taskCount');
+      if (countEl) countEl.textContent = subagents.length;
+
       if (subagents.length === 0) {
         section.style.display = 'none';
         return;
@@ -5768,7 +6204,9 @@ Response format:
     // ═══════════════════════════════════════════════════════════════
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (state.goalPanelOpen) {
+        if (state.detailPanelSessionKey) {
+          closeDetailPanel();
+        } else if (state.goalPanelOpen) {
           closeGoalView();
         } else if (state.currentView === 'chat') {
           showOverview();
@@ -5779,6 +6217,78 @@ Response format:
     });
     
     // ═══════════════════════════════════════════════════════════════
+    // HASH ROUTER (deep links + back/forward)
+    // ═══════════════════════════════════════════════════════════════
+    function navigateTo(path, replace) {
+      var clean = String(path || '').replace(/^#\/?/, '').replace(/^\//, '');
+      var url = '#/' + clean;
+      if (window.location.hash === url) { handleRoute(); return; }
+      if (replace) {
+        history.replaceState({ path: clean }, '', url);
+      } else {
+        history.pushState({ path: clean }, '', url);
+      }
+      handleRoute();
+    }
+
+    function handleRoute() {
+      var raw = (window.location.hash || '').replace('#/', '');
+      var slashIdx = raw.indexOf('/');
+      var route = slashIdx === -1 ? raw : raw.substring(0, slashIdx);
+      var payload = slashIdx === -1 ? '' : raw.substring(slashIdx + 1);
+
+      switch (route || 'dashboard') {
+        case 'goal':
+          if (payload) {
+            var goalId = decodeURIComponent(payload);
+            closeDetailPanel({ fromRouter: true });
+            if (state.goals.length) {
+              openGoal(goalId, { fromRouter: true });
+            } else {
+              state.pendingRouteGoalId = goalId;
+            }
+          } else {
+            showOverview({ fromRouter: true });
+          }
+          break;
+        case 'session':
+          if (payload) {
+            var sessionKey = decodeURIComponent(payload);
+            closeDetailPanel({ fromRouter: true });
+            if (state.sessions.find(function(s) { return s.key === sessionKey; })) {
+              openSession(sessionKey, { fromRouter: true });
+            } else {
+              state.pendingRouteSessionKey = sessionKey;
+            }
+          } else {
+            showOverview({ fromRouter: true });
+          }
+          break;
+        case 'detail':
+          if (payload) {
+            var detailKey = decodeURIComponent(payload);
+            // Ensure we're on the dashboard first
+            if (state.currentView !== 'overview') {
+              showOverview({ fromRouter: true });
+            }
+            if (state.sessions.find(function(s) { return s.key === detailKey; })) {
+              openDetailPanel(detailKey, { fromRouter: true });
+            } else {
+              state.pendingRouteDetailKey = detailKey;
+            }
+          } else {
+            showOverview({ fromRouter: true });
+          }
+          break;
+        case 'dashboard':
+        default:
+          closeDetailPanel({ fromRouter: true });
+          showOverview({ fromRouter: true });
+          break;
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // INIT
     // ═══════════════════════════════════════════════════════════════
     function init() {
@@ -5787,7 +6297,10 @@ Response format:
       initGoalTimeFilterUI();
 
       connectWebSocket();
-      
+
+      // Hash router: back/forward navigation
+      window.addEventListener('hashchange', function() { handleRoute(); });
+
       // Auto-refresh sessions every 30s
       setInterval(() => {
         if (state.connected) {
@@ -5795,7 +6308,7 @@ Response format:
         }
       }, 30000);
     }
-    
+
     init();
   </script>
   

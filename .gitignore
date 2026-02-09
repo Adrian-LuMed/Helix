@@ -11,6 +11,7 @@
 
 # Local runtime registry/data
 .registry/
+.data/
 
 # User apps (built separately)
 apps/

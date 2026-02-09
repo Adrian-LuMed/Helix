@@ -13,16 +13,19 @@ import { join, extname, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
-import { homedir } from 'os';
+import os from 'os';
 import { rewriteConnectFrame, validateStaticPath, isDotfilePath, filterProxyHeaders, stripSensitiveHeaders } from './lib/serve-helpers.js';
 import { createGatewayClient } from './lib/gateway-client.js';
-import { filterGoals, filterSessions } from './lib/search.js';
+import { filterGoals, filterSessions, crossRefFileWithGoals } from './lib/search.js';
+import { createEmbeddingProvider } from './lib/embedding-provider.js';
+import { createMemorySearch } from './lib/memory-search.js';
+import { createChatIndex } from './lib/chat-index.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
-// Auto-load env file if GATEWAY_AUTH not already set (e.g. running outside systemd)
+// Auto-load env file (fills in any vars not already set in the environment)
 const ENV_FILE = join(process.env.HOME || '', '.config', 'clawcondos.env');
-if (!process.env.GATEWAY_AUTH && existsSync(ENV_FILE)) {
+if (existsSync(ENV_FILE)) {
   for (const line of readFileSync(ENV_FILE, 'utf-8').split('\n')) {
     const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
@@ -449,7 +452,7 @@ function getGatewayWsUrl() {
 function getGatewayPassword() {
   if (process.env.GATEWAY_PASSWORD) return process.env.GATEWAY_PASSWORD;
   try {
-    const confPath = join(homedir(), '.openclaw', 'openclaw.json');
+    const confPath = join(os.homedir(), '.openclaw', 'openclaw.json');
     const conf = JSON.parse(readFileSync(confPath, 'utf-8'));
     return conf?.gateway?.auth?.password || '';
   } catch {
@@ -463,6 +466,39 @@ const gatewayClient = createGatewayClient({
   getAuth: () => process.env.GATEWAY_AUTH || '',
   getPassword: getGatewayPassword
 });
+
+// ── Deep search backends ──
+const embeddingProvider = createEmbeddingProvider({
+  provider: process.env.CLAWCONDOS_EMBEDDING_PROVIDER || 'openai',
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+const memorySearch = createMemorySearch({
+  stateDir: process.env.OPENCLAW_STATE_DIR || join(os.homedir(), '.openclaw'),
+  embeddingProvider,
+  logger: console,
+});
+
+try { memorySearch.init(); } catch (err) {
+  console.error('[memory-search] Init failed:', err.message);
+}
+
+const chatIndex = createChatIndex({
+  dbPath: join(__dirname, '.data', 'chat-index.db'),
+  embeddingProvider,
+  logger: console,
+});
+
+try {
+  chatIndex.init();
+  // Initial background sync (non-blocking)
+  chatIndex.sync(gatewayClient).catch(err => console.error('[chat-index] Initial sync failed:', err.message));
+  // Schedule recurring sync
+  const syncInterval = parseInt(process.env.CLAWCONDOS_SEARCH_SYNC_INTERVAL_MS) || 300000;
+  chatIndex.startBackgroundSync(gatewayClient, syncInterval);
+} catch (err) {
+  console.error('[chat-index] Init failed:', err.message);
+}
 
 // Session cache for search (3s TTL to avoid hammering gateway on rapid keystrokes)
 let _sessionCache = null;
@@ -609,11 +645,35 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // API: Search status
+  // GET /api/search/status
+  if (pathname === '/api/search/status' && req.method === 'GET') {
+    const chatStats = chatIndex.getStats();
+    const memoryDbs = memorySearch.getAgentDbs();
+    json(res, 200, {
+      ok: true,
+      chatIndex: chatStats,
+      memoryDbs,
+      embeddingProvider: embeddingProvider.getProviderName(),
+      embeddingAvailable: embeddingProvider.isAvailable(),
+    });
+    return;
+  }
+
+  // API: Force reindex
+  // POST /api/search/reindex
+  if (pathname === '/api/search/reindex' && req.method === 'POST') {
+    chatIndex.sync(gatewayClient).catch(err => console.error('[chat-index] Reindex failed:', err.message));
+    json(res, 200, { ok: true, message: 'Reindex started' });
+    return;
+  }
+
   // API: Search goals and sessions (ClawCondos)
-  // GET /api/search?q=<query>&limit=<max>
+  // GET /api/search?q=<query>&limit=<max>&mode=fast|deep|auto
   if (pathname === '/api/search' && req.method === 'GET') {
     const q = (url.searchParams.get('q') || '').trim();
     const limit = Math.min(parseInt(url.searchParams.get('limit')) || 100, 200);
+    const requestedMode = url.searchParams.get('mode') || 'fast';
     if (!q) {
       json(res, 400, { ok: false, error: 'q parameter is required' });
       return;
@@ -622,13 +682,22 @@ const server = createServer(async (req, res) => {
       json(res, 400, { ok: false, error: 'Query too long (max 500 chars)' });
       return;
     }
+
+    // Determine effective mode
+    let mode = requestedMode;
+    if (mode === 'auto') {
+      const chatStats = chatIndex.getStats();
+      mode = (chatStats.initialized && chatStats.sessionCount > 0 && q.split(/\s+/).length > 1) ? 'deep' : 'fast';
+    }
+
     try {
+      // Always run fast search (metadata-based)
       const [goalsRes, sessionsRes] = await Promise.allSettled([
         gatewayClient.rpcCall('goals.list', {}),
         getCachedSessions(500)
       ]);
-      const goals = goalsRes.status === 'fulfilled'
-        ? filterGoals(goalsRes.value?.goals || [], q).slice(0, limit) : [];
+      const allGoals = goalsRes.status === 'fulfilled' ? (goalsRes.value?.goals || []) : [];
+      const goals = filterGoals(allGoals, q).slice(0, limit);
       const allSessionsList = sessionsRes.status === 'fulfilled' ? (sessionsRes.value || []) : [];
       const filteredSessions = sessionsRes.status === 'fulfilled'
         ? filterSessions(allSessionsList, q).slice(0, limit) : [];
@@ -636,7 +705,6 @@ const server = createServer(async (req, res) => {
       if (sessionsRes.status === 'rejected') console.error('[search] sessions.list failed:', sessionsRes.reason?.message);
 
       // Enrich sessions with goal/condo info and subagent detection
-      const allGoals = goalsRes.status === 'fulfilled' ? (goalsRes.value?.goals || []) : [];
       function enrichSession(s) {
         s.isSubagent = s.key.includes(':subagent:');
         if (s.isSubagent) {
@@ -672,7 +740,65 @@ const server = createServer(async (req, res) => {
         }
       }
 
-      json(res, 200, { ok: true, query: q, goals, sessions: filteredSessions });
+      // Deep search: query both memory DBs and chat index
+      let files = [];
+      let deepSessions = [];
+      if (mode === 'deep') {
+        const [memoryRes, chatRes] = await Promise.allSettled([
+          memorySearch.search(q, { limit }),
+          chatIndex.search(q, { limit }),
+        ]);
+
+        if (memoryRes.status === 'fulfilled' && memoryRes.value.length > 0) {
+          files = memoryRes.value.map(r => {
+            const ref = crossRefFileWithGoals(r.path, allGoals);
+            return {
+              path: r.path,
+              agentId: r.agentId,
+              score: r.score,
+              snippet: r.snippet,
+              startLine: r.startLine,
+              endLine: r.endLine,
+              sessionKey: ref?.sessionKey || null,
+              goalId: ref?.goalId || null,
+              goalTitle: ref?.goalTitle || null,
+            };
+          });
+        }
+        if (memoryRes.status === 'rejected') console.error('[search] memory search failed:', memoryRes.reason?.message);
+
+        if (chatRes.status === 'fulfilled' && chatRes.value.length > 0) {
+          deepSessions = chatRes.value;
+          // Merge deep session results with fast results (avoid duplicates)
+          for (const ds of deepSessions) {
+            if (!filteredKeys.has(ds.sessionKey)) {
+              const sessionData = sessionsByKey.get(ds.sessionKey);
+              const merged = {
+                key: ds.sessionKey,
+                displayName: ds.displayName || sessionData?.displayName || '',
+                label: sessionData?.label || '',
+                score: ds.score,
+                snippet: ds.snippet,
+                source: 'chat',
+              };
+              enrichSession(merged);
+              filteredSessions.push(merged);
+              filteredKeys.add(ds.sessionKey);
+            } else {
+              // Add snippet/score to existing result
+              const existing = filteredSessions.find(s => s.key === ds.sessionKey);
+              if (existing && !existing.snippet) {
+                existing.snippet = ds.snippet;
+                existing.score = ds.score;
+                existing.source = 'chat';
+              }
+            }
+          }
+        }
+        if (chatRes.status === 'rejected') console.error('[search] chat index search failed:', chatRes.reason?.message);
+      }
+
+      json(res, 200, { ok: true, query: q, mode, goals, sessions: filteredSessions, files });
     } catch (err) {
       console.error('[search] Error:', err.message, err.stack);
       json(res, 500, { ok: false, error: 'Internal search error' });
@@ -1071,6 +1197,12 @@ function shutdown() {
   console.log('\n[shutdown] Closing gateway client...');
   try { gatewayClient.close(); } catch (e) {
     console.error('[shutdown] Error closing gateway client:', e.message);
+  }
+  try { memorySearch.close(); } catch (e) {
+    console.error('[shutdown] Error closing memory search:', e.message);
+  }
+  try { chatIndex.close(); } catch (e) {
+    console.error('[shutdown] Error closing chat index:', e.message);
   }
   try { unwatchFile(GOALS_FILE); } catch (e) {
     console.error('[shutdown] Error unwatching goals file:', e.message);

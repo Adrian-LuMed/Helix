@@ -525,10 +525,12 @@
         <div class="search-view-bar">
           <span class="search-view-icon">&#x1F50D;</span>
           <input type="text" class="form-input search-view-input" id="searchViewInput"
-                 placeholder="Search goals and sessions..."
+                 placeholder="Search goals, sessions, and files..."
                  oninput="onSearchViewInput()"
                  onkeydown="handleSearchViewKey(event)">
           <span class="search-view-count" id="searchViewCount"></span>
+          <button class="search-mode-toggle" id="searchModeToggle" onclick="toggleSearchMode()" title="Toggle search mode"></button>
+          <span class="search-status-dot" id="searchStatusDot" onclick="showSearchStatus()" title="Index status"></span>
           <button class="ghost-btn" onclick="closeSearchView()" title="Close (Esc)" style="background:none;border:none;color:var(--text-dim);font-size:1.1rem;cursor:pointer;padding:4px 8px;">&#x2715;</button>
         </div>
         <div class="search-view-results" id="searchViewResults"></div>
@@ -1253,8 +1255,8 @@
     }
     
     function handleWsMessage(msg) {
-      // Debug: log all incoming messages
-      if (msg.type === 'event') {
+      // Debug: log non-noisy events (skip cron churn)
+      if (msg.type === 'event' && msg.event !== 'cron') {
         console.log('[ClawCondos] WS Event:', msg.event, msg.payload ? JSON.stringify(msg.payload).slice(0, 200) : '');
       }
       
@@ -6249,6 +6251,81 @@ Response format:
     let _searchResults = []; // flat array of { type, data }
     let _searchPreviousView = null; // remember where to go back
     let _searchChecked = new Set(); // selected session keys for batch actions
+    let _lastCheckedIdx = -1; // last checkbox index for shift-range selection
+    let _searchMode = 'fast'; // 'fast' or 'deep'
+    let _searchStatusCache = null;
+
+    function toggleSearchMode() {
+      _searchMode = _searchMode === 'fast' ? 'deep' : 'fast';
+      updateSearchModeToggle();
+      // Re-run search with new mode if there's a query
+      var query = document.getElementById('searchViewInput').value.trim();
+      if (query) onSearchViewInput();
+    }
+
+    function updateSearchModeToggle() {
+      var btn = document.getElementById('searchModeToggle');
+      if (_searchMode === 'deep') {
+        btn.textContent = '\uD83D\uDD2C Deep';
+        btn.title = 'Deep search (files + conversations). Click for fast mode.';
+        btn.classList.add('active');
+      } else {
+        btn.textContent = '\u26A1 Fast';
+        btn.title = 'Fast search (metadata only). Click for deep mode.';
+        btn.classList.remove('active');
+      }
+    }
+
+    function fetchSearchStatus() {
+      fetch('/api/search/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.ok) {
+            _searchStatusCache = data;
+            updateSearchStatusDot();
+          }
+        })
+        .catch(function() {});
+    }
+
+    function updateSearchStatusDot() {
+      var dot = document.getElementById('searchStatusDot');
+      if (!_searchStatusCache) {
+        dot.className = 'search-status-dot gray';
+        dot.title = 'Index status: unknown';
+        return;
+      }
+      var s = _searchStatusCache;
+      var ci = s.chatIndex || {};
+      if (ci.syncing) {
+        dot.className = 'search-status-dot yellow';
+        dot.title = 'Syncing chat index...';
+      } else if (ci.initialized && ci.sessionCount > 0) {
+        dot.className = 'search-status-dot green';
+        dot.title = ci.sessionCount + ' sessions indexed, ' + (s.memoryDbs || []).length + ' memory DBs';
+      } else {
+        dot.className = 'search-status-dot gray';
+        dot.title = 'Index not ready';
+      }
+    }
+
+    function showSearchStatus() {
+      fetchSearchStatus();
+      if (!_searchStatusCache) return;
+      var s = _searchStatusCache;
+      var ci = s.chatIndex || {};
+      var parts = [];
+      parts.push('Chat Index: ' + (ci.sessionCount || 0) + ' sessions, ' + (ci.chunkCount || 0) + ' chunks');
+      parts.push('Memory DBs: ' + ((s.memoryDbs || []).length));
+      if (s.memoryDbs) {
+        s.memoryDbs.forEach(function(db) {
+          parts.push('  ' + db.agentId + ' (' + (db.sizeBytes / 1024 / 1024).toFixed(1) + 'MB, fts=' + db.hasFts + ')');
+        });
+      }
+      parts.push('Embeddings: ' + s.embeddingProvider + ' (' + (s.embeddingAvailable ? 'available' : 'unavailable') + ')');
+      if (ci.lastSync) parts.push('Last sync: ' + timeAgo(ci.lastSync));
+      alert(parts.join('\n'));
+    }
 
     function openSearchView() {
       // Remember current view to restore on close
@@ -6276,7 +6353,10 @@ Response format:
       _searchSelectedIdx = -1;
       _searchResults = [];
       _searchChecked.clear();
+      _lastCheckedIdx = -1;
       updateSearchSelectionBar();
+      updateSearchModeToggle();
+      fetchSearchStatus();
       showSearchRecentItems();
     }
 
@@ -6325,7 +6405,8 @@ Response format:
 
       _searchDebounceTimer = setTimeout(() => {
         const reqId = ++_searchRequestId;
-        fetch('/api/search?q=' + encodeURIComponent(query) + '&limit=100')
+        var searchUrl = '/api/search?q=' + encodeURIComponent(query) + '&limit=100&mode=' + _searchMode;
+        fetch(searchUrl)
           .then(r => {
             if (!r.ok && !r.headers.get('content-type')?.includes('application/json')) {
               throw new Error('Search request failed with status ' + r.status);
@@ -6335,7 +6416,7 @@ Response format:
           .then(data => {
             if (reqId !== _searchRequestId) return;
             if (data.ok) {
-              renderSearchResults(data.goals || [], data.sessions || [], false);
+              renderSearchResults(data.goals || [], data.sessions || [], false, data.files || [], query);
             } else {
               showSearchViewError(data.error || 'Search failed');
             }
@@ -6345,7 +6426,7 @@ Response format:
             if (reqId !== _searchRequestId) return;
             showSearchViewError('Search unavailable');
           });
-      }, 200);
+      }, _searchMode === 'deep' ? 400 : 200);
     }
 
     function showSearchViewError(msg) {
@@ -6366,12 +6447,13 @@ Response format:
       return null;
     }
 
-    function renderSearchResults(goals, sessions, isRecent) {
+    function renderSearchResults(goals, sessions, isRecent, files, query) {
       _searchResults = [];
       const container = document.getElementById('searchViewResults');
       container.textContent = '';
       const goalLabel = isRecent ? 'Recent Goals' : 'Goals';
       const sessionLabel = isRecent ? 'Recent Sessions' : 'Sessions';
+      files = files || [];
 
       // Goals section
       if (goals.length > 0) {
@@ -6478,11 +6560,69 @@ Response format:
         });
       }
 
+      // Files section (from memory DB deep search)
+      if (files.length > 0) {
+        var fheader = document.createElement('div');
+        fheader.className = 'search-view-section';
+        fheader.textContent = 'Files';
+        container.appendChild(fheader);
+
+        files.forEach(function(f) {
+          var idx = _searchResults.length;
+          _searchResults.push({ type: 'file', data: f });
+          var fileIcon = getFileIconForSearch(f.path);
+          var basename = f.path.split('/').pop();
+          var dir = f.path.split('/').slice(0, -1).join('/');
+          var metaParts = [];
+          if (f.agentId) metaParts.push(f.agentId);
+          if (f.startLine && f.endLine) metaParts.push('L' + f.startLine + '-' + f.endLine);
+          if (f.goalTitle) metaParts.push('\uD83C\uDFAF ' + f.goalTitle);
+          if (f.score) metaParts.push(Math.round(f.score * 100) + '%');
+          var row = buildSearchRow(idx, fileIcon, basename, metaParts.join(' \u00B7 '), false, f.sessionKey);
+          // Add snippet line (escapeHtml first, then highlight with safe mark tags)
+          if (f.snippet && query) {
+            var snippetEl = document.createElement('div');
+            snippetEl.className = 'search-row-snippet';
+            snippetEl.textContent = f.snippet.slice(0, 200);
+            highlightSearchTermsInElement(snippetEl, query);
+            row.querySelector('.search-row-info').appendChild(snippetEl);
+          }
+          // Add directory path
+          if (dir) {
+            var dirEl = document.createElement('div');
+            dirEl.className = 'search-row-dir';
+            dirEl.textContent = dir;
+            row.querySelector('.search-row-info').appendChild(dirEl);
+          }
+          container.appendChild(row);
+        });
+      }
+
+      // Add snippets to session rows if available
+      if (!isRecent && query) {
+        sessions.forEach(function(s) {
+          if (s.snippet) {
+            var rows = container.querySelectorAll('.search-view-row[data-idx]');
+            rows.forEach(function(row) {
+              var ridx = parseInt(row.dataset.idx);
+              var entry = _searchResults[ridx];
+              if (entry && entry.type === 'session' && entry.data.key === s.key && !row.querySelector('.search-row-snippet')) {
+                var snippetEl = document.createElement('div');
+                snippetEl.className = 'search-row-snippet';
+                snippetEl.textContent = s.snippet.slice(0, 200);
+                highlightSearchTermsInElement(snippetEl, query);
+                row.querySelector('.search-row-info').appendChild(snippetEl);
+              }
+            });
+          }
+        });
+      }
+
       // Count
       var total = _searchResults.length;
       document.getElementById('searchViewCount').textContent = total > 0 ? total + ' result' + (total > 1 ? 's' : '') : '';
 
-      if (!goals.length && !sessions.length) {
+      if (!goals.length && !sessions.length && !files.length) {
         var empty = document.createElement('div');
         empty.className = 'search-view-empty';
         empty.textContent = isRecent ? 'No recent items' : 'No results found';
@@ -6492,12 +6632,48 @@ Response format:
       _searchSelectedIdx = -1;
     }
 
+    function getFileIconForSearch(path) {
+      var ext = (path || '').split('.').pop().toLowerCase();
+      var map = {
+        js: '\uD83D\uDCDC', ts: '\uD83D\uDCDC', jsx: '\uD83D\uDCDC', tsx: '\uD83D\uDCDC', mjs: '\uD83D\uDCDC',
+        css: '\uD83C\uDFA8', scss: '\uD83C\uDFA8', less: '\uD83C\uDFA8',
+        py: '\uD83D\uDC0D', rs: '\u2699\uFE0F', go: '\uD83D\uDC39',
+        json: '\uD83D\uDCCB', yaml: '\uD83D\uDCCB', yml: '\uD83D\uDCCB', toml: '\uD83D\uDCCB',
+        md: '\uD83D\uDCC4', txt: '\uD83D\uDCC4',
+        html: '\uD83C\uDF10', vue: '\uD83C\uDF10', svelte: '\uD83C\uDF10',
+        sql: '\uD83D\uDDC4', sqlite: '\uD83D\uDDC4', db: '\uD83D\uDDC4',
+        sh: '\u26A1', bash: '\u26A1', zsh: '\u26A1',
+      };
+      return map[ext] || '\uD83D\uDCC4';
+    }
+
+    function highlightSearchTermsInElement(el, query) {
+      if (!query || !el.textContent) return;
+      var terms = query.trim().split(/\s+/).filter(Boolean);
+      if (!terms.length) return;
+      var text = el.textContent;
+      el.textContent = '';
+      var escaped = terms.map(function(t) { return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); });
+      var re = new RegExp('(' + escaped.join('|') + ')', 'gi');
+      var parts = text.split(re);
+      parts.forEach(function(part) {
+        if (re.test(part)) {
+          re.lastIndex = 0; // reset regex
+          var mark = document.createElement('mark');
+          mark.textContent = part;
+          el.appendChild(mark);
+        } else {
+          el.appendChild(document.createTextNode(part));
+        }
+      });
+    }
+
     function buildSessionMeta(s) {
       var parts = [];
       if (s.isSubagent) parts.push('\u26A1 subagent');
       var parentGoal = getGoalForSession(s.key);
-      if (s.goalTitle || (parentGoal && parentGoal.title)) parts.push('\uD83C\uDFAF ' + escapeHtml(s.goalTitle || parentGoal.title));
-      if (s.condoName) parts.push('\uD83C\uDFE0 ' + escapeHtml(s.condoName));
+      if (s.goalTitle || (parentGoal && parentGoal.title)) parts.push('\uD83C\uDFAF ' + (s.goalTitle || parentGoal.title));
+      if (s.condoName) parts.push('\uD83C\uDFE0 ' + s.condoName);
       if (!parts.length) parts.push(s.label || s.key);
       return parts.join(' \u00B7 ');
     }
@@ -6518,9 +6694,27 @@ Response format:
         check.checked = _searchChecked.has(sessionKey);
         check.onclick = function(e) {
           e.stopPropagation();
-          if (_searchChecked.has(sessionKey)) { _searchChecked.delete(sessionKey); item.classList.remove('checked'); }
-          else { _searchChecked.add(sessionKey); item.classList.add('checked'); }
-          this.checked = _searchChecked.has(sessionKey);
+          var thisIdx = idx;
+          // Shift-click: select range from last checked to this one
+          if (e.shiftKey && _lastCheckedIdx >= 0 && _lastCheckedIdx !== thisIdx) {
+            var lo = Math.min(_lastCheckedIdx, thisIdx);
+            var hi = Math.max(_lastCheckedIdx, thisIdx);
+            for (var ri = lo; ri <= hi; ri++) {
+              var entry = _searchResults[ri];
+              if (entry && entry.type === 'session') {
+                _searchChecked.add(entry.data.key);
+              }
+            }
+            syncSearchCheckboxes();
+            updateSearchSelectionBar();
+            _lastCheckedIdx = thisIdx;
+            return;
+          }
+          // Normal click: toggle single
+          if (_searchChecked.has(sessionKey)) { _searchChecked.delete(sessionKey); }
+          else { _searchChecked.add(sessionKey); }
+          _lastCheckedIdx = thisIdx;
+          syncSearchCheckboxes();
           updateSearchSelectionBar();
         };
         item.appendChild(check);
@@ -6573,6 +6767,16 @@ Response format:
         // Open in detail panel (side preview)
         openDetailPanel(entry.data.key, { fromRouter: true });
         highlightSearchResult(idx);
+      } else if (entry.type === 'file') {
+        // If file has a linked session, open it
+        if (entry.data.sessionKey) {
+          var existing = state.sessions.find(function(s) { return s.key === entry.data.sessionKey; });
+          if (!existing) {
+            state.sessions.push({ key: entry.data.sessionKey, displayName: entry.data.path });
+          }
+          openDetailPanel(entry.data.sessionKey, { fromRouter: true });
+        }
+        highlightSearchResult(idx);
       }
     }
 
@@ -6599,6 +6803,15 @@ Response format:
         e.stopPropagation();
         closeSearchView();
       }
+    }
+
+    function syncSearchCheckboxes() {
+      document.querySelectorAll('.search-row-check').forEach(function(cb) {
+        var key = cb.dataset.key;
+        cb.checked = _searchChecked.has(key);
+        var row = cb.closest('.search-view-row');
+        if (row) row.classList.toggle('checked', _searchChecked.has(key));
+      });
     }
 
     function updateSearchSelectionBar() {

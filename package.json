@@ -12,6 +12,8 @@
     "test:ui": "vitest --ui"
   },
   "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "sqlite-vec": "^0.1.7-alpha.2",
     "ws": "^8.19.0"
   },
   "devDependencies": {

@@ -320,9 +320,14 @@
     </div>
     
     <div class="sidebar-footer">
-      <a href="/control/" class="control-ui-btn" title="Open Clawdbot Control UI">
-        🤖 Clawdbot UI
-      </a>
+      <div class="sidebar-footer-row">
+        <a href="/control/" class="control-ui-btn" title="Open Clawdbot Control UI">
+          🤖 Clawdbot UI
+        </a>
+        <button class="shortcut-hint-btn" onclick="openShortcutsModal()" title="Keyboard shortcuts">
+          <kbd>?</kbd>
+        </button>
+      </div>
       <div class="connection-status" onclick="showLoginModal()">
         <span class="connection-dot" id="connectionDot" style="background: var(--yellow);" title="Connecting to gateway..."></span>
         <span id="connectionText">Connecting...</span>

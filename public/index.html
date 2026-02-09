@@ -6252,11 +6252,14 @@ Response format:
     let _searchPreviousView = null; // remember where to go back
     let _searchChecked = new Set(); // selected session keys for batch actions
     let _lastCheckedIdx = -1; // last checkbox index for shift-range selection
-    let _searchMode = 'fast'; // 'fast' or 'deep'
+    let _searchMode = 'auto'; // 'auto' (default), 'fast', or 'deep'
     let _searchStatusCache = null;
 
     function toggleSearchMode() {
-      _searchMode = _searchMode === 'fast' ? 'deep' : 'fast';
+      // Cycle: auto -> fast -> deep -> auto
+      if (_searchMode === 'auto') _searchMode = 'fast';
+      else if (_searchMode === 'fast') _searchMode = 'deep';
+      else _searchMode = 'auto';
       updateSearchModeToggle();
       // Re-run search with new mode if there's a query
       var query = document.getElementById('searchViewInput').value.trim();
@@ -6267,12 +6270,19 @@ Response format:
       var btn = document.getElementById('searchModeToggle');
       if (_searchMode === 'deep') {
         btn.textContent = '\uD83D\uDD2C Deep';
-        btn.title = 'Deep search (files + conversations). Click for fast mode.';
+        btn.title = 'Deep search (files + conversations). Click for auto mode.';
         btn.classList.add('active');
+        btn.classList.remove('auto');
+      } else if (_searchMode === 'auto') {
+        btn.textContent = '\u2728 Auto';
+        btn.title = 'Auto: fast for single words, deep for phrases. Click for fast mode.';
+        btn.classList.remove('active');
+        btn.classList.add('auto');
       } else {
         btn.textContent = '\u26A1 Fast';
         btn.title = 'Fast search (metadata only). Click for deep mode.';
         btn.classList.remove('active');
+        btn.classList.remove('auto');
       }
     }
 

@@ -650,6 +650,11 @@ body {
   border-color: var(--accent);
   color: var(--accent);
 }
+.search-mode-toggle.auto {
+  background: rgba(180, 140, 255, 0.1);
+  border-color: rgba(180, 140, 255, 0.4);
+  color: rgba(180, 140, 255, 0.9);
+}
 
 /* Search status dot */
 .search-status-dot {

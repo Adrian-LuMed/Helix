@@ -5631,13 +5631,16 @@ Response format:
      * Assign a role to an agent
      * @param {string} agentId - Agent ID
      * @param {string} role - Role name
+     * @param {Event} [event] - Click event (optional)
      */
-    async function assignRole(agentId, role) {
+    async function assignRole(agentId, role, event) {
+      if (event) event.stopPropagation();
+      // Hide dropdown immediately for better UX
+      hideRoleDropdown();
       try {
         await rpcCall('config.setRole', { role: role, agentId: agentId });
         showToast(`Assigned ${role} to ${agentId}`, 'success');
         await loadRoleConfig();
-        hideRoleDropdown();
       } catch (err) {
         console.error('Failed to assign role:', err);
         showToast('Failed to assign role: ' + err.message, 'error');
@@ -5673,7 +5676,7 @@ Response format:
       items.innerHTML = Object.entries(ROLE_DEFINITIONS).map(([role, info]) => {
         const isActive = currentRole === role;
         return `
-          <div class="role-dropdown-item ${isActive ? 'active' : ''}" onclick="assignRole('${escapeHtml(agentId)}', '${escapeHtml(role)}')">
+          <div class="role-dropdown-item ${isActive ? 'active' : ''}" onclick="assignRole('${escapeHtml(agentId)}', '${escapeHtml(role)}', event)">
             <span class="role-emoji">${info.emoji}</span>
             <span class="role-name">${info.name}</span>
             ${isActive ? '<span class="role-check">✓</span>' : ''}

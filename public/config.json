@@ -1,5 +1,32 @@
 {
-  "_note": "Optional ClawCondos runtime config. Keep this file free of secrets. Prefer server-side auth via GATEWAY_AUTH and WS proxy.",
+  "_note": "ClawCondos configuration. Keep secrets out of this file - use server-side auth.",
   "gatewayWsUrl": null,
-  "gatewayHttpUrl": null
+  "gatewayHttpUrl": null,
+  
+  "pm": {
+    "_note": "PM agent configuration. Default is 'main' agent.",
+    "agentId": "main",
+    "sessionSuffix": "main"
+  },
+  
+  "agentRoles": {
+    "_note": "Map role names to agent IDs. These are the default mappings.",
+    "pm": "main",
+    "frontend": "frontend",
+    "backend": "backend",
+    "designer": "designer",
+    "tester": "tester"
+  },
+  
+  "agentLabels": {
+    "_note": "Custom labels for agents. Key is agent ID (lowercase), value has emoji and name.",
+    "_example": {
+      "myagent": { "emoji": "🚀", "name": "My Agent" }
+    }
+  },
+  
+  "features": {
+    "formatUserMessages": false,
+    "allowExternalMedia": false
+  }
 }

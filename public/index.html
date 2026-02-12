@@ -5701,7 +5701,7 @@ Response format:
         return;
       }
       try {
-        await rpcCall('condos.delete', { condoId: condoId });
+        await rpcCall('condos.delete', { id: condoId });
         await loadCondos();
         await loadGoals();
         renderGoals();

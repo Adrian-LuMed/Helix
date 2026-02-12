@@ -3,6 +3,8 @@
  * Routes messages to the configured PM agent session
  */
 
+import { getPmSession, getAgentForRole } from './agent-roles.js';
+
 /**
  * Create PM RPC handlers
  * @param {object} store - Goals store instance
@@ -21,7 +23,7 @@ export function createPmHandlers(store, options = {}) {
    * Response: { response: string, pmSession: string }
    */
   handlers['pm.chat'] = async ({ params, respond }) => {
-    const { condoId, message, pmSession } = params || {};
+    const { condoId, message, pmSession: overrideSession } = params || {};
 
     if (!condoId) {
       return respond(false, null, 'condoId is required');
@@ -39,8 +41,8 @@ export function createPmHandlers(store, options = {}) {
         return respond(false, null, `Condo ${condoId} not found`);
       }
 
-      // Use configured PM session or default to agent:claudia:main
-      const targetSession = pmSession || condo.pmSession || 'agent:claudia:main';
+      // Use override session, or resolve via configurable hierarchy
+      const targetSession = overrideSession || getPmSession(store, condoId);
 
       if (!sendToSession) {
         return respond(false, null, 'sendToSession not available');
@@ -104,10 +106,15 @@ export function createPmHandlers(store, options = {}) {
         return respond(false, null, `Condo ${condoId} not found`);
       }
 
+      // Get resolved PM session (includes fallback chain)
+      const resolvedPmSession = getPmSession(store, condoId);
+
       respond(true, {
-        pmSession: condo.pmSession || 'agent:claudia:main',
+        pmSession: condo.pmSession || null,  // Condo-specific setting (may be null)
+        resolvedPmSession,                    // Actually resolved session (with fallbacks)
         condoId,
         condoName: condo.name,
+        globalPmSession: data.config?.pmSession || null,
       });
     } catch (err) {
       respond(false, null, err.message);
@@ -135,13 +142,46 @@ export function createPmHandlers(store, options = {}) {
       }
 
       if (pmSession !== undefined) {
-        condo.pmSession = pmSession;
+        // Allow null to clear condo-specific setting (fall back to global)
+        condo.pmSession = pmSession || null;
       }
       condo.updatedAtMs = Date.now();
 
       store.save(data);
 
-      respond(true, { ok: true, pmSession: condo.pmSession });
+      // Return resolved session (with fallback chain)
+      const resolvedPmSession = getPmSession(store, condoId);
+
+      respond(true, { 
+        ok: true, 
+        pmSession: condo.pmSession,
+        resolvedPmSession,
+      });
+    } catch (err) {
+      respond(false, null, err.message);
+    }
+  };
+
+  /**
+   * pm.getAgent - Get the PM agent ID for a condo
+   * Params: { condoId?: string }
+   * Response: { agentId: string, sessionKey: string }
+   */
+  handlers['pm.getAgent'] = ({ params, respond }) => {
+    const { condoId } = params || {};
+
+    try {
+      const pmSession = getPmSession(store, condoId);
+      
+      // Extract agent ID from session key (format: agent:AGENT_ID:SESSION_TYPE)
+      const match = pmSession.match(/^agent:([^:]+):/);
+      const agentId = match ? match[1] : 'main';
+
+      respond(true, {
+        agentId,
+        sessionKey: pmSession,
+        role: 'pm',
+      });
     } catch (err) {
       respond(false, null, err.message);
     }

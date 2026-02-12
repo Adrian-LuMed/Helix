@@ -6,12 +6,15 @@ import { createGoalHandlers } from './lib/goals-handlers.js';
 import { createCondoHandlers } from './lib/condos-handlers.js';
 import { createPlanHandlers, getPlanLogBuffer } from './lib/plan-handlers.js';
 import { createPmHandlers } from './lib/pm-handlers.js';
+import { createConfigHandlers } from './lib/config-handlers.js';
+import { createTeamHandlers } from './lib/team-handlers.js';
 import { createNotificationHandlers } from './lib/notification-manager.js';
 import { createAutonomyHandlers } from './lib/autonomy.js';
 import { buildGoalContext, buildCondoContext, buildCondoMenuContext, getProjectSummaryForGoal } from './lib/context-builder.js';
 import { createGoalUpdateExecutor } from './lib/goal-update-tool.js';
 import { createTaskSpawnHandler, buildPlanFilePath } from './lib/task-spawn.js';
 import { matchLogToStep } from './lib/plan-manager.js';
+import { resolveAgent, getAgentForRole } from './lib/agent-roles.js';
 import {
   createCondoBindExecutor,
   createCondoCreateGoalExecutor,
@@ -127,6 +130,25 @@ export default function register(api) {
     api.registerGatewayMethod(method, handler);
   }
 
+  // Config handlers (agent roles, global settings)
+  const configHandlers = createConfigHandlers(store, {
+    logger: api.logger,
+  });
+  for (const [method, handler] of Object.entries(configHandlers)) {
+    api.registerGatewayMethod(method, handler);
+  }
+
+  // Team handlers (team chat, broadcast)
+  const teamHandlers = createTeamHandlers(store, {
+    sendToSession: api.sendToSession,
+    getSessionHistory: api.getSessionHistory,
+    broadcast: api.broadcast,
+    logger: api.logger,
+  });
+  for (const [method, handler] of Object.entries(teamHandlers)) {
+    api.registerGatewayMethod(method, handler);
+  }
+
   // Notification handlers
   const notificationHandlers = createNotificationHandlers(store);
   for (const [method, handler] of Object.entries(notificationHandlers)) {
@@ -178,13 +200,16 @@ export default function register(api) {
 
       for (const task of tasksToSpawn) {
         try {
+          // Resolve role -> actual agent ID using config
+          const resolvedAgentId = resolveAgent(store, task.assignedAgent);
+
           // Create a promise-based wrapper for the spawn handler
           const result = await new Promise((resolve, reject) => {
             taskSpawnHandler({
               params: {
                 goalId,
                 taskId: task.id,
-                agentId: task.assignedAgent,
+                agentId: resolvedAgentId,
                 model: task.model || null,
               },
               respond: (success, data, error) => {
@@ -202,6 +227,7 @@ export default function register(api) {
             taskText: task.text,
             sessionKey: result.sessionKey,
             agentId: result.agentId,
+            assignedRole: task.assignedAgent,  // Original role/spec from task
             autonomyMode: result.autonomyMode,
           });
         } catch (err) {
@@ -782,6 +808,6 @@ export default function register(api) {
     { names: ['condo_spawn_task'] }
   );
 
-  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + Object.keys(planHandlers).length + Object.keys(pmHandlers).length + Object.keys(notificationHandlers).length + Object.keys(autonomyHandlers).length + 2 + 3; // +2 spawnTaskSession/kickoff, +3 classification RPC methods
+  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + Object.keys(planHandlers).length + Object.keys(pmHandlers).length + Object.keys(configHandlers).length + Object.keys(teamHandlers).length + Object.keys(notificationHandlers).length + Object.keys(autonomyHandlers).length + 2 + 3; // +2 spawnTaskSession/kickoff, +3 classification RPC methods
   api.logger.info(`clawcondos-goals: registered ${totalMethods} gateway methods, 5 tools, ${planFileWatchers.size} plan file watchers, data at ${dataDir}`);
 }

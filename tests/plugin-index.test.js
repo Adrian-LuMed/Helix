@@ -43,7 +43,7 @@ describe('Plugin index.js', () => {
   });
 
   describe('registration', () => {
-    it('registers all 42 gateway methods', () => {
+    it('registers all gateway methods', () => {
       const expected = [
         // Goals handlers
         'goals.list', 'goals.create', 'goals.get', 'goals.update', 'goals.delete',
@@ -51,14 +51,20 @@ describe('Plugin index.js', () => {
         'goals.setSessionCondo', 'goals.getSessionCondo', 'goals.listSessionCondos',
         'goals.removeSessionCondo',
         'goals.addTask', 'goals.updateTask', 'goals.deleteTask',
-        'goals.addFiles', 'goals.removeFile',
+        'goals.addFiles', 'goals.removeFile', 'goals.updatePlan',
         // Condo handlers
         'condos.create', 'condos.list', 'condos.get', 'condos.update', 'condos.delete',
-        // Task spawn
-        'goals.spawnTaskSession',
+        // Task spawn + kickoff
+        'goals.spawnTaskSession', 'goals.kickoff',
         // Plan handlers
         'plans.get', 'plans.syncFromFile', 'plans.updateStatus', 'plans.updateStep',
         'plans.approve', 'plans.reject', 'plans.getLogs', 'plans.appendLog',
+        // PM handlers
+        'pm.chat', 'pm.getConfig', 'pm.setConfig', 'pm.getAgent',
+        // Config handlers
+        'config.get', 'config.set', 'config.setRole', 'config.getRole', 'config.listRoles',
+        // Team handlers
+        'team.getMessages', 'team.send', 'team.notify', 'team.status',
         // Notification handlers
         'notifications.list', 'notifications.markRead', 'notifications.dismiss', 'notifications.unreadCount',
         // Autonomy handlers
@@ -69,7 +75,8 @@ describe('Plugin index.js', () => {
       for (const name of expected) {
         expect(api._methods).toHaveProperty(name);
       }
-      expect(Object.keys(api._methods)).toHaveLength(42);
+      // Verify count matches expected array
+      expect(Object.keys(api._methods)).toHaveLength(expected.length);
     });
 
     it('registers before_agent_start and agent_end hooks', () => {

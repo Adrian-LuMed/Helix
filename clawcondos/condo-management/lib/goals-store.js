@@ -11,7 +11,7 @@ export function createGoalsStore(dataDir) {
 
   function load() {
     if (!existsSync(filePath)) {
-      return { version: 2, goals: [], condos: [], sessionIndex: {}, sessionCondoIndex: {}, notifications: [] };
+      return { version: 2, goals: [], condos: [], sessionIndex: {}, sessionCondoIndex: {}, notifications: [], config: {} };
     }
     try {
       const parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
@@ -48,9 +48,10 @@ export function createGoalsStore(dataDir) {
         sessionIndex: parsed.sessionIndex && typeof parsed.sessionIndex === 'object' ? parsed.sessionIndex : {},
         sessionCondoIndex: parsed.sessionCondoIndex && typeof parsed.sessionCondoIndex === 'object' ? parsed.sessionCondoIndex : {},
         notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
+        config: parsed.config && typeof parsed.config === 'object' ? parsed.config : {},
       };
     } catch (err) {
-      return { version: 2, goals: [], condos: [], sessionIndex: {}, sessionCondoIndex: {}, notifications: [], _loadError: true };
+      return { version: 2, goals: [], condos: [], sessionIndex: {}, sessionCondoIndex: {}, notifications: [], config: {}, _loadError: true };
     }
   }
 

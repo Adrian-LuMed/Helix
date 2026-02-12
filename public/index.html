@@ -263,14 +263,38 @@
        ═══════════════════════════════════════════════════════════════ -->
   <div class="modal-overlay hidden" id="roleConfigModal">
     <div class="modal role-config-modal">
-      <h2 class="modal-title">⚙️ Role Configuration</h2>
-      <p class="modal-desc">Configure which agents handle each role. Leave empty to use defaults.</p>
+      <div class="role-config-header">
+        <div>
+          <h2 class="modal-title">⚙️ Role Configuration</h2>
+          <p class="modal-desc">Configure which agents handle each role. Leave empty to use defaults.</p>
+        </div>
+        <button class="form-btn auto-detect-btn" onclick="autoDetectRoles()">
+          <span class="auto-detect-icon">🔍</span>
+          Auto-detect Roles
+        </button>
+      </div>
+      
+      <!-- Auto-detect preview (hidden by default) -->
+      <div class="auto-detect-preview hidden" id="autoDetectPreview">
+        <div class="auto-detect-header">
+          <span>🔮 Detected Roles</span>
+          <button class="form-btn small" onclick="applySelectedAutoDetect()">Apply Selected</button>
+          <button class="ghost-btn small" onclick="hideAutoDetectPreview()">✕</button>
+        </div>
+        <div class="auto-detect-loading hidden" id="autoDetectLoading">
+          <div class="loading-spinner"></div>
+          <span>Analyzing agents...</span>
+        </div>
+        <div class="auto-detect-results" id="autoDetectResults"></div>
+      </div>
+      
       <table class="role-config-table">
         <thead>
           <tr>
             <th style="width: 40px;"></th>
             <th>Role</th>
             <th>Agent ID</th>
+            <th>Description</th>
             <th>Resolved</th>
           </tr>
         </thead>
@@ -292,6 +316,12 @@
     <div class="role-dropdown-custom">
       <input type="text" id="roleDropdownCustom" placeholder="Custom role..." onkeypress="if(event.key==='Enter')assignCustomRole()">
     </div>
+  </div>
+
+  <!-- Role Tooltip (floating) -->
+  <div class="role-tooltip hidden" id="roleTooltip">
+    <div class="role-tooltip-role"></div>
+    <div class="role-tooltip-desc"></div>
   </div>
 
   <!-- ═══════════════════════════════════════════════════════════════
@@ -5658,6 +5688,16 @@ Response format:
     }
     
     /**
+     * Get role description from config
+     * @param {string} role - Role name
+     * @returns {string|null} Description or null
+     */
+    function getRoleDescription(role) {
+      if (!state.roleConfig || !state.roleConfig[role]) return null;
+      return state.roleConfig[role].description || null;
+    }
+    
+    /**
      * Show role dropdown at element
      * @param {string} agentId - Agent ID
      * @param {Event} event - Click event
@@ -5672,13 +5712,17 @@ Response format:
       // Get current role for this agent
       const currentRole = getAgentRole(agentId);
       
-      // Build dropdown items
+      // Build dropdown items with descriptions
       items.innerHTML = Object.entries(ROLE_DEFINITIONS).map(([role, info]) => {
         const isActive = currentRole === role;
+        const description = getRoleDescription(role);
         return `
           <div class="role-dropdown-item ${isActive ? 'active' : ''}" onclick="assignRole('${escapeHtml(agentId)}', '${escapeHtml(role)}', event)">
             <span class="role-emoji">${info.emoji}</span>
-            <span class="role-name">${info.name}</span>
+            <div class="role-dropdown-item-content">
+              <span class="role-name">${info.name}</span>
+              ${description ? `<span class="role-desc">${escapeHtml(description)}</span>` : ''}
+            </div>
             ${isActive ? '<span class="role-check">✓</span>' : ''}
           </div>
         `;
@@ -5757,16 +5801,65 @@ Response format:
       const info = getRoleInfo(role);
       
       if (!info) {
-        return `<span class="agent-role-badge" onclick="showRoleDropdown('${escapeHtml(agentId)}', event)" title="Assign role">
+        return `<span class="agent-role-badge" 
+          onclick="showRoleDropdown('${escapeHtml(agentId)}', event)"
+          onmouseenter="showRoleTooltip(event, null, 'Click to assign a role')"
+          onmouseleave="hideRoleTooltip()"
+          title="">
           <span class="role-emoji">🏷️</span>
           <span>Assign</span>
         </span>`;
       }
       
-      return `<span class="agent-role-badge ${info.color}" onclick="showRoleDropdown('${escapeHtml(agentId)}', event)" title="Change role">
+      const description = getRoleDescription(role);
+      const tooltipDesc = description || 'Click to change role';
+      
+      return `<span class="agent-role-badge ${info.color}" 
+        onclick="showRoleDropdown('${escapeHtml(agentId)}', event)"
+        onmouseenter="showRoleTooltip(event, '${escapeHtml(info.name)}', '${escapeHtml(tooltipDesc)}')"
+        onmouseleave="hideRoleTooltip()"
+        title="">
         <span class="role-emoji">${info.emoji}</span>
         <span>${info.name}</span>
       </span>`;
+    }
+    
+    /**
+     * Show role tooltip on hover
+     */
+    function showRoleTooltip(event, roleName, description) {
+      const tooltip = document.getElementById('roleTooltip');
+      if (!tooltip) return;
+      
+      const roleEl = tooltip.querySelector('.role-tooltip-role');
+      const descEl = tooltip.querySelector('.role-tooltip-desc');
+      
+      if (roleEl) roleEl.textContent = roleName || '';
+      if (descEl) descEl.textContent = description || '';
+      
+      // Position tooltip
+      const rect = event.target.getBoundingClientRect();
+      tooltip.style.top = (rect.bottom + 8) + 'px';
+      tooltip.style.left = rect.left + 'px';
+      
+      tooltip.classList.remove('hidden');
+      
+      // Adjust if off-screen
+      const tooltipRect = tooltip.getBoundingClientRect();
+      if (tooltipRect.right > window.innerWidth) {
+        tooltip.style.left = Math.max(10, window.innerWidth - tooltipRect.width - 10) + 'px';
+      }
+      if (tooltipRect.bottom > window.innerHeight) {
+        tooltip.style.top = (rect.top - tooltipRect.height - 8) + 'px';
+      }
+    }
+    
+    /**
+     * Hide role tooltip
+     */
+    function hideRoleTooltip() {
+      const tooltip = document.getElementById('roleTooltip');
+      if (tooltip) tooltip.classList.add('hidden');
     }
     
     /**
@@ -5781,8 +5874,9 @@ Response format:
       
       // Build table rows
       tbody.innerHTML = Object.entries(ROLE_DEFINITIONS).map(([role, info]) => {
-        const roleData = roles[role] || { agentId: role, configured: null, default: role };
+        const roleData = roles[role] || { agentId: role, configured: null, default: role, description: '' };
         const isDefault = !roleData.configured;
+        const description = roleData.description || '';
         
         return `
           <tr data-role="${escapeHtml(role)}">
@@ -5791,13 +5885,24 @@ Response format:
             <td>
               <input type="text" class="role-config-row-input" 
                      data-role="${escapeHtml(role)}"
+                     data-field="agentId"
                      value="${escapeHtml(roleData.configured || '')}"
                      placeholder="${escapeHtml(roleData.default)}">
+            </td>
+            <td>
+              <textarea class="role-config-row-desc" 
+                     data-role="${escapeHtml(role)}"
+                     data-field="description"
+                     placeholder="Role description..."
+                     rows="2">${escapeHtml(description)}</textarea>
             </td>
             <td class="role-config-row-agent ${isDefault ? 'default' : ''}">${escapeHtml(roleData.agentId)}</td>
           </tr>
         `;
       }).join('');
+      
+      // Hide auto-detect preview if visible
+      hideAutoDetectPreview();
       
       // Show modal
       document.getElementById('roleConfigModal').classList.remove('hidden');
@@ -5815,17 +5920,38 @@ Response format:
      * Save role configuration from modal
      */
     async function saveRoleConfig() {
-      const inputs = document.querySelectorAll('.role-config-row-input');
+      const agentInputs = document.querySelectorAll('.role-config-row-input');
+      const descInputs = document.querySelectorAll('.role-config-row-desc');
       const updates = {};
+      const descriptions = {};
       
-      inputs.forEach(input => {
+      agentInputs.forEach(input => {
         const role = input.dataset.role;
         const value = input.value.trim();
         updates[role] = value || null;  // null to clear (use default)
       });
       
+      descInputs.forEach(input => {
+        const role = input.dataset.role;
+        const value = input.value.trim();
+        descriptions[role] = value || null;
+      });
+      
       try {
+        // Save agent assignments
         await rpcCall('config.set', { agentRoles: updates });
+        
+        // Save descriptions (using config.setRole for each with description)
+        for (const [role, desc] of Object.entries(descriptions)) {
+          if (desc !== null) {
+            await rpcCall('config.setRole', { 
+              role: role, 
+              agentId: updates[role] || role,
+              description: desc 
+            });
+          }
+        }
+        
         showToast('Role configuration saved', 'success');
         await loadRoleConfig();
         hideRoleConfigModal();
@@ -5834,6 +5960,125 @@ Response format:
         const errorEl = document.getElementById('roleConfigError');
         errorEl.textContent = 'Failed to save: ' + err.message;
         errorEl.style.display = 'block';
+      }
+    }
+    
+    /**
+     * Auto-detect roles based on agent capabilities
+     */
+    async function autoDetectRoles() {
+      const preview = document.getElementById('autoDetectPreview');
+      const loading = document.getElementById('autoDetectLoading');
+      const results = document.getElementById('autoDetectResults');
+      
+      preview.classList.remove('hidden');
+      loading.classList.remove('hidden');
+      results.innerHTML = '';
+      
+      try {
+        // Call RPC (will use mock if not available)
+        let data;
+        try {
+          data = await rpcCall('roles.autoDetect', {}, 15000);
+        } catch (err) {
+          // Mock response for development
+          console.warn('roles.autoDetect not available, using mock data');
+          data = {
+            suggestions: [
+              { agentId: "felix", suggestedRole: "frontend", confidence: "high", reason: "Found: React, Flutter, UI/UX" },
+              { agentId: "blake", suggestedRole: "backend", confidence: "high", reason: "Found: API, Node.js, databases" },
+              { agentId: "claudia", suggestedRole: "pm", confidence: "high", reason: "Found: orchestration, planning" },
+              { agentId: "quinn", suggestedRole: "tester", confidence: "medium", reason: "Found: QA, testing patterns" }
+            ]
+          };
+        }
+        
+        loading.classList.add('hidden');
+        
+        if (!data.suggestions || data.suggestions.length === 0) {
+          results.innerHTML = '<div class="auto-detect-empty">No role suggestions found.</div>';
+          return;
+        }
+        
+        // Store suggestions for later application
+        state.autoDetectSuggestions = data.suggestions;
+        
+        // Render suggestions
+        results.innerHTML = data.suggestions.map((s, i) => {
+          const roleInfo = getRoleInfo(s.suggestedRole);
+          const confidenceClass = `confidence-${s.confidence}`;
+          const confidenceIcon = s.confidence === 'high' ? '✓' : s.confidence === 'medium' ? '?' : '⚠';
+          
+          return `
+            <div class="auto-detect-item ${confidenceClass}">
+              <input type="checkbox" class="auto-detect-checkbox" data-index="${i}" checked>
+              <span class="auto-detect-icon">${confidenceIcon}</span>
+              <span class="auto-detect-agent">${escapeHtml(s.agentId)}</span>
+              <span class="auto-detect-arrow">→</span>
+              <span class="auto-detect-role">
+                ${roleInfo ? roleInfo.emoji : '🏷️'} ${escapeHtml(s.suggestedRole)}
+              </span>
+              <span class="auto-detect-confidence">(${s.confidence})</span>
+              <span class="auto-detect-reason">"${escapeHtml(s.reason)}"</span>
+            </div>
+          `;
+        }).join('');
+        
+      } catch (err) {
+        loading.classList.add('hidden');
+        results.innerHTML = `<div class="auto-detect-error">Failed to detect roles: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+    
+    /**
+     * Hide auto-detect preview
+     */
+    function hideAutoDetectPreview() {
+      document.getElementById('autoDetectPreview').classList.add('hidden');
+      state.autoDetectSuggestions = null;
+    }
+    
+    /**
+     * Apply selected auto-detected roles
+     */
+    async function applySelectedAutoDetect() {
+      if (!state.autoDetectSuggestions) return;
+      
+      const checkboxes = document.querySelectorAll('.auto-detect-checkbox:checked');
+      const selected = Array.from(checkboxes).map(cb => {
+        return state.autoDetectSuggestions[parseInt(cb.dataset.index)];
+      });
+      
+      if (selected.length === 0) {
+        showToast('No roles selected', 'warning');
+        return;
+      }
+      
+      try {
+        // Try to use RPC if available
+        try {
+          await rpcCall('roles.applyAutoDetect', { suggestions: selected }, 10000);
+        } catch (err) {
+          // Fallback: apply each role individually
+          console.warn('roles.applyAutoDetect not available, applying individually');
+          for (const s of selected) {
+            await rpcCall('config.setRole', { 
+              role: s.suggestedRole, 
+              agentId: s.agentId,
+              description: s.reason
+            });
+          }
+        }
+        
+        showToast(`Applied ${selected.length} role(s)`, 'success');
+        await loadRoleConfig();
+        hideAutoDetectPreview();
+        
+        // Refresh the modal table
+        showRoleConfigModal();
+        
+      } catch (err) {
+        showToast('Failed to apply roles: ' + err.message, 'error');
       }
     }
     

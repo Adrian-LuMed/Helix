@@ -449,6 +449,7 @@
 
             <div class="goal-tabs">
               <div class="goal-tab active" id="goalTabTasks" onclick="setGoalTab('tasks')">Tasks</div>
+              <div class="goal-tab" id="goalTabPlans" onclick="setGoalTab('plans')">Plans</div>
               <div class="goal-tab" id="goalTabFiles" onclick="setGoalTab('files')">Files</div>
             </div>
 
@@ -736,6 +737,14 @@
       // Condos
       condos: [],
       condoExpanded: JSON.parse(localStorage.getItem('sharp_condo_expanded') || '{}'),
+      
+      // Plan display - track which task plans are expanded
+      expandedTaskPlans: JSON.parse(localStorage.getItem('sharp_expanded_task_plans') || '{}'),
+      
+      // Plan interactions (Phase 5)
+      planLogs: {},  // Map<taskId, Array<{timestamp, type, message}>>
+      planLogExpanded: {},  // Map<taskId, boolean> - track which log viewers are expanded
+      rejectInputVisible: {},  // Map<taskId, boolean> - track which reject inputs are visible
     };
     
     // ═══════════════════════════════════════════════════════════════
@@ -1325,6 +1334,18 @@
       // Agent lifecycle events (for typing indicator)
       if (msg.type === 'event' && msg.event === 'agent') {
         handleAgentEvent(msg.payload);
+        return;
+      }
+      
+      // Plan update events (Claude Code integration)
+      if (msg.type === 'event' && msg.event === 'plan.update') {
+        handlePlanUpdate(msg.payload);
+        return;
+      }
+      
+      // Plan log events (Claude Code integration - Phase 5)
+      if (msg.type === 'event' && msg.event === 'plan.log') {
+        handlePlanLog(msg.payload);
         return;
       }
     }
@@ -2827,10 +2848,537 @@
     function setGoalTab(which) {
       state.goalTab = which;
       var tabTasks = document.getElementById('goalTabTasks');
+      var tabPlans = document.getElementById('goalTabPlans');
       var tabFiles = document.getElementById('goalTabFiles');
       if (tabTasks) tabTasks.classList.toggle('active', which === 'tasks');
+      if (tabPlans) tabPlans.classList.toggle('active', which === 'plans');
       if (tabFiles) tabFiles.classList.toggle('active', which === 'files');
       renderGoalPane();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PLAN DISPLAY (Phase 4 - Claude Code Integration)
+    // ═══════════════════════════════════════════════════════════════
+    
+    /**
+     * Get the plan status badge emoji and label
+     * @param {Object} plan - The task plan object
+     * @returns {{ emoji: string, label: string, cssClass: string }}
+     */
+    function getPlanStatusInfo(plan) {
+      if (!plan || plan.status === 'none') {
+        return { emoji: '', label: '', cssClass: '' };
+      }
+      const statusMap = {
+        'draft': { emoji: '📋', label: 'Draft', cssClass: 'plan-draft' },
+        'awaiting_approval': { emoji: '⏳', label: 'Awaiting Approval', cssClass: 'plan-awaiting' },
+        'approved': { emoji: '✅', label: 'Approved', cssClass: 'plan-approved' },
+        'rejected': { emoji: '❌', label: 'Rejected', cssClass: 'plan-rejected' },
+        'executing': { emoji: '⚡', label: 'Executing', cssClass: 'plan-executing' },
+        'completed': { emoji: '🎉', label: 'Completed', cssClass: 'plan-completed' },
+      };
+      return statusMap[plan.status] || { emoji: '📋', label: plan.status, cssClass: 'plan-unknown' };
+    }
+    
+    /**
+     * Toggle expansion of a task's plan panel
+     * @param {string} taskId - The task ID
+     */
+    function toggleTaskPlanExpanded(taskId) {
+      state.expandedTaskPlans[taskId] = !state.expandedTaskPlans[taskId];
+      localStorage.setItem('sharp_expanded_task_plans', JSON.stringify(state.expandedTaskPlans));
+      renderGoalPane();
+    }
+    
+    /**
+     * Check if a task's plan panel is expanded
+     * @param {string} taskId - The task ID
+     * @returns {boolean}
+     */
+    function isTaskPlanExpanded(taskId) {
+      return state.expandedTaskPlans[taskId] === true;
+    }
+    
+    /**
+     * Render the plan badge for a task row
+     * @param {Object} plan - The task plan object
+     * @param {string} taskId - The task ID
+     * @returns {string} HTML string
+     */
+    function renderPlanBadge(plan, taskId) {
+      if (!plan || plan.status === 'none') return '';
+      
+      const { emoji, label, cssClass } = getPlanStatusInfo(plan);
+      const isExpanded = isTaskPlanExpanded(taskId);
+      const expandIcon = isExpanded ? '▼' : '▶';
+      
+      return '<button class="plan-badge ' + escapeHtml(cssClass) + '" ' +
+        'onclick="event.stopPropagation(); toggleTaskPlanExpanded(\'' + escapeHtml(taskId) + '\')" ' +
+        'title="' + escapeHtml(label) + ' - Click to ' + (isExpanded ? 'collapse' : 'expand') + '">' +
+        '<span class="plan-badge-expand">' + expandIcon + '</span>' +
+        '<span class="plan-badge-emoji">' + emoji + '</span>' +
+        '<span class="plan-badge-label">' + escapeHtml(label) + '</span>' +
+        '</button>';
+    }
+    
+    /**
+     * Get step status indicator
+     * @param {string} status - Step status
+     * @returns {{ emoji: string, cssClass: string }}
+     */
+    function getPlanStepStatusInfo(status) {
+      const statusMap = {
+        'pending': { emoji: '○', cssClass: 'step-pending' },
+        'in-progress': { emoji: '●', cssClass: 'step-in-progress' },
+        'done': { emoji: '✓', cssClass: 'step-done' },
+        'skipped': { emoji: '⊘', cssClass: 'step-skipped' },
+      };
+      return statusMap[status] || { emoji: '○', cssClass: 'step-pending' };
+    }
+    
+    /**
+     * Calculate plan progress percentage
+     * @param {Array} steps - Plan steps array
+     * @returns {number} Progress percentage (0-100)
+     */
+    function calculatePlanProgress(steps) {
+      if (!steps || steps.length === 0) return 0;
+      const doneCount = steps.filter(s => s.status === 'done' || s.status === 'skipped').length;
+      return Math.round((doneCount / steps.length) * 100);
+    }
+    
+    /**
+     * Render the expandable plan detail panel
+     * @param {Object} plan - The task plan object
+     * @param {string} taskId - The task ID
+     * @param {string} goalId - The goal ID
+     * @returns {string} HTML string
+     */
+    function renderPlanDetailPanel(plan, taskId, goalId) {
+      if (!plan || plan.status === 'none' || !isTaskPlanExpanded(taskId)) return '';
+      
+      const steps = Array.isArray(plan.steps) ? plan.steps : [];
+      const progress = calculatePlanProgress(steps);
+      const { label } = getPlanStatusInfo(plan);
+      
+      // Progress bar
+      let progressHtml = '<div class="plan-progress">' +
+        '<div class="plan-progress-bar">' +
+        '<div class="plan-progress-fill" style="width: ' + progress + '%;"></div>' +
+        '</div>' +
+        '<span class="plan-progress-text">' + progress + '% complete</span>' +
+        '</div>';
+      
+      // Steps list
+      let stepsHtml = '';
+      if (steps.length > 0) {
+        stepsHtml = '<div class="plan-steps">' +
+          '<div class="plan-steps-header">Steps</div>' +
+          '<div class="plan-steps-list">' +
+          steps.map(function(step, idx) {
+            const { emoji, cssClass } = getPlanStepStatusInfo(step.status);
+            const stepTitle = step.title || ('Step ' + (idx + 1));
+            const duration = step.completedAtMs && step.startedAtMs 
+              ? ' · ' + formatDuration(step.completedAtMs - step.startedAtMs)
+              : '';
+            return '<div class="plan-step ' + escapeHtml(cssClass) + '">' +
+              '<span class="plan-step-indicator">' + emoji + '</span>' +
+              '<span class="plan-step-index">' + (idx + 1) + '.</span>' +
+              '<span class="plan-step-title">' + escapeHtml(stepTitle) + '</span>' +
+              '<span class="plan-step-duration">' + duration + '</span>' +
+              '</div>';
+          }).join('') +
+          '</div>' +
+          '</div>';
+      }
+      
+      // Raw markdown content (collapsible)
+      let contentHtml = '';
+      if (plan.content) {
+        const contentPreview = plan.content.length > 200 
+          ? plan.content.substring(0, 200) + '...' 
+          : plan.content;
+        contentHtml = '<div class="plan-content">' +
+          '<details class="plan-content-details">' +
+          '<summary class="plan-content-summary">View Plan Markdown</summary>' +
+          '<div class="plan-content-body">' + formatMessage(plan.content) + '</div>' +
+          '</details>' +
+          '</div>';
+      }
+      
+      // Feedback display (for rejected plans)
+      let feedbackHtml = '';
+      if (plan.feedback) {
+        feedbackHtml = '<div class="plan-feedback">' +
+          '<div class="plan-feedback-label">Feedback</div>' +
+          '<div class="plan-feedback-text">' + escapeHtml(plan.feedback) + '</div>' +
+          '</div>';
+      }
+      
+      // Meta info
+      let metaHtml = '<div class="plan-meta">';
+      if (plan.updatedAtMs) {
+        metaHtml += '<span class="plan-meta-item">Updated: ' + timeAgo(plan.updatedAtMs) + '</span>';
+      }
+      if (plan.filePath) {
+        metaHtml += '<span class="plan-meta-item" title="' + escapeHtml(plan.filePath) + '">📄 ' + escapeHtml(plan.filePath.split('/').pop()) + '</span>';
+      }
+      metaHtml += '</div>';
+      
+      // Action buttons (only for awaiting_approval status)
+      let actionsHtml = '';
+      if (plan.status === 'awaiting_approval') {
+        const showRejectForm = state.rejectInputVisible[taskId];
+        actionsHtml = '<div class="plan-actions">' +
+          '<button class="plan-action-btn plan-approve-btn" onclick="event.stopPropagation(); approvePlan(\'' + escapeHtml(goalId) + '\', \'' + escapeHtml(taskId) + '\')" title="Approve this plan">✓ Approve</button>' +
+          '<button class="plan-action-btn plan-reject-btn" onclick="event.stopPropagation(); showRejectInput(\'' + escapeHtml(taskId) + '\')" title="Reject with feedback">✕ Reject</button>' +
+          '</div>';
+        
+        // Reject feedback input (if visible)
+        if (showRejectForm) {
+          actionsHtml += '<div class="plan-reject-form">' +
+            '<input type="text" class="plan-reject-input" id="plan-reject-input-' + escapeHtml(taskId) + '" placeholder="Enter feedback for rejection..." onkeypress="if(event.key===\'Enter\') rejectPlan(\'' + escapeHtml(goalId) + '\', \'' + escapeHtml(taskId) + '\')">' +
+            '<button class="plan-action-btn plan-reject-confirm" onclick="event.stopPropagation(); rejectPlan(\'' + escapeHtml(goalId) + '\', \'' + escapeHtml(taskId) + '\')">Send</button>' +
+            '<button class="plan-action-btn plan-reject-cancel" onclick="event.stopPropagation(); hideRejectInput(\'' + escapeHtml(taskId) + '\')">Cancel</button>' +
+            '</div>';
+        }
+      }
+      
+      // Comment/feedback input (for communicating with the agent)
+      let commentHtml = '';
+      const goal = state.goals.find(g => g.id === goalId);
+      const task = goal ? (goal.tasks || []).find(t => t.id === taskId) : null;
+      if (task && task.sessionKey) {
+        commentHtml = '<div class="plan-comment">' +
+          '<textarea class="plan-comment-input" id="plan-comment-input-' + escapeHtml(taskId) + '" placeholder="Send a comment to the agent..." rows="2"></textarea>' +
+          '<button class="plan-comment-send" onclick="event.stopPropagation(); sendPlanComment(\'' + escapeHtml(goalId) + '\', \'' + escapeHtml(taskId) + '\')">Send</button>' +
+          '</div>';
+      }
+      
+      // Log viewer (collapsible)
+      const logExpanded = state.planLogExpanded[taskId];
+      const logs = state.planLogs[taskId] || [];
+      let logHtml = '<div class="plan-log-section">' +
+        '<button class="plan-log-toggle" onclick="event.stopPropagation(); togglePlanLogViewer(\'' + escapeHtml(taskId) + '\')">' +
+        '<span class="plan-log-toggle-icon">' + (logExpanded ? '▼' : '▶') + '</span>' +
+        'Execution Logs' + (logs.length > 0 ? ' (' + logs.length + ')' : '') +
+        '</button>';
+      
+      if (logExpanded) {
+        logHtml += '<div class="plan-log-viewer" id="plan-log-' + escapeHtml(taskId) + '">';
+        if (logs.length === 0) {
+          logHtml += '<div class="plan-log-empty">No logs yet. Logs will appear here when the plan executes.</div>';
+        } else {
+          logs.forEach(function(entry) {
+            const time = new Date(entry.timestamp).toLocaleTimeString();
+            const typeClass = 'plan-log-' + (entry.type || 'info');
+            logHtml += '<div class="plan-log-entry ' + typeClass + '">' +
+              '<span class="plan-log-time">' + escapeHtml(time) + '</span>' +
+              '<span class="plan-log-type">[' + escapeHtml(entry.type || 'info') + ']</span>' +
+              '<span class="plan-log-message">' + escapeHtml(entry.message) + '</span>' +
+              '</div>';
+          });
+        }
+        logHtml += '</div>';
+      }
+      logHtml += '</div>';
+      
+      return '<div class="plan-detail-panel" data-task-id="' + escapeHtml(taskId) + '">' +
+        '<div class="plan-detail-header">' +
+        '<span class="plan-detail-title">Plan: ' + escapeHtml(label) + '</span>' +
+        metaHtml +
+        '</div>' +
+        actionsHtml +
+        progressHtml +
+        stepsHtml +
+        feedbackHtml +
+        contentHtml +
+        commentHtml +
+        logHtml +
+        '</div>';
+    }
+    
+    /**
+     * Format duration in human readable form
+     * @param {number} ms - Duration in milliseconds
+     * @returns {string}
+     */
+    function formatDuration(ms) {
+      if (ms < 1000) return ms + 'ms';
+      if (ms < 60000) return Math.round(ms / 1000) + 's';
+      if (ms < 3600000) return Math.round(ms / 60000) + 'm';
+      return Math.round(ms / 3600000) + 'h';
+    }
+    
+    /**
+     * Handle plan.update WebSocket event
+     * @param {Object} payload - Event payload with goalId, taskId, plan
+     */
+    function handlePlanUpdate(payload) {
+      const { goalId, taskId, plan } = payload || {};
+      if (!goalId || !taskId) return;
+      
+      // Find and update the goal's task
+      const goal = state.goals.find(g => g.id === goalId);
+      if (!goal || !Array.isArray(goal.tasks)) return;
+      
+      const taskIdx = goal.tasks.findIndex(t => t.id === taskId);
+      if (taskIdx === -1) return;
+      
+      // Update the task's plan
+      goal.tasks[taskIdx].plan = plan;
+      
+      // Re-render if this goal is currently open
+      if (state.currentGoalOpenId === goalId) {
+        renderGoalPane();
+      }
+      
+      // Show toast for important plan status changes
+      if (plan && plan.status === 'awaiting_approval') {
+        showToast('Plan ready for approval: ' + (goal.tasks[taskIdx].text || 'Task'), 'info');
+      } else if (plan && plan.status === 'completed') {
+        showToast('Plan completed: ' + (goal.tasks[taskIdx].text || 'Task'), 'success');
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PLAN INTERACTIONS (Phase 5 - Claude Code Integration)
+    // ═══════════════════════════════════════════════════════════════
+    
+    /**
+     * Handle plan.log WebSocket event
+     * @param {Object} payload - Event payload with goalId, taskId, type, message
+     */
+    function handlePlanLog(payload) {
+      const { goalId, taskId, type, message, timestamp } = payload || {};
+      if (!taskId) return;
+      
+      // Initialize log array if needed
+      if (!state.planLogs[taskId]) {
+        state.planLogs[taskId] = [];
+      }
+      
+      // Add log entry
+      state.planLogs[taskId].push({
+        timestamp: timestamp || Date.now(),
+        type: type || 'info',
+        message: message || ''
+      });
+      
+      // Keep only last 500 entries per task
+      if (state.planLogs[taskId].length > 500) {
+        state.planLogs[taskId] = state.planLogs[taskId].slice(-500);
+      }
+      
+      // Update the log viewer if expanded and goal is open
+      if (state.currentGoalOpenId === goalId && state.planLogExpanded[taskId]) {
+        const logContainer = document.getElementById('plan-log-' + taskId);
+        if (logContainer) {
+          appendPlanLogEntry(logContainer, state.planLogs[taskId][state.planLogs[taskId].length - 1]);
+        }
+      }
+    }
+    
+    /**
+     * Append a single log entry to the log container
+     */
+    function appendPlanLogEntry(container, entry) {
+      const time = new Date(entry.timestamp).toLocaleTimeString();
+      const typeClass = 'plan-log-' + (entry.type || 'info');
+      const entryEl = document.createElement('div');
+      entryEl.className = 'plan-log-entry ' + typeClass;
+      entryEl.innerHTML = '<span class="plan-log-time">' + escapeHtml(time) + '</span>' +
+        '<span class="plan-log-type">[' + escapeHtml(entry.type || 'info') + ']</span>' +
+        '<span class="plan-log-message">' + escapeHtml(entry.message) + '</span>';
+      container.appendChild(entryEl);
+      
+      // Auto-scroll if user hasn't scrolled up
+      const isScrolledToBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 50;
+      if (isScrolledToBottom) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+    
+    /**
+     * Toggle the plan log viewer visibility
+     */
+    function togglePlanLogViewer(taskId) {
+      state.planLogExpanded[taskId] = !state.planLogExpanded[taskId];
+      renderGoalPane();
+    }
+    
+    /**
+     * Approve a plan
+     */
+    async function approvePlan(goalId, taskId) {
+      try {
+        await rpcCall('plans.approve', { goalId, taskId });
+        showToast('Plan approved', 'success');
+      } catch (e) {
+        console.error('Failed to approve plan:', e);
+        showToast('Failed to approve plan: ' + (e.message || e), 'error');
+      }
+    }
+    
+    /**
+     * Show the reject input for a plan
+     */
+    function showRejectInput(taskId) {
+      state.rejectInputVisible[taskId] = true;
+      renderGoalPane();
+      // Focus the input after render
+      setTimeout(() => {
+        const input = document.getElementById('plan-reject-input-' + taskId);
+        if (input) input.focus();
+      }, 0);
+    }
+    
+    /**
+     * Hide the reject input
+     */
+    function hideRejectInput(taskId) {
+      state.rejectInputVisible[taskId] = false;
+      renderGoalPane();
+    }
+    
+    /**
+     * Reject a plan with feedback
+     */
+    async function rejectPlan(goalId, taskId) {
+      const input = document.getElementById('plan-reject-input-' + taskId);
+      const feedback = input ? input.value.trim() : '';
+      if (!feedback) {
+        showToast('Please provide feedback for rejection', 'warning');
+        return;
+      }
+      try {
+        await rpcCall('plans.reject', { goalId, taskId, feedback });
+        state.rejectInputVisible[taskId] = false;
+        showToast('Plan rejected with feedback', 'info');
+      } catch (e) {
+        console.error('Failed to reject plan:', e);
+        showToast('Failed to reject plan: ' + (e.message || e), 'error');
+      }
+    }
+    
+    /**
+     * Send a comment to the task's session
+     */
+    async function sendPlanComment(goalId, taskId) {
+      const goal = state.goals.find(g => g.id === goalId);
+      if (!goal) return;
+      
+      const task = (goal.tasks || []).find(t => t.id === taskId);
+      if (!task || !task.sessionKey) {
+        showToast('No session associated with this task', 'warning');
+        return;
+      }
+      
+      const input = document.getElementById('plan-comment-input-' + taskId);
+      const message = input ? input.value.trim() : '';
+      if (!message) return;
+      
+      try {
+        input.disabled = true;
+        await rpcCall('chat.send', { sessionKey: task.sessionKey, message });
+        input.value = '';
+        showToast('Comment sent', 'success');
+      } catch (e) {
+        console.error('Failed to send comment:', e);
+        showToast('Failed to send comment: ' + (e.message || e), 'error');
+      } finally {
+        input.disabled = false;
+      }
+    }
+    
+    /**
+     * Calculate aggregate plan progress for a goal
+     */
+    function calculateGoalPlanProgress(goal) {
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+      const tasksWithPlans = tasks.filter(t => t.plan && t.plan.status && t.plan.status !== 'none');
+      if (tasksWithPlans.length === 0) return { totalSteps: 0, doneSteps: 0, percent: 0 };
+      
+      let totalSteps = 0;
+      let doneSteps = 0;
+      tasksWithPlans.forEach(t => {
+        const steps = Array.isArray(t.plan.steps) ? t.plan.steps : [];
+        totalSteps += steps.length;
+        doneSteps += steps.filter(s => s.status === 'done' || s.status === 'skipped').length;
+      });
+      
+      return {
+        totalSteps,
+        doneSteps,
+        percent: totalSteps > 0 ? Math.round((doneSteps / totalSteps) * 100) : 0
+      };
+    }
+    
+    /**
+     * Render the Plans tab content (aggregate view)
+     */
+    function renderPlansTabContent(goal) {
+      const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+      const tasksWithPlans = tasks.filter(t => t.plan && t.plan.status && t.plan.status !== 'none');
+      
+      if (tasksWithPlans.length === 0) {
+        return '<div class="empty-state">No plans yet. Plans will appear here when tasks have execution plans.</div>';
+      }
+      
+      const { totalSteps, doneSteps, percent } = calculateGoalPlanProgress(goal);
+      
+      // Overall progress bar
+      let html = '<div class="plans-overview">' +
+        '<div class="plans-overview-header">' +
+        '<span class="plans-overview-title">Overall Progress</span>' +
+        '<span class="plans-overview-stats">' + doneSteps + ' / ' + totalSteps + ' steps</span>' +
+        '</div>' +
+        '<div class="plan-progress">' +
+        '<div class="plan-progress-bar">' +
+        '<div class="plan-progress-fill" style="width: ' + percent + '%;"></div>' +
+        '</div>' +
+        '<span class="plan-progress-text">' + percent + '% complete</span>' +
+        '</div>' +
+        '</div>';
+      
+      // List of tasks with plans
+      html += '<div class="plans-task-list">';
+      tasksWithPlans.forEach(function(t) {
+        const taskId = t.id;
+        const { emoji, label, cssClass } = getPlanStatusInfo(t.plan);
+        const taskProgress = calculatePlanProgress(t.plan.steps || []);
+        
+        html += '<div class="plans-task-item" onclick="jumpToPlanTask(\'' + escapeHtml(goal.id) + '\', \'' + escapeHtml(taskId) + '\')">' +
+          '<div class="plans-task-status ' + escapeHtml(cssClass) + '">' + emoji + '</div>' +
+          '<div class="plans-task-info">' +
+          '<div class="plans-task-name">' + escapeHtml(t.text || 'Untitled task') + '</div>' +
+          '<div class="plans-task-meta">' +
+          '<span class="plans-task-label">' + escapeHtml(label) + '</span>' +
+          '<span class="plans-task-progress">' + taskProgress + '% done</span>' +
+          '</div>' +
+          '</div>' +
+          '<div class="plans-task-arrow">→</div>' +
+          '</div>';
+      });
+      html += '</div>';
+      
+      return html;
+    }
+    
+    /**
+     * Jump to a specific task and expand its plan
+     */
+    function jumpToPlanTask(goalId, taskId) {
+      state.goalTab = 'tasks';
+      state.expandedTaskPlans[taskId] = true;
+      localStorage.setItem('sharp_expanded_task_plans', JSON.stringify(state.expandedTaskPlans));
+      renderGoalPane();
+      
+      // Scroll to the task
+      setTimeout(() => {
+        const el = document.querySelector('.plan-detail-panel[data-task-id="' + taskId + '"]');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
     }
 
     function renderGoalPane() {
@@ -2859,6 +3407,9 @@
             '</div>';
           }).join('');
         }
+      } else if (state.goalTab === 'plans') {
+        // Plans aggregate view
+        pane.innerHTML = renderPlansTabContent(goal);
       } else {
         // Tasks
         var tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
@@ -2869,25 +3420,37 @@
           // All values escaped via escapeHtml() — safe against XSS
           pane.innerHTML = tasks.map(function(t, idx) {
             var id = escapeHtml(t.id || String(idx));
+            var taskId = t.id || String(idx);
             var taskStatus = t.status || (t.done ? 'done' : 'pending');
             var isDone = t.done || taskStatus === 'done';
             var hasSession = t.sessionKey ? 'has-session' : '';
+            var hasPlan = t.plan && t.plan.status && t.plan.status !== 'none';
             var spawnBtn = (!t.sessionKey && !isDone)
               ? '<button class="goal-task-spawn" onclick="event.stopPropagation(); openSpawnTaskModal(\'' + escapeHtml(goal.id) + '\',\'' + id + '\')" title="Spawn agent session">\u25b6</button>'
               : '';
+            var planBadge = renderPlanBadge(t.plan, taskId);
             var tooltipParts = [taskStatus];
             if (t.sessionKey) tooltipParts.push('session: ' + t.sessionKey);
             if (t.summary) tooltipParts.push(t.summary);
+            if (hasPlan) tooltipParts.push('plan: ' + t.plan.status);
             var tooltip = escapeHtml(tooltipParts.join(' \u00b7 '));
-            return '<div class="goal-task ' + (isDone ? 'done' : '') + '">' +
+            
+            // Task row
+            var taskRow = '<div class="goal-task ' + (isDone ? 'done' : '') + (hasPlan ? ' has-plan' : '') + '">' +
               '<div class="goal-task-status ' + escapeHtml(taskStatus) + ' ' + hasSession + '"' +
               ' onclick="cycleTaskStatus(\'' + id + '\')"' +
               ' oncontextmenu="showTaskStatusMenu(event,\'' + id + '\')"' +
               ' title="' + tooltip + '"></div>' +
               '<span class="goal-task-text">' + escapeHtml(t.text || '') + '</span>' +
+              planBadge +
               spawnBtn +
               '<button class="goal-task-del" onclick="deleteGoalTask(\'' + id + '\')" title="Delete">\u00d7</button>' +
             '</div>';
+            
+            // Plan detail panel (expandable)
+            var planPanel = renderPlanDetailPanel(t.plan, taskId, goal.id);
+            
+            return '<div class="goal-task-wrapper">' + taskRow + planPanel + '</div>';
           }).join('') +
           '<div class="goal-task-compose"><input class="chat-input" id="goalNewTaskInput" placeholder="Add a task\u2026" style="flex:1;" onkeypress="if(event.key===\'Enter\')addGoalTask()"><button class="ghost-btn" onclick="addGoalTask()">Add</button></div>';
         }

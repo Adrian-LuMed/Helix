@@ -80,6 +80,10 @@
   backdrop-filter: blur(12px);
 }
 
+.role-dropdown.hidden {
+  display: none;
+}
+
 .role-dropdown-header {
   padding: 8px 10px 6px;
   font-size: 10px;

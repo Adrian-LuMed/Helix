@@ -5,6 +5,7 @@ import { createGoalsStore } from './lib/goals-store.js';
 import { createGoalHandlers } from './lib/goals-handlers.js';
 import { createCondoHandlers } from './lib/condos-handlers.js';
 import { createPlanHandlers, getPlanLogBuffer } from './lib/plan-handlers.js';
+import { createPmHandlers } from './lib/pm-handlers.js';
 import { createNotificationHandlers } from './lib/notification-manager.js';
 import { createAutonomyHandlers } from './lib/autonomy.js';
 import { buildGoalContext, buildCondoContext, buildCondoMenuContext, getProjectSummaryForGoal } from './lib/context-builder.js';
@@ -55,7 +56,32 @@ export default function register(api) {
   };
 
   for (const [method, handler] of Object.entries(handlers)) {
-    api.registerGatewayMethod(method, handler);
+    // Wrap goals.updatePlan to add broadcast support
+    if (method === 'goals.updatePlan') {
+      api.registerGatewayMethod(method, (msg) => {
+        const originalRespond = msg.respond;
+        msg.respond = (success, data, error) => {
+          // Broadcast on success
+          if (success && data?.plan && data?.goal) {
+            if (api.broadcast) {
+              api.broadcast({
+                type: 'event',
+                event: 'goal.plan_updated',
+                payload: {
+                  goalId: data.goal.id,
+                  plan: data.plan,
+                  timestamp: Date.now(),
+                },
+              });
+            }
+          }
+          originalRespond(success, data, error);
+        };
+        handler(msg);
+      });
+    } else {
+      api.registerGatewayMethod(method, handler);
+    }
   }
 
   const condoHandlers = createCondoHandlers(store);
@@ -92,6 +118,15 @@ export default function register(api) {
     api.registerGatewayMethod(method, handler);
   }
 
+  // PM (Project Manager) mode handlers
+  const pmHandlers = createPmHandlers(store, {
+    sendToSession: api.sendToSession,
+    logger: api.logger,
+  });
+  for (const [method, handler] of Object.entries(pmHandlers)) {
+    api.registerGatewayMethod(method, handler);
+  }
+
   // Notification handlers
   const notificationHandlers = createNotificationHandlers(store);
   for (const [method, handler] of Object.entries(notificationHandlers)) {
@@ -105,6 +140,108 @@ export default function register(api) {
   }
 
   api.registerGatewayMethod('goals.spawnTaskSession', createTaskSpawnHandler(store));
+
+  // goals.kickoff - Spawn sessions for all tasks with assigned agents
+  const taskSpawnHandler = createTaskSpawnHandler(store);
+  api.registerGatewayMethod('goals.kickoff', async ({ params, respond }) => {
+    const { goalId } = params || {};
+
+    if (!goalId) {
+      return respond(false, null, 'goalId is required');
+    }
+
+    try {
+      const data = store.load();
+      const goal = data.goals.find(g => g.id === goalId);
+
+      if (!goal) {
+        return respond(false, null, `Goal ${goalId} not found`);
+      }
+
+      const tasks = goal.tasks || [];
+      const tasksToSpawn = tasks.filter(t => 
+        t.assignedAgent && 
+        !t.sessionKey && 
+        t.status !== 'done'
+      );
+
+      if (tasksToSpawn.length === 0) {
+        return respond(true, {
+          goalId,
+          spawnedSessions: [],
+          message: 'No tasks with assigned agents to spawn',
+        });
+      }
+
+      const spawnedSessions = [];
+      const errors = [];
+
+      for (const task of tasksToSpawn) {
+        try {
+          // Create a promise-based wrapper for the spawn handler
+          const result = await new Promise((resolve, reject) => {
+            taskSpawnHandler({
+              params: {
+                goalId,
+                taskId: task.id,
+                agentId: task.assignedAgent,
+                model: task.model || null,
+              },
+              respond: (success, data, error) => {
+                if (success) {
+                  resolve(data);
+                } else {
+                  reject(new Error(error?.message || error || 'Spawn failed'));
+                }
+              },
+            });
+          });
+
+          spawnedSessions.push({
+            taskId: task.id,
+            taskText: task.text,
+            sessionKey: result.sessionKey,
+            agentId: result.agentId,
+            autonomyMode: result.autonomyMode,
+          });
+        } catch (err) {
+          errors.push({
+            taskId: task.id,
+            taskText: task.text,
+            error: err.message,
+          });
+        }
+      }
+
+      // Update goal status to 'in-progress' if any sessions spawned
+      if (spawnedSessions.length > 0) {
+        const updatedData = store.load();
+        const updatedGoal = updatedData.goals.find(g => g.id === goalId);
+        if (updatedGoal && updatedGoal.status !== 'done') {
+          updatedGoal.status = 'active';
+          updatedGoal.updatedAtMs = Date.now();
+          store.save(updatedData);
+        }
+
+        // Broadcast kickoff event
+        broadcastPlanUpdate({
+          event: 'goal.kickoff',
+          goalId,
+          spawnedCount: spawnedSessions.length,
+          spawnedSessions,
+        });
+      }
+
+      respond(true, {
+        goalId,
+        spawnedSessions,
+        errors: errors.length > 0 ? errors : undefined,
+        message: `Spawned ${spawnedSessions.length} session(s)${errors.length > 0 ? `, ${errors.length} error(s)` : ''}`,
+      });
+    } catch (err) {
+      respond(false, null, err.message);
+    }
+  });
 
   // ── Plan file watching ──
   const planLogBuffer = getPlanLogBuffer();
@@ -645,6 +782,6 @@ export default function register(api) {
     { names: ['condo_spawn_task'] }
   );
 
-  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + Object.keys(planHandlers).length + Object.keys(notificationHandlers).length + Object.keys(autonomyHandlers).length + 1 + 3; // +1 spawnTaskSession, +3 classification RPC methods
+  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + Object.keys(planHandlers).length + Object.keys(pmHandlers).length + Object.keys(notificationHandlers).length + Object.keys(autonomyHandlers).length + 2 + 3; // +2 spawnTaskSession/kickoff, +3 classification RPC methods
   api.logger.info(`clawcondos-goals: registered ${totalMethods} gateway methods, 5 tools, ${planFileWatchers.size} plan file watchers, data at ${dataDir}`);
 }

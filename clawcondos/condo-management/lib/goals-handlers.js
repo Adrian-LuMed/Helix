@@ -84,7 +84,7 @@ export function createGoalHandlers(store) {
         }
 
         // Whitelist allowed patch fields (prevent overwriting internal fields)
-        const allowed = ['title', 'description', 'status', 'completed', 'condoId', 'priority', 'deadline', 'notes', 'tasks', 'nextTask', 'dropped', 'droppedAtMs', 'files'];
+        const allowed = ['title', 'description', 'status', 'completed', 'condoId', 'priority', 'deadline', 'notes', 'tasks', 'nextTask', 'dropped', 'droppedAtMs', 'files', 'plan'];
         for (const f of allowed) {
           if (f in params) goal[f] = params[f];
         }
@@ -249,7 +249,7 @@ export function createGoalHandlers(store) {
 
     'goals.addTask': ({ params, respond }) => {
       try {
-        const { goalId, text, description, priority, dependsOn } = params;
+        const { goalId, text, description, priority, dependsOn, assignedAgent, model } = params;
         if (!goalId || !text || typeof text !== 'string' || !text.trim()) {
           respond(false, undefined, { message: 'goalId and text are required' });
           return;
@@ -269,6 +269,8 @@ export function createGoalHandlers(store) {
           done: false,
           priority: priority || null,
           sessionKey: null,
+          assignedAgent: assignedAgent || null,
+          model: model || null,
           dependsOn: Array.isArray(dependsOn) ? dependsOn : [],
           summary: '',
           createdAtMs: now,
@@ -302,7 +304,7 @@ export function createGoalHandlers(store) {
           return;
         }
         // Whitelist allowed patch fields
-        const allowed = ['text', 'description', 'status', 'done', 'priority', 'dependsOn', 'summary'];
+        const allowed = ['text', 'description', 'status', 'done', 'priority', 'dependsOn', 'summary', 'assignedAgent', 'model'];
         for (const f of allowed) {
           if (f in params) task[f] = params[f];
         }
@@ -412,6 +414,55 @@ export function createGoalHandlers(store) {
         goal.updatedAtMs = Date.now();
         saveData(data);
         respond(true, { ok: true, files: goal.files });
+      } catch (err) {
+        respond(false, undefined, { message: String(err) });
+      }
+    },
+
+    'goals.updatePlan': ({ params, respond }) => {
+      try {
+        const { goalId, plan } = params;
+        if (!goalId) {
+          respond(false, undefined, { message: 'goalId is required' });
+          return;
+        }
+        if (!plan || typeof plan !== 'object') {
+          respond(false, undefined, { message: 'plan object is required' });
+          return;
+        }
+        const data = loadData();
+        const goal = data.goals.find(g => g.id === goalId);
+        if (!goal) {
+          respond(false, undefined, { message: 'Goal not found' });
+          return;
+        }
+
+        // Initialize or update goal-level plan
+        const now = Date.now();
+        const existingPlan = goal.plan || {};
+
+        // Validate plan fields
+        const validStatuses = ['none', 'draft', 'awaiting_approval', 'approved', 'rejected', 'executing', 'completed'];
+        const newPlan = {
+          status: validStatuses.includes(plan.status) ? plan.status : (existingPlan.status || 'draft'),
+          content: typeof plan.content === 'string' ? plan.content : (existingPlan.content || ''),
+          steps: Array.isArray(plan.steps) ? plan.steps.map((step, idx) => ({
+            index: idx,
+            title: step.title || step.text || '',
+            taskId: step.taskId || null,
+            status: step.status || 'pending',
+            description: step.description || '',
+          })) : (existingPlan.steps || []),
+          feedback: typeof plan.feedback === 'string' ? plan.feedback : (existingPlan.feedback || null),
+          updatedAtMs: now,
+          createdAtMs: existingPlan.createdAtMs || now,
+        };
+
+        goal.plan = newPlan;
+        goal.updatedAtMs = now;
+        saveData(data);
+
+        respond(true, { goal, plan: newPlan });
       } catch (err) {
         respond(false, undefined, { message: String(err) });
       }

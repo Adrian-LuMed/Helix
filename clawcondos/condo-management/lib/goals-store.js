@@ -18,6 +18,18 @@ export function createGoalsStore(dataDir) {
       const rawGoals = Array.isArray(parsed.goals) ? parsed.goals : [];
       const goals = rawGoals.map(g => {
         const completed = g?.completed === true || g?.status === 'done';
+        // Normalize goal-level plan
+        let plan = null;
+        if (g?.plan && typeof g.plan === 'object') {
+          plan = {
+            status: g.plan.status || 'none',
+            content: g.plan.content || '',
+            steps: Array.isArray(g.plan.steps) ? g.plan.steps : [],
+            feedback: g.plan.feedback || null,
+            createdAtMs: g.plan.createdAtMs || null,
+            updatedAtMs: g.plan.updatedAtMs || null,
+          };
+        }
         return {
           ...g,
           condoId: g?.condoId ?? null,
@@ -26,6 +38,7 @@ export function createGoalsStore(dataDir) {
           sessions: Array.isArray(g?.sessions) ? g.sessions : [],
           tasks: Array.isArray(g?.tasks) ? g.tasks : [],
           files: Array.isArray(g?.files) ? g.files : [],
+          plan,
         };
       });
       return {

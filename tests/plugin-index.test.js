@@ -65,6 +65,8 @@ describe('Plugin index.js', () => {
         'config.get', 'config.set', 'config.setRole', 'config.getRole', 'config.listRoles',
         // Team handlers
         'team.getMessages', 'team.send', 'team.notify', 'team.status',
+        // Roles handlers
+        'roles.assign', 'roles.list', 'roles.unassign', 'roles.setLabel',
         // Notification handlers
         'notifications.list', 'notifications.markRead', 'notifications.dismiss', 'notifications.unreadCount',
         // Autonomy handlers

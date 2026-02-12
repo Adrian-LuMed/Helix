@@ -1,6 +1,7 @@
 import { buildGoalContext, getProjectSummaryForGoal } from './context-builder.js';
 import { createEmptyPlan } from './plan-manager.js';
 import { resolveAutonomyMode, buildAutonomyDirective } from './autonomy.js';
+import { getWorkerSkillContext } from './skill-injector.js';
 import { join } from 'path';
 import os from 'os';
 
@@ -66,11 +67,30 @@ export function createTaskSpawnHandler(store) {
       const autonomyMode = resolveAutonomyMode(task, condo);
       const autonomyDirective = buildAutonomyDirective(autonomyMode);
 
-      // Build spawned agent context: project summary (if in condo) + goal state + task assignment
+      // Build spawned agent context: project summary (if in condo) + goal state + task assignment + worker skill
       const goalContext = buildGoalContext(goal, { currentSessionKey: sessionKey });
       const ps = getProjectSummaryForGoal(goal, data);
       const projectPrefix = ps ? ps + '\n\n' : '';
+      
+      // Get worker skill context with task details
+      const workerSkillContext = getWorkerSkillContext({
+        goalId,
+        taskId,
+        taskText: task.text,
+        taskDescription: task.description || null,
+        goalTitle: goal.title,
+        condoId: goal.condoId || null,
+        condoName: condo?.name || null,
+        autonomyMode,
+        planFilePath,
+        assignedRole: task.assignedAgent || null,
+      });
+      
       const taskContext = [
+        // Start with worker skill if available
+        workerSkillContext || null,
+        '',
+        // Then project/goal context
         projectPrefix + goalContext,
         '',
         '---',

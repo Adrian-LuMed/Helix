@@ -4,6 +4,7 @@
  */
 
 import { getPmSession, getAgentForRole } from './agent-roles.js';
+import { getPmSkillContext } from './skill-injector.js';
 
 /**
  * Create PM RPC handlers
@@ -51,14 +52,27 @@ export function createPmHandlers(store, options = {}) {
       // Build context message with condo info
       const goals = data.goals.filter(g => g.condoId === condoId);
       const activeGoals = goals.filter(g => !g.completed);
+      const allTasks = goals.flatMap(g => g.tasks || []);
+      const pendingTasks = allTasks.filter(t => t.status !== 'done');
+      
+      // Get PM skill context
+      const pmSkillContext = getPmSkillContext({
+        condoId,
+        condoName: condo.name,
+        activeGoals: activeGoals.length,
+        totalTasks: allTasks.length,
+        pendingTasks: pendingTasks.length,
+      });
       
       const contextPrefix = [
+        pmSkillContext || null,
+        '',
         `[PM Mode Context]`,
         `Condo: ${condo.name}`,
         `Active Goals: ${activeGoals.length}`,
         '',
         'User Message:',
-      ].join('\n');
+      ].filter(line => line != null).join('\n');
 
       const fullMessage = `${contextPrefix}\n${message.trim()}`;
 

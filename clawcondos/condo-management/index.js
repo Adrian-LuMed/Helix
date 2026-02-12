@@ -8,6 +8,7 @@ import { createPlanHandlers, getPlanLogBuffer } from './lib/plan-handlers.js';
 import { createPmHandlers } from './lib/pm-handlers.js';
 import { createConfigHandlers } from './lib/config-handlers.js';
 import { createTeamHandlers } from './lib/team-handlers.js';
+import { createRolesHandlers } from './lib/roles-handlers.js';
 import { createNotificationHandlers } from './lib/notification-manager.js';
 import { createAutonomyHandlers } from './lib/autonomy.js';
 import { buildGoalContext, buildCondoContext, buildCondoMenuContext, getProjectSummaryForGoal } from './lib/context-builder.js';
@@ -146,6 +147,15 @@ export default function register(api) {
     logger: api.logger,
   });
   for (const [method, handler] of Object.entries(teamHandlers)) {
+    api.registerGatewayMethod(method, handler);
+  }
+
+  // Roles handlers (agent role assignment with labels)
+  const rolesHandlers = createRolesHandlers(store, {
+    broadcast: api.broadcast,
+    logger: api.logger,
+  });
+  for (const [method, handler] of Object.entries(rolesHandlers)) {
     api.registerGatewayMethod(method, handler);
   }
 
@@ -808,6 +818,6 @@ export default function register(api) {
     { names: ['condo_spawn_task'] }
   );
 
-  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + Object.keys(planHandlers).length + Object.keys(pmHandlers).length + Object.keys(configHandlers).length + Object.keys(teamHandlers).length + Object.keys(notificationHandlers).length + Object.keys(autonomyHandlers).length + 2 + 3; // +2 spawnTaskSession/kickoff, +3 classification RPC methods
+  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + Object.keys(planHandlers).length + Object.keys(pmHandlers).length + Object.keys(configHandlers).length + Object.keys(teamHandlers).length + Object.keys(rolesHandlers).length + Object.keys(notificationHandlers).length + Object.keys(autonomyHandlers).length + 2 + 3; // +2 spawnTaskSession/kickoff, +3 classification RPC methods
   api.logger.info(`clawcondos-goals: registered ${totalMethods} gateway methods, 5 tools, ${planFileWatchers.size} plan file watchers, data at ${dataDir}`);
 }

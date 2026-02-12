@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { createGoalsStore } from './lib/goals-store.js';
 import { createGoalHandlers } from './lib/goals-handlers.js';
 import { createCondoHandlers } from './lib/condos-handlers.js';
+import { createPlanHandlers } from './lib/plan-handlers.js';
 import { buildGoalContext, buildCondoContext, buildCondoMenuContext, getProjectSummaryForGoal } from './lib/context-builder.js';
 import { createGoalUpdateExecutor } from './lib/goal-update-tool.js';
 import { createTaskSpawnHandler } from './lib/task-spawn.js';
@@ -55,6 +56,12 @@ export default function register(api) {
 
   const condoHandlers = createCondoHandlers(store);
   for (const [method, handler] of Object.entries(condoHandlers)) {
+    api.registerGatewayMethod(method, handler);
+  }
+
+  // Plan management handlers
+  const planHandlers = createPlanHandlers(store);
+  for (const [method, handler] of Object.entries(planHandlers)) {
     api.registerGatewayMethod(method, handler);
   }
 
@@ -251,6 +258,8 @@ export default function register(api) {
               description: 'Files created or modified while working on this goal/task. Paths (strings).',
               items: { type: 'string' },
             },
+            planFile: { type: 'string', description: 'Path to a plan markdown file to sync with the task (requires taskId)' },
+            planStatus: { type: 'string', enum: ['none', 'draft', 'awaiting_approval', 'approved', 'rejected', 'executing', 'completed'], description: 'Update the plan status for the task (requires taskId)' },
           },
         },
         async execute(toolCallId, params) {
@@ -393,6 +402,6 @@ export default function register(api) {
     { names: ['condo_spawn_task'] }
   );
 
-  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + 1 + 3; // +3 for classification RPC methods
+  const totalMethods = Object.keys(handlers).length + Object.keys(condoHandlers).length + Object.keys(planHandlers).length + 1 + 3; // +1 spawnTaskSession, +3 classification RPC methods
   api.logger.info(`clawcondos-goals: registered ${totalMethods} gateway methods, 5 tools, data at ${dataDir}`);
 }

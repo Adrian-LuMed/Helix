@@ -5693,6 +5693,21 @@ Response format:
       }
     }
 
+    async function deleteCondo(condoId, condoName) {
+      if (!confirm('Delete condo "' + condoName + '"?\n\nGoals inside will become uncategorized.')) {
+        return;
+      }
+      try {
+        await rpcCall('condos.delete', { condoId: condoId });
+        await loadCondos();
+        await loadGoals();
+        renderGoals();
+        showToast('Condo deleted: ' + condoName);
+      } catch (e) {
+        showToast('Failed to delete condo: ' + (e.message || e), 'error');
+      }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // CREATE GOAL MODAL
     // ═══════════════════════════════════════════════════════════════
@@ -8259,7 +8274,7 @@ Response format:
             if (getAgentStatus(sk) === 'thinking') activeSessions++;
           });
         });
-        cards.push(renderCondoCard(condo.name || 'Unnamed condo', goals, attention, activeSessions, totalSessions));
+        cards.push(renderCondoCard(condo, goals, attention, activeSessions, totalSessions));
       }
 
       // Uncategorized goals
@@ -8273,13 +8288,18 @@ Response format:
             if (getAgentStatus(sk) === 'thinking') uncatActiveSessions++;
           });
         });
-        cards.push(renderCondoCard('Uncategorized', uncategorized, 'none', uncatActiveSessions, uncatTotalSessions));
+        cards.push(renderCondoCard(null, uncategorized, 'none', uncatActiveSessions, uncatTotalSessions));
       }
 
       container.innerHTML = cards.join('');
     }
 
-    function renderCondoCard(condoName, goals, attention, activeSessions, totalSessions) {
+    function renderCondoCard(condo, goals, attention, activeSessions, totalSessions) {
+      // condo can be null for "Uncategorized"
+      const condoId = condo ? condo.id : null;
+      const condoName = condo ? (condo.name || 'Unnamed condo') : 'Uncategorized';
+      const isRealCondo = !!condo;
+
       const attentionBorder = attention === 'needs-input' ? ' condo-attention-needs-input'
         : attention === 'unread' ? ' condo-attention-unread' : '';
 
@@ -8306,11 +8326,22 @@ Response format:
       }
       if (activeSessions > 0) headerStats.push(activeSessions + ' running');
 
+      // Action buttons for real condos (not Uncategorized)
+      const btnStyle = 'background: transparent; border: 1px solid var(--border); border-radius: 4px; width: 24px; height: 24px; cursor: pointer; font-size: 14px; color: var(--text-dim); display: flex; align-items: center; justify-content: center; margin-left: 6px;';
+      const addGoalBtn = isRealCondo
+        ? '<button style="' + btnStyle + '" onclick="event.stopPropagation(); showCreateGoalModalForCondo(\'' + escapeHtml(condoId) + '\', \'' + escapeHtml(condoName) + '\')" title="Add goal">+</button>'
+        : '';
+      const deleteBtn = isRealCondo
+        ? '<button style="' + btnStyle + ' color: var(--error, #ef4444);" onclick="event.stopPropagation(); deleteCondo(\'' + escapeHtml(condoId) + '\', \'' + escapeHtml(condoName) + '\')" title="Delete condo">×</button>'
+        : '';
+
       // Empty state for condos with no goals
       const emptyGoalsHtml = goals.length === 0
         ? '<div class="condo-empty-state" style="padding: 16px; text-align: center; color: var(--text-dim); font-size: 0.85rem;">' +
             '<div style="margin-bottom: 8px;">No goals yet</div>' +
-            '<button class="btn btn-sm" onclick="event.stopPropagation(); showCreateGoalModal()" style="font-size: 0.8rem;">+ Add Goal</button>' +
+            (isRealCondo
+              ? '<button class="btn btn-sm" onclick="event.stopPropagation(); showCreateGoalModalForCondo(\'' + escapeHtml(condoId) + '\', \'' + escapeHtml(condoName) + '\')" style="font-size: 0.8rem;">+ Add Goal</button>'
+              : '') +
           '</div>'
         : '';
 
@@ -8320,7 +8351,11 @@ Response format:
             '<span class="condo-status-name">' + escapeHtml(condoName) + '</span>' +
             (activeSessions > 0 ? '<span class="condo-running-badge">' + activeSessions + ' running</span>' : '') +
           '</div>' +
-          '<span class="condo-status-count">' + headerStats.join(' \u00b7 ') + '</span>' +
+          '<div class="condo-status-header-right" style="display: flex; align-items: center; gap: 4px;">' +
+            '<span class="condo-status-count">' + headerStats.join(' · ') + '</span>' +
+            addGoalBtn +
+            deleteBtn +
+          '</div>' +
         '</div>' +
         '<div class="condo-status-goals">' + (goals.length > 0 ? goalRows + doneSummary : emptyGoalsHtml) + '</div>' +
       '</div>';

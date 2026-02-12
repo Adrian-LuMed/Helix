@@ -16,8 +16,9 @@
 # User apps (built separately)
 apps/
 
-# Logs
+# Logs and runtime files
 *.log
+.server.pid
 
 # Editor files
 *.swp

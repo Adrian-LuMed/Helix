@@ -4,6 +4,14 @@
   "description": "Goals, tasks, and condos management plugin for OpenClaw",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "start": "./scripts/server.sh start",
+    "stop": "./scripts/server.sh stop",
+    "restart": "./scripts/server.sh restart",
+    "status": "./scripts/server.sh status",
+    "dev": "node index.js",
+    "test": "node --test tests/"
+  },
   "license": "MIT",
   "author": "Albert Castellana",
   "repository": {

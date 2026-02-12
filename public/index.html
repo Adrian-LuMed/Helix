@@ -120,28 +120,7 @@
     </div>
   </div>
 
-  <!-- ═══════════════════════════════════════════════════════════════
-       PM CHAT MODAL (Chat with PM agent for plan discussions)
-       ═══════════════════════════════════════════════════════════════ -->
-  <div class="modal-overlay hidden" id="pmChatModal">
-    <div class="modal pm-chat-modal" style="max-width: 600px; max-height: 80vh; display: flex; flex-direction: column;">
-      <div class="pm-chat-header">
-        <h2 class="modal-title">💬 Chat with PM</h2>
-        <div class="pm-chat-goal-label" id="pmChatGoalLabel">Goal: —</div>
-        <button class="ghost-btn" onclick="closePMChatModal()" style="position: absolute; right: 16px; top: 16px; background: none; border: none; color: var(--text-dim); font-size: 1.2rem; cursor: pointer;">✕</button>
-      </div>
-      <div class="pm-chat-messages" id="pmChatMessages">
-        <div class="pm-chat-empty">Start chatting with the PM to discuss plans, request changes, or get clarification.</div>
-      </div>
-      <div class="pm-chat-composer">
-        <textarea class="chat-input pm-chat-input" id="pmChatInput" placeholder="Type a message to the PM agent..." rows="2" onkeypress="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendPMMessage(); }"></textarea>
-        <button class="send-btn pm-chat-send" onclick="sendPMMessage()">
-          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-        </button>
-      </div>
-      <div class="pm-chat-hint">Press Enter to send, Shift+Enter for new line</div>
-    </div>
-  </div>
+  <!-- PM Chat Modal removed - now integrated into goal view tabs -->
 
   <!-- ═══════════════════════════════════════════════════════════════
        SPAWN TASK SESSION MODAL
@@ -414,14 +393,27 @@
       <div class="view" id="goalView">
         <div class="goal-shell" id="goalShell">
           <section class="goal-chat" id="goalChatPanel">
+            <!-- Chat Mode Tabs: PM vs Team -->
+            <div class="goal-chat-tabs">
+              <button class="goal-chat-tab active" id="goalChatTabPM" onclick="setGoalChatMode('pm')">
+                <span class="goal-chat-tab-icon">📋</span>
+                <span>PM</span>
+              </button>
+              <button class="goal-chat-tab" id="goalChatTabTeam" onclick="setGoalChatMode('team')">
+                <span class="goal-chat-tab-icon">👥</span>
+                <span>Team</span>
+                <span class="goal-chat-tab-badge" id="teamUnreadBadge" style="display:none;">0</span>
+              </button>
+            </div>
+            
             <div class="goal-chat-header">
               <div style="display:flex; gap:10px; align-items:baseline; min-width:0;">
-                <div>Chat</div>
+                <div class="goal-chat-mode-label" id="goalChatModeLabel">PM Chat</div>
                 <div class="goal-chat-meta" id="goalChatMeta" style="min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</div>
               </div>
               <div style="display:flex; gap:8px; align-items:center;">
                 <div class="goal-history" id="goalHistoryWrap" style="display:none;">
-                  <span class="goal-history-label">History</span>
+                  <span class="goal-history-label">Session</span>
                   <select class="goal-history-select" id="goalHistorySelect" onchange="handleGoalHistoryChange(this.value)"></select>
                 </div>
                 <div class="session-state-pill" id="goalSessionStatePill" title="Status">
@@ -453,7 +445,6 @@
                 </div>
               </div>
               <div class="goal-right-actions">
-                <button class="goal-pm-chat-btn" id="goalPMChatBtn" onclick="openPMChatModal(state.currentGoalOpenId)" title="Chat with PM agent">💬 PM</button>
                 <button class="ghost-btn" id="goalMarkDoneBtn" onclick="toggleGoalDone()">Mark done</button>
                 <button class="ghost-btn" onclick="showAttachSessionModal(null)">⛓</button>
                 <button class="ghost-btn danger" onclick="promptDeleteGoal()" title="Delete goal">Delete</button>
@@ -1712,8 +1703,9 @@
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, 'idle');
         
-        // Check if this is a categorization/wizard response (from main session)
-        if (sessionKey === 'agent:main:main' && message?.content) {
+        // Check if this is a categorization/wizard response (from PM session)
+        const pmKey = getPmSessionKey();
+        if (sessionKey === pmKey && message?.content) {
           const text = extractText(message.content);
           if (text) {
             // Check wizard first
@@ -2672,18 +2664,33 @@
       var wrap = document.getElementById('goalHistoryWrap');
       var select = document.getElementById('goalHistorySelect');
       if (!wrap || !select) return;
-      var sess = Array.isArray(goal && goal.sessions) ? goal.sessions.slice() : [];
-      if (sess.length < 2) { wrap.style.display = 'none'; return; }
+      
+      // In PM mode, hide the picker
+      if (state.goalChatMode === 'pm') {
+        wrap.style.display = 'none';
+        return;
+      }
+      
+      // In Team mode, show all team sessions (excluding PM)
+      var teamSessions = getGoalTeamSessions(goal);
+      if (teamSessions.length < 1) { 
+        wrap.style.display = 'none'; 
+        return; 
+      }
+      
       var byKey = new Map((state.sessions || []).map(function(s) { return [s.key, s]; }));
       // All values escaped via escapeHtml() — safe against XSS
-      select.innerHTML = sess.map(function(key) {
+      select.innerHTML = teamSessions.map(function(key) {
         var s = byKey.get(key);
         var label = s ? getSessionName(s) + ' \u00b7 ' + getSessionMeta(s) : key;
         return '<option value="' + escapeHtml(key) + '">' + escapeHtml(label) + '</option>';
       }).join('');
-      var current = state.goalChatSessionKey && sess.includes(state.goalChatSessionKey) ? state.goalChatSessionKey : sess[0];
+      var current = state.goalChatSessionKey && teamSessions.includes(state.goalChatSessionKey) ? state.goalChatSessionKey : teamSessions[0];
       if (current) select.value = current;
       wrap.style.display = 'flex';
+      
+      // Update unread badge
+      updateTeamUnreadBadge();
     }
 
     function handleGoalHistoryChange(value) {
@@ -2698,7 +2705,19 @@
       var el = document.getElementById('goalChatMeta');
       if (!el) return;
       var key = state.goalChatSessionKey;
-      if (!key) { el.textContent = 'No session yet'; return; }
+      
+      if (state.goalChatMode === 'pm') {
+        // PM mode - show PM agent info
+        var pmKey = getPmSessionKey();
+        el.textContent = 'Chatting with PM agent';
+        return;
+      }
+      
+      // Team mode - show session info
+      if (!key) { 
+        el.textContent = 'No team sessions yet'; 
+        return; 
+      }
       var s = (state.sessions || []).find(function(x) { return x.key === key; });
       el.textContent = s ? getSessionName(s) + ' \u00b7 ' + getSessionMeta(s) : key;
     }
@@ -2726,11 +2745,25 @@
     async function renderGoalChat() {
       var container = document.getElementById('goal_chatMessages');
       if (!container) return;
-      var sessionKey = state.goalChatSessionKey;
+      
+      // Determine which session to load based on mode
+      var sessionKey;
+      if (state.goalChatMode === 'pm') {
+        sessionKey = getPmSessionKey();
+        state.goalChatSessionKey = sessionKey;
+      } else {
+        sessionKey = state.goalChatSessionKey;
+      }
+      
       if (!sessionKey) {
-        container.innerHTML = '<div class="empty-state" style="padding:24px;">No session selected. Kick off or attach a session to start chatting.</div>';
+        var emptyMsg = state.goalChatMode === 'pm' 
+          ? 'PM session not available. Check your configuration.'
+          : 'No team sessions yet. Kick off a task or attach a session.';
+        container.innerHTML = '<div class="empty-state" style="padding:24px;">' + escapeHtml(emptyMsg) + '</div>';
+        renderGoalComposer();
         return;
       }
+      
       container.innerHTML = '<div class="message system">Loading...</div>';
       try {
         var result = await rpcCall('chat.history', { sessionKey: sessionKey, limit: 100 });
@@ -2749,7 +2782,10 @@
             return '';
           }).filter(Boolean).join('');
         } else {
-          container.innerHTML = '<div class="empty-state" style="padding:24px;">No messages yet.</div>';
+          var emptyText = state.goalChatMode === 'pm'
+            ? 'Start chatting with the PM to discuss plans, adjust tasks, or get clarification.'
+            : 'No messages in this session yet.';
+          container.innerHTML = '<div class="empty-state" style="padding:24px;">' + escapeHtml(emptyText) + '</div>';
         }
         // Scroll the parent .goal-chat-body (the actual overflow container)
         var scrollParent = container.parentElement;
@@ -2763,34 +2799,39 @@
 
       // Render composer
       renderGoalComposer();
+      
+      // Update team unread badge
+      updateTeamUnreadBadge();
     }
 
     function renderGoalComposer() {
       var mount = document.getElementById('composerMountGoal');
       if (!mount) return;
-      var sessionKey = state.goalChatSessionKey;
-      if (!sessionKey) { mount.innerHTML = ''; return; }
-      // Static safe HTML — sessionKey escaped
+      
+      // In PM mode, always show composer
+      // In Team mode, need a session
+      var canChat = state.goalChatMode === 'pm' || state.goalChatSessionKey;
+      if (!canChat) { 
+        mount.innerHTML = '<div style="padding:10px 14px;color:var(--text-dim);font-size:0.85rem;">No team session to chat with. Switch to PM tab or kick off a task.</div>'; 
+        return; 
+      }
+      
+      var placeholder = state.goalChatMode === 'pm' 
+        ? 'Chat with PM about goals, tasks, and plans...' 
+        : 'Message team...';
+      
+      // Static safe HTML
       mount.innerHTML = '<div class="chat-input-area" style="border-top:1px solid var(--border-subtle);padding:10px 14px;">' +
         '<div style="display:flex;gap:8px;">' +
-          '<input type="text" class="chat-input" id="goalChatInput" placeholder="Message..." style="flex:1;" onkeypress="if(event.key===\'Enter\')sendGoalMessage()">' +
-          '<button class="send-btn" onclick="sendGoalMessage()" style="padding:8px 16px;">Send</button>' +
+          '<input type="text" class="chat-input" id="goalChatInput" placeholder="' + escapeHtml(placeholder) + '" style="flex:1;" onkeypress="if(event.key===\'Enter\')sendGoalChatMessage()">' +
+          '<button class="send-btn" onclick="sendGoalChatMessage()" style="padding:8px 16px;">Send</button>' +
         '</div>' +
       '</div>';
     }
 
+    // Legacy function - redirect to unified handler
     async function sendGoalMessage() {
-      var input = document.getElementById('goalChatInput');
-      if (!input) return;
-      var text = input.value.trim();
-      if (!text || !state.goalChatSessionKey) return;
-      input.value = '';
-      try {
-        await rpcCall('chat.send', { sessionKey: state.goalChatSessionKey, message: text });
-        await renderGoalChat();
-      } catch (err) {
-        showToast('Send failed: ' + err.message, 'error');
-      }
+      await sendGoalChatMessage();
     }
 
     function openGoalChatInFull() {
@@ -3316,22 +3357,12 @@
     }
     
     // ═══════════════════════════════════════════════════════════════
-    // AGENT LABELS — Emoji + name mapping for task agents
+    // AGENT LABELS — Dynamic labels from config + sensible defaults
     // ═══════════════════════════════════════════════════════════════
-    
-    const AGENT_LABEL_MAP = {
-      'felix': { emoji: '🎨', name: 'Félix' },
-      'félix': { emoji: '🎨', name: 'Félix' },
-      'dana': { emoji: '✨', name: 'Dana' },
-      'blake': { emoji: '⚙️', name: 'Blake' },
-      'quinn': { emoji: '🔍', name: 'Quinn' },
-      'main': { emoji: '🤖', name: 'Main' },
-      'claudia': { emoji: '🤖', name: 'Claudia' },
-      'pm': { emoji: '📋', name: 'PM' },
-    };
     
     /**
      * Get agent label info (emoji + name) from agentId or agentLabel
+     * Uses config.agentLabels for customization, falls back to generic labels
      * @param {Object} task - Task object with optional assignedAgent or agentLabel
      * @returns {{ emoji: string, name: string } | null}
      */
@@ -3343,30 +3374,26 @@
       
       const normalized = String(agentId).toLowerCase().trim();
       
-      // Check direct mapping
-      if (AGENT_LABEL_MAP[normalized]) {
-        return AGENT_LABEL_MAP[normalized];
-      }
-      
-      // Check if any key is contained in the agentId (e.g., "agent:felix:main" contains "felix")
-      for (const [key, value] of Object.entries(AGENT_LABEL_MAP)) {
-        if (normalized.includes(key)) {
-          return value;
-        }
+      // Check config-based custom labels first
+      const configLabel = window.ClawCondosConfig?.getAgentLabel?.(normalized);
+      if (configLabel) {
+        return configLabel;
       }
       
       // Extract agent name from sessionKey format "agent:name:..."
       const match = normalized.match(/^agent:([^:]+)/);
       if (match) {
         const name = match[1];
-        if (AGENT_LABEL_MAP[name]) {
-          return AGENT_LABEL_MAP[name];
+        // Check config for the extracted name
+        const nameLabel = window.ClawCondosConfig?.getAgentLabel?.(name);
+        if (nameLabel) {
+          return nameLabel;
         }
-        // Return unknown agent with generic icon
+        // Return with generic icon and capitalized name
         return { emoji: '🤖', name: name.charAt(0).toUpperCase() + name.slice(1) };
       }
       
-      // Default: capitalize the agentId
+      // Default: capitalize the agentId with generic icon
       return { emoji: '🤖', name: agentId.charAt(0).toUpperCase() + agentId.slice(1) };
     }
     
@@ -3386,149 +3413,187 @@
     }
     
     // ═══════════════════════════════════════════════════════════════
-    // PM CHAT — Chat with PM agent for plan discussions
+    // GOAL CHAT MODES — PM vs Team tabs in goal view
     // ═══════════════════════════════════════════════════════════════
     
-    state.pmChatGoalId = null;
-    state.pmChatMessages = [];
+    // Chat mode: 'pm' or 'team'
+    state.goalChatMode = 'pm';
     state.pmChatPendingResponse = false;
     
     /**
-     * Open PM chat modal for a goal
-     * @param {string} goalId - Goal ID to chat about
+     * Get the PM session key from config
+     * @returns {string} PM session key (e.g., "agent:main:main")
+     */
+    function getPmSessionKey() {
+      return window.ClawCondosConfig?.getPmSessionKey?.() || 'agent:main:main';
+    }
+    
+    /**
+     * Switch between PM and Team chat modes
+     * @param {string} mode - 'pm' or 'team'
+     */
+    function setGoalChatMode(mode) {
+      state.goalChatMode = mode;
+      
+      // Update tab UI
+      const pmTab = document.getElementById('goalChatTabPM');
+      const teamTab = document.getElementById('goalChatTabTeam');
+      const modeLabel = document.getElementById('goalChatModeLabel');
+      const historyWrap = document.getElementById('goalHistoryWrap');
+      
+      if (pmTab) pmTab.classList.toggle('active', mode === 'pm');
+      if (teamTab) teamTab.classList.toggle('active', mode === 'team');
+      
+      if (modeLabel) {
+        modeLabel.textContent = mode === 'pm' ? 'PM Chat' : 'Team Activity';
+      }
+      
+      // Show/hide session picker based on mode
+      if (historyWrap) {
+        historyWrap.style.display = mode === 'team' ? 'flex' : 'none';
+      }
+      
+      // Update chat content
+      if (mode === 'pm') {
+        state.goalChatSessionKey = getPmSessionKey();
+      } else {
+        // Team mode: use latest task session or first session
+        const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+        if (goal) {
+          state.goalChatSessionKey = getLatestGoalSessionKey(goal);
+        }
+      }
+      
+      renderGoalChat();
+      updateGoalChatMeta();
+    }
+    
+    /**
+     * Legacy function for compatibility - now just switches to PM tab
+     * @param {string} goalId - Goal ID (ignored, uses current goal)
      */
     function openPMChatModal(goalId) {
-      const goal = state.goals.find(g => g.id === goalId);
-      if (!goal) return;
-      
-      state.pmChatGoalId = goalId;
-      state.pmChatMessages = [];
-      
-      document.getElementById('pmChatGoalLabel').textContent = 'Goal: ' + (goal.title || 'Untitled');
-      document.getElementById('pmChatMessages').innerHTML = 
-        '<div class="pm-chat-empty">Start chatting with the PM to discuss plans, request changes, or get clarification.</div>';
-      document.getElementById('pmChatInput').value = '';
-      document.getElementById('pmChatModal').classList.remove('hidden');
-      
-      // Focus input
-      setTimeout(() => document.getElementById('pmChatInput').focus(), 100);
+      // Switch to PM chat mode instead of opening modal
+      setGoalChatMode('pm');
     }
     
     /**
-     * Close PM chat modal
+     * Legacy function for compatibility - no-op
      */
     function closePMChatModal() {
-      document.getElementById('pmChatModal').classList.add('hidden');
-      state.pmChatGoalId = null;
-      state.pmChatPendingResponse = false;
+      // No-op - modal replaced with tabs
     }
     
     /**
-     * Send message to PM agent
+     * Send message in current chat mode (PM or Team)
      */
-    async function sendPMMessage() {
-      const input = document.getElementById('pmChatInput');
+    async function sendGoalChatMessage() {
+      const input = document.getElementById('goalChatInput');
+      if (!input) return;
+      
       const message = input.value.trim();
-      if (!message || !state.pmChatGoalId || state.pmChatPendingResponse) return;
+      if (!message || state.pmChatPendingResponse) return;
+      
+      const sessionKey = state.goalChatSessionKey;
+      if (!sessionKey) {
+        showToast('No active session', 'warning');
+        return;
+      }
       
       input.value = '';
       state.pmChatPendingResponse = true;
       
-      // Add user message to UI
-      addPMChatMessage('user', message);
-      
-      // Show typing indicator
-      showPMTypingIndicator();
-      
       try {
-        // Call pm.chat RPC
-        const result = await rpcCall('pm.chat', {
-          goalId: state.pmChatGoalId,
-          message: message,
-        }, 60000); // 60s timeout for PM responses
-        
-        hidePMTypingIndicator();
-        
-        if (result && result.response) {
-          addPMChatMessage('assistant', result.response);
-          
-          // If the PM made changes to the plan, refresh goal data
-          if (result.planUpdated) {
-            await loadGoals();
-            if (state.currentGoalOpenId === state.pmChatGoalId) {
+        if (state.goalChatMode === 'pm') {
+          // PM mode: use pm.chat RPC if available, fallback to chat.send
+          try {
+            const result = await rpcCall('pm.chat', {
+              goalId: state.currentGoalOpenId,
+              message: message,
+            }, 60000);
+            
+            if (result?.planUpdated) {
+              await loadGoals();
               renderGoalPane();
             }
+          } catch (e) {
+            // Fallback to direct chat.send
+            await rpcCall('chat.send', {
+              sessionKey: sessionKey,
+              message: message,
+              idempotencyKey: `goal-pm-${Date.now()}`
+            }, 60000);
           }
+        } else {
+          // Team mode: send to selected session
+          await rpcCall('chat.send', {
+            sessionKey: sessionKey,
+            message: message,
+            idempotencyKey: `goal-team-${Date.now()}`
+          }, 60000);
         }
+        
+        // Refresh chat after sending
+        setTimeout(() => renderGoalChat(), 500);
       } catch (err) {
-        console.error('PM chat error:', err);
-        hidePMTypingIndicator();
-        addPMChatMessage('assistant', '❌ Failed to reach PM agent: ' + (err.message || 'Unknown error'));
+        console.error('Goal chat send error:', err);
+        showToast('Failed to send: ' + (err.message || 'Unknown error'), 'error');
       } finally {
         state.pmChatPendingResponse = false;
       }
     }
     
     /**
-     * Add a message to PM chat UI
+     * Get all team sessions for a goal (task sessions)
+     * @param {Object} goal - Goal object
+     * @returns {Array} Array of session keys
      */
-    function addPMChatMessage(role, content) {
-      const container = document.getElementById('pmChatMessages');
+    function getGoalTeamSessions(goal) {
+      if (!goal) return [];
       
-      // Remove empty state
-      const empty = container.querySelector('.pm-chat-empty');
-      if (empty) empty.remove();
+      const sessions = new Set();
       
-      const msgDiv = document.createElement('div');
-      msgDiv.className = 'pm-chat-message ' + role;
+      // Add explicitly attached sessions
+      if (Array.isArray(goal.sessions)) {
+        goal.sessions.forEach(s => sessions.add(s));
+      }
       
-      const icon = role === 'user' ? '👤' : '📋';
-      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      // Add task sessions
+      if (Array.isArray(goal.tasks)) {
+        goal.tasks.forEach(t => {
+          if (t.sessionKey) sessions.add(t.sessionKey);
+        });
+      }
       
-      msgDiv.innerHTML = 
-        '<span class="pm-chat-message-icon">' + icon + '</span>' +
-        '<div class="pm-chat-message-content">' +
-          formatMessage(content) +
-          '<div class="pm-chat-message-time">' + time + '</div>' +
-        '</div>';
+      // Filter out PM session
+      const pmKey = getPmSessionKey();
+      sessions.delete(pmKey);
       
-      container.appendChild(msgDiv);
-      container.scrollTop = container.scrollHeight;
-      
-      state.pmChatMessages.push({ role, content, timestamp: Date.now() });
+      return Array.from(sessions);
     }
     
     /**
-     * Show PM typing indicator
+     * Update team unread badge
      */
-    function showPMTypingIndicator() {
-      const container = document.getElementById('pmChatMessages');
+    function updateTeamUnreadBadge() {
+      const badge = document.getElementById('teamUnreadBadge');
+      if (!badge) return;
       
-      const existing = container.querySelector('.pm-chat-typing');
-      if (existing) return;
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) {
+        badge.style.display = 'none';
+        return;
+      }
       
-      const typing = document.createElement('div');
-      typing.className = 'pm-chat-typing pm-chat-message assistant';
-      typing.innerHTML = 
-        '<span class="pm-chat-message-icon">📋</span>' +
-        '<div class="pm-chat-message-content">' +
-          '<div class="pm-chat-typing-dots">' +
-            '<span class="pm-chat-typing-dot"></span>' +
-            '<span class="pm-chat-typing-dot"></span>' +
-            '<span class="pm-chat-typing-dot"></span>' +
-          '</div>' +
-        '</div>';
+      const teamSessions = getGoalTeamSessions(goal);
+      const unreadCount = teamSessions.filter(key => isSessionUnread(key)).length;
       
-      container.appendChild(typing);
-      container.scrollTop = container.scrollHeight;
-    }
-    
-    /**
-     * Hide PM typing indicator
-     */
-    function hidePMTypingIndicator() {
-      const typing = document.querySelector('.pm-chat-typing');
-      if (typing) typing.remove();
+      if (unreadCount > 0) {
+        badge.textContent = String(unreadCount);
+        badge.style.display = 'inline-block';
+      } else {
+        badge.style.display = 'none';
+      }
     }
     
     // ═══════════════════════════════════════════════════════════════
@@ -3982,18 +4047,36 @@
       var defEdit = document.getElementById('goalDefEdit');
       if (defEdit) defEdit.style.display = 'none';
 
-      // Goal chat: select latest session
-      var sess = Array.isArray(goal.sessions) ? goal.sessions : [];
-      var latestKey = getLatestGoalSessionKey(goal);
-      if (!state.goalChatSessionKey || !sess.includes(state.goalChatSessionKey)) {
-        state.goalChatSessionKey = latestKey;
+      // Goal chat: initialize mode and session
+      // Default to PM mode, which always has a session
+      if (!state.goalChatMode) {
+        state.goalChatMode = 'pm';
       }
-      setGoalChatLocked(!state.goalChatSessionKey);
+      
+      // For team mode, select latest session
+      if (state.goalChatMode === 'team') {
+        var teamSessions = getGoalTeamSessions(goal);
+        if (teamSessions.length > 0 && (!state.goalChatSessionKey || !teamSessions.includes(state.goalChatSessionKey))) {
+          state.goalChatSessionKey = teamSessions[0];
+        }
+        setGoalChatLocked(teamSessions.length === 0);
+      } else {
+        // PM mode - never locked (PM session always available)
+        state.goalChatSessionKey = getPmSessionKey();
+        setGoalChatLocked(false);
+      }
+
+      // Update tabs UI
+      var pmTab = document.getElementById('goalChatTabPM');
+      var teamTab = document.getElementById('goalChatTabTeam');
+      if (pmTab) pmTab.classList.toggle('active', state.goalChatMode === 'pm');
+      if (teamTab) teamTab.classList.toggle('active', state.goalChatMode === 'team');
 
       updateGoalChatMeta();
       renderGoalHistoryPicker(goal);
       updateGoalSessionStatePill();
       renderGoalChat();
+      updateTeamUnreadBadge();
 
       // Tabs + pane
       if (!state.goalTab) state.goalTab = 'tasks';
@@ -4440,7 +4523,7 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
         id: reqId,
         method: 'chat.send',
         params: {
-          sessionKey: 'agent:main:main',
+          sessionKey: getPmSessionKey(),
           message: message,
         }
       }));
@@ -4647,7 +4730,7 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
           id: reqId,
           method: 'chat.send',
           params: {
-            sessionKey: 'agent:main:main',
+            sessionKey: getPmSessionKey(),
             message: text,
             idempotencyKey: crypto.randomUUID(),
           }
@@ -5590,7 +5673,8 @@ Response format:
       // Auto-trigger title generation for sessions with messages
       if (triggerAutoGen && !state.attemptedTitles.has(s.key)) {
         // Only auto-generate for sessions that have messages and aren't special
-        const isSpecial = s.key === 'agent:main:main' || 
+        const pmKey = getPmSessionKey();
+        const isSpecial = s.key === pmKey || 
                          s.key.includes(':subagent:') || 
                          s.key.includes(':app:') ||
                          s.key.startsWith('cron:');
@@ -5604,7 +5688,9 @@ Response format:
     
     function getDefaultSessionName(s) {
       if (!s) return 'Unknown';
-      if (s.key === 'agent:main:main') return 'Main';
+      // Check if this is the PM session
+      const pmKey = getPmSessionKey();
+      if (s.key === pmKey) return 'Main';
       if (s.key.includes(':subagent:')) return s.label || 'Sub-agent';
       if (s.key.includes(':app:')) return `App: ${s.key.split(':app:')[1]}`;
       if (s.key.startsWith('cron:')) return s.key.replace('cron:', 'Cron: ');
@@ -5919,7 +6005,8 @@ Response format:
       updateVerboseToggleUI();
       
       const actionBtn = document.getElementById('headerAction');
-      if (session.key === 'agent:main:main') {
+      const pmKey = getPmSessionKey();
+      if (session.key === pmKey) {
         actionBtn.textContent = '+ New Session';
         actionBtn.style.display = 'block';
       } else {
@@ -6907,7 +6994,8 @@ Response format:
     }
 
     function headerAction() {
-      if (state.currentSession?.key === 'agent:main:main') {
+      const pmKey = getPmSessionKey();
+      if (state.currentSession?.key === pmKey) {
         if (confirm('Start a new session? This will reset the conversation.')) {
           sendMessage('/new');
         }
@@ -7923,10 +8011,10 @@ Response format:
         var s = (state.sessions || []).find(function(x) { return x.key === key; });
         lines.push('- ' + (s ? getSessionName(s) : key) + '  (`' + key + '`)');
       });
-      var mainKey = 'agent:main:main';
+      var mainKey = getPmSessionKey();
       var mainSession = (state.sessions || []).find(function(s) { return s.key === mainKey; });
       if (!mainSession) {
-        // Main session might not be loaded yet — inject a stub
+        // PM session might not be loaded yet — inject a stub
         mainSession = { key: mainKey, displayName: 'Main Agent' };
         state.sessions.push(mainSession);
       }

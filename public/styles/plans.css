@@ -1543,23 +1543,102 @@
   50% { opacity: 1; }
 }
 
-/* Chat with PM button in goal header */
+/* Chat with PM button in goal header - DEPRECATED, now using tabs */
 .goal-pm-chat-btn {
-  display: inline-flex;
+  display: none; /* Hidden - replaced by goal chat tabs */
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GOAL CHAT TABS — PM vs Team chat modes
+   ═══════════════════════════════════════════════════════════════ */
+
+.goal-chat-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.goal-chat-tab {
+  flex: 1;
+  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  padding: 6px 12px;
-  background: var(--plan-accent-dim);
-  color: var(--plan-accent);
-  border: 1px solid var(--plan-accent-muted);
-  border-radius: var(--radius-md);
-  font-size: 0.8rem;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 0.85rem;
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast);
 }
 
-.goal-pm-chat-btn:hover {
-  background: var(--plan-accent-muted);
-  border-color: var(--plan-accent);
+.goal-chat-tab:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.goal-chat-tab.active {
+  color: var(--plan-accent);
+  border-bottom-color: var(--plan-accent);
+  background: linear-gradient(180deg, transparent 0%, var(--plan-accent-dim) 100%);
+}
+
+.goal-chat-tab-icon {
+  font-size: 1rem;
+}
+
+.goal-chat-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--red);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 9px;
+  margin-left: 4px;
+}
+
+.goal-chat-mode-label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Goal chat header adjustments for tabs */
+.goal-chat-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* PM chat styles - reused from modal, now inline */
+.goal-chat .pm-chat-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+/* Team session indicator */
+.goal-chat-session-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-hover);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.goal-chat-session-label {
+  font-weight: 500;
+  color: var(--text-secondary);
 }

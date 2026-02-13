@@ -1987,8 +1987,21 @@
                       return rpcCall('goals.kickoff', { goalId: cascadeGoal.id }, 120000);
                     }
                   }).then(function(kickoffResult) {
-                    if (kickoffResult) {
-                      showToast('Agents started for "' + (cascadeGoal.title || cascadeGoal.id) + '"', 'success');
+                    if (kickoffResult && kickoffResult.spawnedSessions && kickoffResult.spawnedSessions.length > 0) {
+                      // Start agents by sending taskContext via chat.send
+                      var agentPromises = kickoffResult.spawnedSessions.map(function(s) {
+                        if (!s.taskContext) return Promise.resolve();
+                        return rpcCall('chat.send', {
+                          sessionKey: s.sessionKey,
+                          message: s.taskContext,
+                          idempotencyKey: 'cascade-' + s.taskId + '-' + Date.now(),
+                        }, 120000).catch(function(err) {
+                          console.error('Cascade: failed to start agent for task', s.taskId, err);
+                        });
+                      });
+                      return Promise.all(agentPromises).then(function() {
+                        showToast('Agents started for "' + (cascadeGoal.title || cascadeGoal.id) + '"', 'success');
+                      });
                     }
                     loadGoals().then(function() { renderCondoGoalsPane(); });
                   }).catch(function(err) {
@@ -4381,30 +4394,48 @@
         }, 120000); // 2 minute timeout for spawning
 
         if (result) {
-          showToast('Goal kicked off! Agents are starting work.', 'success');
-
           // Hide the action buttons
           const actionsContainer = document.getElementById('pmPlanActions');
           if (actionsContainer) {
             actionsContainer.classList.add('hidden');
           }
-          
+
           // Track spawned agents for UI update
           if (result.spawnedSessions) {
             state.kickoffAgents = result.spawnedSessions;
-            
+
             // Auto-subscribe to first spawned session for Team tab
             if (result.spawnedSessions.length > 0) {
               state.goalChatSessionKey = result.spawnedSessions[0].sessionKey;
             }
           }
-          
+
+          // Start agents by sending taskContext via chat.send for each spawned session
+          if (result.spawnedSessions && result.spawnedSessions.length > 0) {
+            showToast('Starting ' + result.spawnedSessions.length + ' agent(s)...', 'info');
+            const sendPromises = result.spawnedSessions.map(function(s) {
+              if (!s.taskContext) return Promise.resolve();
+              return rpcCall('chat.send', {
+                sessionKey: s.sessionKey,
+                message: s.taskContext,
+                idempotencyKey: 'kickoff-' + s.taskId + '-' + Date.now(),
+              }, 120000).catch(function(err) {
+                console.error('Failed to start agent for task', s.taskId, err);
+                showToast('Failed to start agent for: ' + (s.taskText || s.taskId), 'error');
+              });
+            });
+            await Promise.all(sendPromises);
+            showToast('Goal kicked off! Agents are working.', 'success');
+          } else {
+            showToast('No tasks to start', 'info');
+          }
+
           // Refresh data
           await Promise.all([loadGoals(), loadSessions()]);
-          
+
           if (state.currentGoalOpenId === goalId) {
             renderGoalView();
-            
+
             // Auto-switch to Team tab to show working agents
             if (result.spawnedSessions && result.spawnedSessions.length > 0) {
               setGoalChatMode('team');
@@ -5021,24 +5052,42 @@
         }, 120000); // 2 minute timeout for spawning
 
         if (result) {
-          showToast('Goal kicked off! Agents are starting work.', 'success');
-
           // Track spawned agents for UI update
           if (result.spawnedSessions) {
             state.kickoffAgents = result.spawnedSessions;
-            
+
             // Auto-subscribe to first spawned session for Team tab
             if (result.spawnedSessions.length > 0) {
               state.goalChatSessionKey = result.spawnedSessions[0].sessionKey;
             }
           }
-          
+
+          // Start agents by sending taskContext via chat.send for each spawned session
+          if (result.spawnedSessions && result.spawnedSessions.length > 0) {
+            showToast('Starting ' + result.spawnedSessions.length + ' agent(s)...', 'info');
+            var sendPromises = result.spawnedSessions.map(function(s) {
+              if (!s.taskContext) return Promise.resolve();
+              return rpcCall('chat.send', {
+                sessionKey: s.sessionKey,
+                message: s.taskContext,
+                idempotencyKey: 'kickoff-' + s.taskId + '-' + Date.now(),
+              }, 120000).catch(function(err) {
+                console.error('Failed to start agent for task', s.taskId, err);
+                showToast('Failed to start agent for: ' + (s.taskText || s.taskId), 'error');
+              });
+            });
+            await Promise.all(sendPromises);
+            showToast('Goal kicked off! Agents are working.', 'success');
+          } else {
+            showToast('No tasks to start', 'info');
+          }
+
           // Refresh data
           await Promise.all([loadGoals(), loadSessions()]);
-          
+
           if (state.currentGoalOpenId === goalId) {
             renderGoalView();
-            
+
             // Auto-switch to Team tab to show working agents
             if (result.spawnedSessions && result.spawnedSessions.length > 0) {
               setGoalChatMode('team');

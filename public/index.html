@@ -852,7 +852,10 @@
       
       // Plan display - track which task plans are expanded
       expandedTaskPlans: JSON.parse(localStorage.getItem('sharp_expanded_task_plans') || '{}'),
-      
+
+      // Task details - track which tasks are expanded in the tasks tab
+      expandedTaskDetails: {},
+
       // Plan interactions (Phase 5)
       planLogs: {},  // Map<taskId, Array<{timestamp, type, message}>>
       planLogExpanded: {},  // Map<taskId, boolean> - track which log viewers are expanded
@@ -1429,7 +1432,8 @@
           clearTimeout(pending.timeout);
           
           if (msg.error) {
-            pending.reject(new Error(msg.error?.message || 'RPC failed'));
+            const errMsg = typeof msg.error === 'string' ? msg.error : (msg.error?.message || 'RPC failed');
+            pending.reject(new Error(errMsg));
           } else {
             pending.resolve(msg.payload ?? msg.result);
           }
@@ -1813,7 +1817,7 @@
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, 'idle');
         
-        // Check if this is a categorization/wizard response (from PM session)
+        // Check if this is a response from the PM session
         const pmKey = getPmSessionKey();
         if (sessionKey === pmKey && message?.content) {
           const text = extractText(message.content);
@@ -1825,6 +1829,33 @@
             // Check single-session categorization
             else if (state.suggestingSessionKey && text.includes('"suggestions"')) {
               handleCategorizationResponse(text);
+            }
+            // PM chat response — show in goal chat panel and save to history
+            else if (state.pmChatPendingResponse && state.goalChatMode === 'pm' && state.pmChatGoalId) {
+              removeGoalChatThinking();
+              const frontendHasPlan = detectPlanInContent(text);
+              const msgId = appendGoalChatMessage('assistant', text, false, { hasPlan: frontendHasPlan });
+              state.pmChatPendingResponse = false;
+              const savedGoalId = state.pmChatGoalId;
+
+              // Persist PM response and use backend's plan detection as authoritative
+              rpcCall('pm.saveResponse', {
+                goalId: savedGoalId,
+                content: text,
+              }, 10000).then(function(saveResult) {
+                // If backend detected a plan but frontend didn't, add buttons retroactively
+                if (saveResult && saveResult.hasPlan && !frontendHasPlan && msgId) {
+                  var msgEl = document.getElementById(msgId);
+                  if (msgEl && !msgEl.querySelector('.pm-plan-actions')) {
+                    msgEl.insertAdjacentHTML('beforeend', renderPlanActionButtons());
+                  }
+                }
+              }).catch(function(err) {
+                console.warn('Failed to save PM response to history:', err);
+              });
+
+              state.pmChatGoalId = null;
+              state.pmChatPmSession = null;
             }
           }
         }
@@ -1851,6 +1882,15 @@
         clearActiveRun(sessionKey);
         state.sessionInputReady.set(sessionKey, true);
         setSessionStatus(sessionKey, runState === 'error' ? 'error' : 'idle');
+
+        // Handle PM chat errors
+        if (state.pmChatPendingResponse && sessionKey === state.pmChatPmSession) {
+          removeGoalChatThinking();
+          appendGoalChatMessage('error', 'PM agent error: ' + (data.errorMessage || 'Request failed'));
+          state.pmChatPendingResponse = false;
+          state.pmChatGoalId = null;
+          state.pmChatPmSession = null;
+        }
 
         if (state.currentSession?.key === sessionKey) {
           state.isThinking = false;
@@ -2887,7 +2927,7 @@
     async function renderGoalChat() {
       var container = document.getElementById('goal_chatMessages');
       if (!container) return;
-      
+
       // Determine which session to load based on mode
       var sessionKey;
       if (state.goalChatMode === 'pm') {
@@ -2896,28 +2936,32 @@
       } else {
         sessionKey = state.goalChatSessionKey;
       }
-      
+
       if (!sessionKey) {
-        var emptyMsg = state.goalChatMode === 'pm' 
+        var emptyMsg = state.goalChatMode === 'pm'
           ? 'PM session not available. Check your configuration.'
           : 'No team sessions yet. Kick off a task or attach a session.';
         container.innerHTML = '<div class="empty-state" style="padding:24px;">' + escapeHtml(emptyMsg) + '</div>';
         renderGoalComposer();
         return;
       }
-      
-      container.innerHTML = '<div class="message system">Loading...</div>';
+
+      // Only show loading on first render (no existing messages)
+      var isFirstRender = !container.dataset.loaded;
+      if (isFirstRender) {
+        container.innerHTML = '<div class="message system">Loading...</div>';
+      }
       try {
         var messages = [];
-        
+
         // PM mode: use pm.getHistory for proper PM conversation history
         if (state.goalChatMode === 'pm') {
           var goal = state.goals.find(function(g) { return g.id === state.currentGoalOpenId; });
           var condoId = goal && goal.condoId;
-          
+
           if (condoId) {
             try {
-              var pmResult = await rpcCall('pm.getHistory', { condoId: condoId, limit: 100 });
+              var pmResult = await rpcCall('pm.getHistory', { goalId: state.currentGoalOpenId, limit: 100 });
               messages = (pmResult && pmResult.messages) || [];
             } catch (pmErr) {
               // Fallback to chat.history if pm.getHistory not available
@@ -2935,7 +2979,7 @@
           var result = await rpcCall('chat.history', { sessionKey: sessionKey, limit: 100 });
           messages = (result && result.messages) || [];
         }
-        
+
         // Check if agents are working (for Team mode)
         var workingIndicator = '';
         if (state.goalChatMode === 'team') {
@@ -2951,7 +2995,8 @@
               '</div>';
           }
         }
-        
+
+        var newHtml;
         if (messages.length > 0) {
           // Extract agent info from session key
           var agentMatch = sessionKey.match(/^agent:([^:]+):/);
@@ -2961,19 +3006,27 @@
           var agentName = (agent && (agent.identity?.name || agent.name)) || agentId;
           var agentRole = getAgentRole(agentId);
           var roleInfo = getRoleInfo(agentRole);
-          
+
+          // Find the index of the last assistant message for plan button rendering
+          var lastAssistantIdx = -1;
+          if (state.goalChatMode === 'pm') {
+            for (var mi = messages.length - 1; mi >= 0; mi--) {
+              if (messages[mi].role === 'assistant') { lastAssistantIdx = mi; break; }
+            }
+          }
+
           // Render messages with agent info in Team mode
-          var messagesHtml = messages.map(function(m) {
+          var messagesHtml = messages.map(function(m, mIdx) {
             var text = extractText(m.content);
             if (!text) return '';
             var timeHtml = m.timestamp ? formatMessageTime(new Date(m.timestamp)) : '';
-            
+
             if (state.goalChatMode === 'team' && m.role === 'assistant') {
               // Enhanced team message format
-              var roleBadge = roleInfo 
-                ? '<span class="team-message-role" style="background:' + getRoleColor(agentRole) + ';">' + roleInfo.emoji + ' ' + roleInfo.name + '</span>' 
+              var roleBadge = roleInfo
+                ? '<span class="team-message-role" style="background:' + getRoleColor(agentRole) + ';">' + roleInfo.emoji + ' ' + roleInfo.name + '</span>'
                 : '';
-              
+
               return '<div class="team-message">' +
                 '<div class="team-message-avatar">' + agentEmoji + '</div>' +
                 '<div class="team-message-content">' +
@@ -2988,31 +3041,42 @@
             } else if (m.role === 'user') {
               return '<div class="message user"><div class="message-content">' + formatMessage(text) + '</div><div class="message-time">' + timeHtml + '</div></div>';
             } else if (m.role === 'assistant') {
-              return '<div class="message assistant"><div class="message-content">' + formatMessage(text) + '</div><div class="message-time">' + timeHtml + '</div></div>';
+              // In PM mode, show plan action buttons on the last assistant message if it contains a plan
+              var planBtns = '';
+              if (mIdx === lastAssistantIdx && detectPlanInContent(text)) {
+                planBtns = renderPlanActionButtons();
+              }
+              return '<div class="message assistant"><div class="message-content">' + formatMessage(text) + '</div><div class="message-time">' + timeHtml + '</div>' + planBtns + '</div>';
             }
             return '';
           }).filter(Boolean).join('');
-          
-          container.innerHTML = workingIndicator + messagesHtml;
+
+          newHtml = workingIndicator + messagesHtml;
         } else {
           var emptyText = state.goalChatMode === 'pm'
             ? 'Start chatting with the PM to discuss plans, adjust tasks, or get clarification.'
             : 'No messages in this session yet.';
-          container.innerHTML = workingIndicator + '<div class="empty-state" style="padding:24px;">' + escapeHtml(emptyText) + '</div>';
+          newHtml = workingIndicator + '<div class="empty-state" style="padding:24px;">' + escapeHtml(emptyText) + '</div>';
         }
-        // Scroll the parent .goal-chat-body (the actual overflow container)
-        var scrollParent = container.parentElement;
-        setTimeout(function() {
-          container.scrollTop = container.scrollHeight;
-          if (scrollParent) scrollParent.scrollTop = scrollParent.scrollHeight;
-        }, 50);
+
+        // Skip DOM update if content hasn't changed (prevents jitter)
+        if (container.innerHTML !== newHtml) {
+          container.innerHTML = newHtml;
+          // Scroll the parent .goal-chat-body (the actual overflow container)
+          var scrollParent = container.parentElement;
+          setTimeout(function() {
+            container.scrollTop = container.scrollHeight;
+            if (scrollParent) scrollParent.scrollTop = scrollParent.scrollHeight;
+          }, 50);
+        }
+        container.dataset.loaded = '1';
       } catch (err) {
         container.innerHTML = '<div class="message system">Error: ' + escapeHtml(err.message) + '</div>';
       }
 
-      // Render composer
+      // Render composer (preserves existing textarea if user is typing)
       renderGoalComposer();
-      
+
       // Update team unread badge
       updateTeamUnreadBadge();
     }
@@ -3062,19 +3126,26 @@
     function renderGoalComposer() {
       var mount = document.getElementById('composerMountGoal');
       if (!mount) return;
-      
+
       // In PM mode, always show composer
       // In Team mode, need a session
       var canChat = state.goalChatMode === 'pm' || state.goalChatSessionKey;
-      if (!canChat) { 
-        mount.innerHTML = '<div style="padding:10px 14px;color:var(--text-dim);font-size:0.85rem;">No team session to chat with. Switch to PM tab or kick off a task.</div>'; 
-        return; 
+      if (!canChat) {
+        mount.innerHTML = '<div style="padding:10px 14px;color:var(--text-dim);font-size:0.85rem;">No team session to chat with. Switch to PM tab or kick off a task.</div>';
+        return;
       }
-      
-      var placeholder = state.goalChatMode === 'pm' 
-        ? 'Chat with PM about goals, tasks, and plans...' 
+
+      var placeholder = state.goalChatMode === 'pm'
+        ? 'Chat with PM about goals, tasks, and plans...'
         : 'Message team...';
-      
+
+      // Preserve existing textarea if user is typing (avoid destroying input on refresh)
+      var existing = document.getElementById('goalChatInput');
+      if (existing) {
+        existing.placeholder = placeholder;
+        return;
+      }
+
       // Static safe HTML - using textarea for word-wrap and auto-grow
       mount.innerHTML = '<div class="chat-input-area" style="border-top:1px solid var(--border-subtle);padding:10px 14px;">' +
         '<div style="display:flex;gap:8px;align-items:flex-end;">' +
@@ -3641,33 +3712,48 @@
      */
     function getAgentLabelInfo(task) {
       if (!task) return null;
-      
+
       const agentId = task.assignedAgent || task.agentLabel || task.agentId;
       if (!agentId) return null;
-      
+
       const normalized = String(agentId).toLowerCase().trim();
-      
-      // Check config-based custom labels first
-      const configLabel = window.ClawCondosConfig?.getAgentLabel?.(normalized);
+
+      // If this is a role name, resolve it to the actual agent
+      var resolvedAgentId = normalized;
+      if (state.roleConfig && state.roleConfig[normalized]) {
+        resolvedAgentId = state.roleConfig[normalized].agentId || state.roleConfig[normalized].configured || state.roleConfig[normalized].default || normalized;
+      }
+
+      // Look up the resolved agent in state.agents for identity (emoji + name)
+      if (state.agents && state.agents.length) {
+        var agent = state.agents.find(function(a) { return a.id === resolvedAgentId; });
+        if (agent) {
+          return {
+            emoji: agent.identity?.emoji || '🤖',
+            name: agent.identity?.name || agent.name || resolvedAgentId,
+          };
+        }
+      }
+
+      // Check config-based custom labels
+      var configLabel = window.ClawCondosConfig?.getAgentLabel?.(resolvedAgentId);
       if (configLabel) {
         return configLabel;
       }
-      
+
       // Extract agent name from sessionKey format "agent:name:..."
-      const match = normalized.match(/^agent:([^:]+)/);
+      var match = resolvedAgentId.match(/^agent:([^:]+)/);
       if (match) {
-        const name = match[1];
-        // Check config for the extracted name
-        const nameLabel = window.ClawCondosConfig?.getAgentLabel?.(name);
+        var name = match[1];
+        var nameLabel = window.ClawCondosConfig?.getAgentLabel?.(name);
         if (nameLabel) {
           return nameLabel;
         }
-        // Return with generic icon and capitalized name
         return { emoji: '🤖', name: name.charAt(0).toUpperCase() + name.slice(1) };
       }
-      
-      // Default: capitalize the agentId with generic icon
-      return { emoji: '🤖', name: agentId.charAt(0).toUpperCase() + agentId.slice(1) };
+
+      // Default: capitalize with generic icon
+      return { emoji: '🤖', name: resolvedAgentId.charAt(0).toUpperCase() + resolvedAgentId.slice(1) };
     }
     
     /**
@@ -3676,9 +3762,24 @@
      * @returns {string} HTML string
      */
     function renderTaskAgentLabel(task) {
-      const info = getAgentLabelInfo(task);
-      if (!info) return '';
-      
+      if (!task) return '';
+
+      var assignedRole = task.assignedAgent || task.agentLabel || task.agentId;
+      if (!assignedRole) {
+        return '<span class="task-agent-label unassigned" title="No agent assigned — will fall back to main agent">' +
+          '<span class="task-agent-label-emoji">⚠️</span>' +
+          '<span>Unassigned</span>' +
+          '</span>';
+      }
+
+      var info = getAgentLabelInfo(task);
+      if (!info) {
+        return '<span class="task-agent-label unassigned" title="No agent assigned — will fall back to main agent">' +
+          '<span class="task-agent-label-emoji">⚠️</span>' +
+          '<span>Unassigned</span>' +
+          '</span>';
+      }
+
       return '<span class="task-agent-label">' +
         '<span class="task-agent-label-emoji">' + info.emoji + '</span>' +
         '<span>' + escapeHtml(info.name) + '</span>' +
@@ -3692,6 +3793,8 @@
     // Chat mode: 'pm' or 'team'
     state.goalChatMode = 'pm';
     state.pmChatPendingResponse = false;
+    state.pmChatGoalId = null;       // goalId we're waiting for PM response on
+    state.pmChatPmSession = null;    // PM session key we sent chat.send to
     
     /**
      * Get the PM session key from config
@@ -3817,21 +3920,45 @@
      */
     function detectPlanInContent(content) {
       if (!content || typeof content !== 'string') return false;
-      
-      // Patterns that indicate a plan
-      const planPatterns = [
-        /##\s*Tasks?/i,                    // ## Tasks or ## Task
-        /##\s*Plan/i,                       // ## Plan
-        /\|\s*Task\s*\|/i,                 // Table with Task column
-        /\|\s*Agent\s*\|/i,                // Table with Agent column
-        /\|\s*Status\s*\|/i,               // Table with Status column
-        /^\s*[-*]\s*\[[ x]\]/m,            // Checkbox lists
-        /proposed\s*plan/i,                 // "proposed plan"
-        /task\s*breakdown/i,               // "task breakdown"
-        /here'?s?\s*(the\s*)?plan/i,       // "here's the plan"
+
+      var lc = content.toLowerCase();
+
+      // Explicit plan/task headers
+      var headers = [
+        '## plan', '### plan', '# plan',
+        '## tasks', '### tasks',
+        '## task breakdown', '## tasks breakdown',
+        '## implementation plan', '## development plan', '## execution plan',
+        '**plan:**', '**tasks:**', '**task breakdown:**',
       ];
-      
-      return planPatterns.some(pattern => pattern.test(content));
+      for (var i = 0; i < headers.length; i++) {
+        if (lc.includes(headers[i])) return true;
+      }
+
+      // Approval markers (PM skill format)
+      var approvalMarkers = [
+        'awaiting approval', 'pending approval', 'ready for approval',
+        'please approve', 'create tasks',
+      ];
+      for (var j = 0; j < approvalMarkers.length; j++) {
+        if (lc.includes(approvalMarkers[j])) return true;
+      }
+
+      // Regex patterns: tables with task/agent/role columns, checkbox lists,
+      // numbered tasks with known agent/role names
+      var patterns = [
+        /\|\s*Task\s*\|/i,
+        /\|\s*Agent\s*\|/i,
+        /\|\s*Role\s*\|/i,
+        /\|\s*#\s*\|\s*Task/i,
+        /\|\s*Est\.?\s*Time\s*\|/i,
+        /^\s*[-*]\s*\[[ x]\]/m,
+        /proposed\s*plan/i,
+        /task\s*breakdown/i,
+        /here'?s?\s*(the\s*)?plan/i,
+        /\b(frontend|backend|designer|tester|devops)\b.*\|\s*\d+\s*(min|hour|hr|h)\b/i,
+      ];
+      return patterns.some(function(p) { return p.test(content); });
     }
     
     /**
@@ -3845,26 +3972,48 @@
         (Array.isArray(goal.sessions) && goal.sessions.length > 0) ||
         (Array.isArray(goal.tasks) && goal.tasks.some(t => t.sessionKey))
       );
-      
-      const createTasksDisabled = hasTasks ? 'disabled' : '';
-      const startGoalDisabled = (!hasTasks || hasActiveSessions) ? 'disabled' : '';
-      
-      return '<div class="pm-plan-actions" id="pmPlanActions">' +
-        '<button class="pm-action-btn primary" ' +
-          'data-action="create-tasks" ' +
-          createTasksDisabled + ' ' +
-          'onclick="createTasksFromPlan()" ' +
-          'title="' + (hasTasks ? 'Tasks already created' : 'Create tasks from this plan') + '">' +
-          '📋 Create Tasks' +
-        '</button>' +
-        '<button class="pm-action-btn success" ' +
-          'data-action="start-goal" ' +
-          startGoalDisabled + ' ' +
-          'onclick="startGoalKickoff()" ' +
-          'title="' + (!hasTasks ? 'Create tasks first' : (hasActiveSessions ? 'Sessions already active' : 'Spawn agents and start working')) + '">' +
-          '🚀 Start Goal' +
-        '</button>' +
-        '</div>';
+
+      var buttons = '';
+
+      if (hasTasks) {
+        // Tasks already exist — show Regenerate + Start Goal
+        var regenDisabled = hasActiveSessions ? 'disabled' : '';
+        var startGoalDisabled = hasActiveSessions ? 'disabled' : '';
+
+        buttons =
+          '<button class="pm-action-btn warning" ' +
+            'data-action="regenerate-tasks" ' +
+            regenDisabled + ' ' +
+            'onclick="regenerateTasksFromPlan()" ' +
+            'title="' + (hasActiveSessions ? 'Cannot regenerate while sessions are active' : 'Clear tasks and re-create from plan') + '">' +
+            '🔄 Regenerate Tasks' +
+          '</button>' +
+          '<button class="pm-action-btn success" ' +
+            'data-action="start-goal" ' +
+            startGoalDisabled + ' ' +
+            'onclick="startGoalKickoff()" ' +
+            'title="' + (hasActiveSessions ? 'Sessions already active' : 'Spawn agents and start working') + '">' +
+            '🚀 Start Goal' +
+          '</button>';
+      } else {
+        // No tasks yet — show Create Tasks
+        buttons =
+          '<button class="pm-action-btn primary" ' +
+            'data-action="create-tasks" ' +
+            'onclick="createTasksFromPlan()" ' +
+            'title="Create tasks from this plan">' +
+            '📋 Create Tasks' +
+          '</button>' +
+          '<button class="pm-action-btn success" ' +
+            'data-action="start-goal" ' +
+            'disabled ' +
+            'onclick="startGoalKickoff()" ' +
+            'title="Create tasks first">' +
+            '🚀 Start Goal' +
+          '</button>';
+      }
+
+      return '<div class="pm-plan-actions" id="pmPlanActions">' + buttons + '</div>';
     }
     
     /**
@@ -3897,29 +4046,18 @@
           goalId: goalId,
         }, 60000);
         
-        if (result && result.success) {
-          showToast('✅ Tasks created from plan!', 'success');
-          
-          // Update button state
-          if (btn) {
-            btn.innerHTML = '✓ Tasks Created';
-            btn.classList.add('created');
-          }
-          
-          // Enable the Start Goal button now that tasks exist
-          const startBtn = document.querySelector('.pm-action-btn[data-action="start-goal"]');
-          if (startBtn) {
-            startBtn.disabled = false;
-          }
-          
-          // Mark the actions container
-          const actionsContainer = document.getElementById('pmPlanActions');
-          if (actionsContainer) {
-            actionsContainer.classList.add('tasks-created');
-          }
-          
+        if (result && (result.ok || result.success)) {
+          showToast('Created ' + (result.tasksCreated || 0) + ' tasks from plan!', 'success');
+
           // Reload goals to show new tasks
           await loadGoals();
+
+          // Re-render plan buttons (will now show Regenerate + Start Goal)
+          var actionsContainer = document.getElementById('pmPlanActions');
+          if (actionsContainer) {
+            actionsContainer.outerHTML = renderPlanActionButtons();
+          }
+
           renderGoalPane();
         } else {
           throw new Error(result?.error || 'Failed to create tasks');
@@ -3936,6 +4074,61 @@
       }
     }
     
+    /**
+     * Regenerate tasks - clear existing pending tasks and re-create from plan
+     */
+    async function regenerateTasksFromPlan() {
+      const goalId = state.currentGoalOpenId;
+      const goal = state.goals.find(g => g.id === goalId);
+      if (!goal) {
+        showToast('No goal selected', 'error');
+        return;
+      }
+
+      var btn = document.querySelector('.pm-action-btn[data-action="regenerate-tasks"]');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="btn-spinner"></span> Regenerating...';
+      }
+
+      try {
+        var condoId = goal.condoId;
+        if (!condoId) {
+          throw new Error('Goal not associated with a condo');
+        }
+
+        var result = await rpcCall('pm.regenerateTasks', {
+          condoId: condoId,
+          goalId: goalId,
+        }, 60000);
+
+        if (result && (result.ok || result.success)) {
+          var msg = 'Regenerated! Removed ' + (result.removed || 0) + ', created ' + (result.tasksCreated || 0) + ' tasks';
+          showToast(msg, 'success');
+
+          await loadGoals();
+
+          // Re-render plan buttons
+          var actionsContainer = document.getElementById('pmPlanActions');
+          if (actionsContainer) {
+            actionsContainer.outerHTML = renderPlanActionButtons();
+          }
+
+          renderGoalPane();
+        } else {
+          throw new Error(result?.error || 'Failed to regenerate tasks');
+        }
+      } catch (err) {
+        console.error('Regenerate tasks error:', err);
+        showToast('Failed to regenerate tasks: ' + (err.message || 'Unknown error'), 'error');
+
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '🔄 Regenerate Tasks';
+        }
+      }
+    }
+
     /**
      * Start goal kickoff - spawn agents and begin execution
      */
@@ -3965,10 +4158,10 @@
         const result = await rpcCall('goals.kickoff', {
           goalId: goalId,
         }, 120000); // 2 minute timeout for spawning
-        
-        if (result && result.success) {
-          showToast('🚀 Goal kicked off! Agents are starting work.', 'success');
-          
+
+        if (result) {
+          showToast('Goal kicked off! Agents are starting work.', 'success');
+
           // Hide the action buttons
           const actionsContainer = document.getElementById('pmPlanActions');
           if (actionsContainer) {
@@ -4028,51 +4221,60 @@
     async function sendGoalChatMessage() {
       const input = document.getElementById('goalChatInput');
       if (!input) return;
-      
+
       const message = input.value.trim();
       if (!message || state.pmChatPendingResponse) return;
-      
+
       const sessionKey = state.goalChatSessionKey;
       if (!sessionKey && state.goalChatMode !== 'pm') {
         showToast('No active session', 'warning');
         return;
       }
-      
+
       input.value = '';
       input.style.height = 'auto'; // Reset textarea height
       state.pmChatPendingResponse = true;
-      
+
       try {
         if (state.goalChatMode === 'pm') {
-          // PM mode: Optimistic UI - show user message immediately
+          // PM mode: Two-step flow
+          // 1) pm.chat saves user message + builds enriched message with SKILL-PM context
+          // 2) chat.send sends the enriched message to the PM session (response streams back)
           appendGoalChatMessage('user', message);
           appendGoalChatMessage(null, null, true); // Show thinking indicator
-          
+
           try {
-            const result = await rpcCall('pm.chat', {
+            // Step 1: Prepare context-enriched message and save user message to history
+            const prepResult = await rpcCall('pm.chat', {
               condoId: state.goals.find(g => g.id === state.currentGoalOpenId)?.condoId,
               goalId: state.currentGoalOpenId,
               message: message,
+            }, 30000);
+
+            const pmSession = prepResult?.pmSession || sessionKey;
+            const enrichedMessage = prepResult?.enrichedMessage;
+
+            if (!enrichedMessage) {
+              throw new Error('Failed to prepare PM message');
+            }
+
+            // Track that we're waiting for a PM response on this goal
+            state.pmChatGoalId = state.currentGoalOpenId;
+            state.pmChatPmSession = pmSession;
+
+            // Step 2: Send to PM session via chat.send — response streams back through handleChatEvent
+            await rpcCall('chat.send', {
+              sessionKey: pmSession,
+              message: enrichedMessage,
+              idempotencyKey: `pm-chat-${Date.now()}`
             }, 120000);
-            
-            // Remove thinking indicator and show response
-            removeGoalChatThinking();
-            
-            if (result?.response) {
-              // Check if the response contains a plan (hasPlan flag or plan patterns)
-              const hasPlan = result.hasPlan || detectPlanInContent(result.response);
-              appendGoalChatMessage('assistant', result.response, false, { hasPlan: hasPlan });
-            }
-            
-            if (result?.planUpdated) {
-              await loadGoals();
-              renderGoalPane();
-            }
+
+            // Response handling continues in handleChatEvent when the PM session emits 'final'
           } catch (e) {
-            // Remove thinking indicator and show error
             removeGoalChatThinking();
-            appendGoalChatMessage('error', 'Failed to get response: ' + (e.message || 'Unknown error'));
+            appendGoalChatMessage('error', 'Failed to send to PM: ' + (e.message || 'Unknown error'));
             console.error('PM chat error:', e);
+            state.pmChatPendingResponse = false;
           }
         } else {
           // Team mode: send to selected session (existing behavior)
@@ -4081,14 +4283,14 @@
             message: message,
             idempotencyKey: `goal-team-${Date.now()}`
           }, 60000);
-          
+
           // Refresh chat after sending
           setTimeout(() => renderGoalChat(), 500);
+          state.pmChatPendingResponse = false;
         }
       } catch (err) {
         console.error('Goal chat send error:', err);
         showToast('Failed to send: ' + (err.message || 'Unknown error'), 'error');
-      } finally {
         state.pmChatPendingResponse = false;
       }
     }
@@ -4170,10 +4372,10 @@
         const result = await rpcCall('goals.kickoff', {
           goalId: goalId,
         }, 120000); // 2 minute timeout for spawning
-        
-        if (result && result.success) {
-          showToast('🚀 Goal kicked off! Agents are starting work.', 'success');
-          
+
+        if (result) {
+          showToast('Goal kicked off! Agents are starting work.', 'success');
+
           // Track spawned agents for UI update
           if (result.spawnedSessions) {
             state.kickoffAgents = result.spawnedSessions;
@@ -4532,6 +4734,7 @@
             var isDone = t.done || taskStatus === 'done';
             var hasSession = t.sessionKey ? 'has-session' : '';
             var hasPlan = t.plan && t.plan.status && t.plan.status !== 'none';
+            var isExpanded = state.expandedTaskDetails && state.expandedTaskDetails[taskId];
             var spawnBtn = (!t.sessionKey && !isDone)
               ? '<button class="goal-task-spawn" onclick="event.stopPropagation(); openSpawnTaskModal(\'' + escapeHtml(goal.id) + '\',\'' + id + '\')" title="Spawn agent session">\u25b6</button>'
               : '';
@@ -4542,26 +4745,32 @@
             if (t.summary) tooltipParts.push(t.summary);
             if (hasPlan) tooltipParts.push('plan: ' + t.plan.status);
             var agentInfo = getAgentLabelInfo(t);
-            if (agentInfo) tooltipParts.push('→ ' + agentInfo.name);
+            if (agentInfo) tooltipParts.push('\u2192 ' + agentInfo.name);
             var tooltip = escapeHtml(tooltipParts.join(' \u00b7 '));
-            
-            // Task row
-            var taskRow = '<div class="goal-task ' + (isDone ? 'done' : '') + (hasPlan ? ' has-plan' : '') + '">' +
+
+            // Task row — clicking the text area toggles detail view
+            var taskRow = '<div class="goal-task ' + (isDone ? 'done' : '') + (hasPlan ? ' has-plan' : '') + (isExpanded ? ' expanded' : '') + '">' +
               '<div class="goal-task-status ' + escapeHtml(taskStatus) + ' ' + hasSession + '"' +
-              ' onclick="cycleTaskStatus(\'' + id + '\')"' +
-              ' oncontextmenu="showTaskStatusMenu(event,\'' + id + '\')"' +
+              ' onclick="event.stopPropagation(); cycleTaskStatus(\'' + id + '\')"' +
+              ' oncontextmenu="event.stopPropagation(); showTaskStatusMenu(event,\'' + id + '\')"' +
               ' title="' + tooltip + '"></div>' +
-              '<span class="goal-task-text">' + escapeHtml(t.text || '') + '</span>' +
+              '<span class="goal-task-text" onclick="toggleTaskDetail(\'' + id + '\')" style="cursor:pointer;">' + escapeHtml(t.text || '') + '</span>' +
               agentLabel +
               planBadge +
               spawnBtn +
-              '<button class="goal-task-del" onclick="deleteGoalTask(\'' + id + '\')" title="Delete">\u00d7</button>' +
+              '<button class="goal-task-del" onclick="event.stopPropagation(); deleteGoalTask(\'' + id + '\')" title="Delete">\u00d7</button>' +
             '</div>';
-            
+
+            // Expandable task detail panel
+            var detailPanel = '';
+            if (isExpanded) {
+              detailPanel = renderTaskDetailPanel(t, goal);
+            }
+
             // Plan detail panel (expandable)
             var planPanel = renderPlanDetailPanel(t.plan, taskId, goal.id);
-            
-            return '<div class="goal-task-wrapper">' + taskRow + planPanel + '</div>';
+
+            return '<div class="goal-task-wrapper">' + taskRow + detailPanel + planPanel + '</div>';
           }).join('') +
           '<div class="goal-task-compose"><input class="chat-input" id="goalNewTaskInput" placeholder="Add a task\u2026" style="flex:1;" onkeypress="if(event.key===\'Enter\')addGoalTask()"><button class="ghost-btn" onclick="addGoalTask()">Add</button></div>';
         }
@@ -4702,6 +4911,90 @@
       tasks.unshift({ id: uid('task'), text, done: false, status: 'pending' });
       input.value = '';
       await updateGoal(goal.id, { tasks });
+    }
+
+    function toggleTaskDetail(taskId) {
+      if (!state.expandedTaskDetails) state.expandedTaskDetails = {};
+      state.expandedTaskDetails[taskId] = !state.expandedTaskDetails[taskId];
+      renderGoalPane();
+    }
+
+    function renderTaskDetailPanel(task, goal) {
+      if (!task) return '';
+      var parts = [];
+
+      // Description — show explicit description, or fall back to task text
+      var descText = task.description || task.text || '';
+      if (descText) {
+        parts.push('<div class="task-detail-section">' +
+          '<div class="task-detail-label">Description</div>' +
+          '<div class="task-detail-value">' + formatMessage(descText) + '</div>' +
+          '</div>');
+      }
+
+      // Assigned agent
+      var agentInfo = getAgentLabelInfo(task);
+      var assignedRole = task.assignedAgent || task.agentLabel || task.agentId;
+      if (agentInfo) {
+        var roleNote = assignedRole ? ' <span style="color:var(--text-dim);font-size:0.8rem;">(' + escapeHtml(assignedRole) + ')</span>' : '';
+        parts.push('<div class="task-detail-section">' +
+          '<div class="task-detail-label">Assigned To</div>' +
+          '<div class="task-detail-value">' + agentInfo.emoji + ' ' + escapeHtml(agentInfo.name) + roleNote + '</div>' +
+          '</div>');
+      } else {
+        parts.push('<div class="task-detail-section">' +
+          '<div class="task-detail-label">Assigned To</div>' +
+          '<div class="task-detail-value" style="color:var(--yellow);">⚠️ Unassigned — will use default agent (main)</div>' +
+          '</div>');
+      }
+
+      // Status
+      var status = task.status || (task.done ? 'done' : 'pending');
+      var statusColors = { pending: 'var(--text-dim)', 'in-progress': 'var(--accent)', blocked: 'var(--red)', waiting: 'var(--yellow)', done: 'var(--green)' };
+      parts.push('<div class="task-detail-section">' +
+        '<div class="task-detail-label">Status</div>' +
+        '<div class="task-detail-value" style="color:' + (statusColors[status] || 'var(--text)') + ';font-weight:600;">' + escapeHtml(status) + '</div>' +
+        '</div>');
+
+      // Estimated time
+      if (task.estimatedTime) {
+        parts.push('<div class="task-detail-section">' +
+          '<div class="task-detail-label">Estimated Time</div>' +
+          '<div class="task-detail-value">' + escapeHtml(task.estimatedTime) + '</div>' +
+          '</div>');
+      }
+
+      // Session key
+      if (task.sessionKey) {
+        parts.push('<div class="task-detail-section">' +
+          '<div class="task-detail-label">Session</div>' +
+          '<div class="task-detail-value" style="font-family:var(--font-mono);font-size:0.8rem;">' + escapeHtml(task.sessionKey) + '</div>' +
+          '</div>');
+      }
+
+      // Summary
+      if (task.summary) {
+        parts.push('<div class="task-detail-section">' +
+          '<div class="task-detail-label">Summary</div>' +
+          '<div class="task-detail-value">' + formatMessage(task.summary) + '</div>' +
+          '</div>');
+      }
+
+      // Created timestamp
+      if (task.createdAtMs) {
+        parts.push('<div class="task-detail-section">' +
+          '<div class="task-detail-label">Created</div>' +
+          '<div class="task-detail-value" style="color:var(--text-dim);font-size:0.8rem;">' + timeAgo(task.createdAtMs) + '</div>' +
+          '</div>');
+      }
+
+      if (parts.length === 0) {
+        parts.push('<div class="task-detail-section" style="color:var(--text-dim);font-style:italic;">No additional details.</div>');
+      }
+
+      return '<div class="task-detail-panel" data-task-id="' + escapeHtml(task.id || '') + '">' +
+        parts.join('') +
+        '</div>';
     }
 
     async function cycleTaskStatus(taskId) {

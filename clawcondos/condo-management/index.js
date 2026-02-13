@@ -214,9 +214,8 @@ export default function register(api) {
       }
 
       const tasks = goal.tasks || [];
-      const tasksToSpawn = tasks.filter(t => 
-        t.assignedAgent && 
-        !t.sessionKey && 
+      const tasksToSpawn = tasks.filter(t =>
+        !t.sessionKey &&
         t.status !== 'done'
       );
 
@@ -224,7 +223,7 @@ export default function register(api) {
         return respond(true, {
           goalId,
           spawnedSessions: [],
-          message: 'No tasks with assigned agents to spawn',
+          message: 'No tasks to spawn',
         });
       }
 
@@ -233,8 +232,8 @@ export default function register(api) {
 
       for (const task of tasksToSpawn) {
         try {
-          // Resolve role -> actual agent ID using config
-          const resolvedAgentId = resolveAgent(store, task.assignedAgent);
+          // Resolve role -> actual agent ID using config, fall back to 'main'
+          const resolvedAgentId = resolveAgent(store, task.assignedAgent) || 'main';
 
           // Create a promise-based wrapper for the spawn handler
           const result = await new Promise((resolve, reject) => {

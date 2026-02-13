@@ -65,17 +65,19 @@ describe('Skill Injector', () => {
       expect(context).toMatch(/frontend.*UI.*specialist/i);
     });
 
-    it('omits roles section when roles is empty', () => {
+    it('omits dynamic roles section in header when roles is empty', () => {
       const context = getPmSkillContext({
         roles: {},
       });
 
-      expect(context).not.toContain('## Available Roles');
+      // The header should not contain a dynamic roles section (with agent IDs like "(felix):")
+      // The SKILL-PM.md file itself contains "## Available Roles" as static content
+      expect(context).not.toContain('**frontend** (felix):');
     });
   });
 
   describe('getWorkerSkillContext', () => {
-    it('returns worker skill content', () => {
+    it('returns worker skill content with agent execution guide', () => {
       const context = getWorkerSkillContext({
         goalId: 'goal_123',
         taskId: 'task_456',
@@ -85,6 +87,8 @@ describe('Skill Injector', () => {
       expect(context).toBeTruthy();
       expect(context).toContain('SKILL-WORKER');
       expect(context).toContain('Task Agent');
+      expect(context).toContain('SKILL-AGENT');
+      expect(context).toContain('Execution Guide');
     });
 
     it('includes task details', () => {
@@ -130,9 +134,11 @@ describe('Skill Injector', () => {
       
       expect(availability).toHaveProperty('pm');
       expect(availability).toHaveProperty('worker');
-      // Both should be true since we created the files
+      expect(availability).toHaveProperty('agent');
+      // All should be true since we created the files
       expect(availability.pm).toBe(true);
       expect(availability.worker).toBe(true);
+      expect(availability.agent).toBe(true);
     });
   });
 

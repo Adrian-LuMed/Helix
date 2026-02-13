@@ -19,36 +19,36 @@ Use `goal_update` to report your progress:
 goal_update({
   taskId: "task_xxx",
   status: "in-progress",
-  summary: "Starting implementation"
+  summary: "Starting work on the task"
 })
 
 // Progress update
 goal_update({
   taskId: "task_xxx",
   status: "in-progress",
-  summary: "API endpoints done, working on validation"
+  summary: "First draft complete, refining details"
 })
 
 // Blocked
 goal_update({
   taskId: "task_xxx",
   status: "blocked",
-  summary: "Need DB schema decision from backend team"
+  summary: "Need clarification on requirements from PM"
 })
 
 // Waiting (on external input)
 goal_update({
   taskId: "task_xxx",
   status: "waiting",
-  summary: "Waiting for design review"
+  summary: "Waiting for review from another agent"
 })
 
 // Complete
 goal_update({
   taskId: "task_xxx",
   status: "done",
-  summary: "Implemented feature with tests",
-  files: ["src/api/feature.js", "tests/feature.test.js"]
+  summary: "Task completed, deliverables ready for review",
+  files: ["path/to/output1", "path/to/output2"]
 })
 ```
 
@@ -76,7 +76,7 @@ Your PM can see your task status in real-time. For questions:
 team.send({
   condoId: "condo_xxx",
   targetAgent: "pm",
-  message: "Question about requirements: should X include Y?"
+  message: "Question: should the deliverable include X or Y?"
 })
 ```
 
@@ -85,34 +85,34 @@ If you need input from another role:
 ```javascript
 team.send({
   condoId: "condo_xxx",
-  targetAgent: "frontend",
-  message: "API schema ready at /docs/api.md - please review"
+  targetAgent: "rolename",
+  message: "My output is ready at /path — please review when you start your task"
 })
 ```
 
-## Files & Artifacts
+## Artifacts & Deliverables
 
-Track files you create or modify:
+Track files and outputs you create or modify:
 ```javascript
 goal_update({
   taskId: "task_xxx",
   files: [
-    "src/components/Feature.tsx",
-    "src/api/feature.ts"
+    "path/to/deliverable1",
+    "path/to/deliverable2"
   ]
 })
 ```
 
-This helps PM and other agents find your work.
+This helps the PM and other agents find and build on your work.
 
 ## Best Practices
 
-1. **Read your assignment carefully** — understand acceptance criteria
+1. **Read your assignment carefully** — understand what's expected
 2. **Update status early and often** — don't go silent
 3. **Scope tightly** — do your task, not adjacent ones
-4. **Ask early** — don't spend hours on unclear requirements
-5. **Test your work** — verify before marking done
-6. **Document** — leave comments/notes for future you
+4. **Ask early** — don't spend time on unclear requirements
+5. **Verify your work** — check against acceptance criteria before marking done
+6. **Document** — leave notes for anyone who needs to understand or continue your work
 
 ## Autonomy Levels
 

@@ -1403,6 +1403,11 @@
   font-size: 0.8rem;
 }
 
+.task-agent-label.unassigned {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--yellow, #F59E0B);
+}
+
 /* Goal plan action buttons */
 .goal-plan-actions {
   display: flex;
@@ -1721,6 +1726,18 @@
 
 .pm-action-btn.success:hover:not(:disabled) {
   box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+  transform: translateY(-2px);
+}
+
+.pm-action-btn.warning {
+  background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+  color: white;
+  border-color: transparent;
+  box-shadow: 0 2px 10px rgba(245, 158, 11, 0.3);
+}
+
+.pm-action-btn.warning:hover:not(:disabled) {
+  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.4);
   transform: translateY(-2px);
 }
 

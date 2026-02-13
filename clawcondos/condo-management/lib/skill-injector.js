@@ -12,11 +12,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Skill file paths (relative to plugin root)
 const SKILL_PM_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-PM.md');
 const SKILL_WORKER_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-WORKER.md');
+const SKILL_AGENT_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-AGENT.md');
 
 // Cache for skill file contents
 let skillCache = {
   pm: null,
   worker: null,
+  agent: null,
   loadedAt: null,
 };
 
@@ -51,6 +53,14 @@ function loadSkillFile(type) {
   } catch {
     skillCache.worker = null;
   }
+
+  try {
+    skillCache.agent = existsSync(SKILL_AGENT_PATH)
+      ? readFileSync(SKILL_AGENT_PATH, 'utf-8')
+      : null;
+  } catch {
+    skillCache.agent = null;
+  }
   
   skillCache.loadedAt = now;
   return skillCache[type];
@@ -60,7 +70,7 @@ function loadSkillFile(type) {
  * Clear skill cache (for testing or hot reload)
  */
 export function clearSkillCache() {
-  skillCache = { pm: null, worker: null, loadedAt: null };
+  skillCache = { pm: null, worker: null, agent: null, loadedAt: null };
 }
 
 /**
@@ -160,6 +170,8 @@ function getDefaultRoleDescription(role) {
 export function getWorkerSkillContext(taskContext = {}) {
   const skillContent = loadSkillFile('worker');
   if (!skillContent) return null;
+
+  const agentSkillContent = loadSkillFile('agent');
   
   const {
     goalId,
@@ -208,8 +220,15 @@ export function getWorkerSkillContext(taskContext = {}) {
   }
   
   header.push('---', '');
-  
-  return header.join('\n') + skillContent;
+
+  // Combine: task header + agent execution guide + worker API reference
+  const parts = [header.join('\n')];
+  if (agentSkillContent) {
+    parts.push(agentSkillContent);
+    parts.push('');
+  }
+  parts.push(skillContent);
+  return parts.join('\n');
 }
 
 /**
@@ -220,5 +239,6 @@ export function getSkillAvailability() {
   return {
     pm: existsSync(SKILL_PM_PATH),
     worker: existsSync(SKILL_WORKER_PATH),
+    agent: existsSync(SKILL_AGENT_PATH),
   };
 }

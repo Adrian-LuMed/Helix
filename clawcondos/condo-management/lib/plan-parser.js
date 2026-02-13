@@ -137,7 +137,7 @@ export function parseTasksFromTable(content) {
         const lc = col.toLowerCase();
         if (lc.includes('task') || lc.includes('tarea') || lc.includes('action')) {
           headerIndices.task = idx;
-        } else if (lc.includes('agent') || lc.includes('agente') || lc.includes('assignee') || lc.includes('owner') || lc.includes('who')) {
+        } else if (lc.includes('agent') || lc.includes('agente') || lc.includes('assignee') || lc.includes('owner') || lc.includes('who') || lc.includes('role')) {
           headerIndices.agent = idx;
         } else if (lc.includes('time') || lc.includes('tiempo') || lc.includes('estimate') || lc.includes('duration') || lc.includes('est.')) {
           headerIndices.time = idx;
@@ -331,6 +331,7 @@ export function detectPlan(content) {
     /\|\s*agent\s*\|/i,
     /\|\s*agente\s*\|/i,
     /\|\s*assignee\s*\|/i,
+    /\|\s*role\s*\|/i,
   ];
   
   for (const pattern of tablePatterns) {

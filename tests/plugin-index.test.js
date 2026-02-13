@@ -61,6 +61,8 @@ describe('Plugin index.js', () => {
         'plans.approve', 'plans.reject', 'plans.getLogs', 'plans.appendLog',
         // PM handlers
         'pm.chat', 'pm.getConfig', 'pm.setConfig', 'pm.getAgent',
+        'pm.getHistory', 'pm.clearHistory', 'pm.saveResponse',
+        'pm.createTasksFromPlan', 'pm.regenerateTasks', 'pm.detectPlan',
         // Config handlers
         'config.get', 'config.set', 'config.setRole', 'config.getRole', 'config.listRoles',
         // Team handlers

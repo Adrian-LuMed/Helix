@@ -86,12 +86,18 @@ export function createTaskSpawnHandler(store) {
         assignedRole: task.assignedAgent || null,
       });
       
+      // Include the PM's full plan so the worker understands the bigger picture
+      const pmPlan = goal.pmPlanContent || null;
+
       const taskContext = [
         // Start with worker skill if available
         workerSkillContext || null,
         '',
         // Then project/goal context
         projectPrefix + goalContext,
+        '',
+        // PM's full plan for context
+        pmPlan ? '---\n## PM Plan (for reference)\n\n' + pmPlan + '\n---' : null,
         '',
         '---',
         `## Your Assignment: ${task.text}`,

@@ -3,7 +3,7 @@
  * Routes messages to the configured PM agent session
  */
 
-import { getPmSession, getAgentForRole } from './agent-roles.js';
+import { getPmSession, getAgentForRole, getDefaultRoles } from './agent-roles.js';
 import { getPmSkillContext } from './skill-injector.js';
 import { parseTasksFromPlan, detectPlan } from './plan-parser.js';
 
@@ -99,33 +99,43 @@ export function createPmHandlers(store, options = {}) {
         return respond(false, null, `Goal ${goalId} does not belong to condo ${condoId}`);
       }
 
-      // Save user message to history BEFORE sending
+      // Save user message to history
       const userMessage = message.trim();
       addToHistory(goal, 'user', userMessage);
       store.save(data);
 
-      // Use override session, or resolve via configurable hierarchy
+      // Resolve PM session
       const targetSession = overrideSession || getPmSession(store, condoId);
 
-      if (!sendToSession) {
-        return respond(false, null, 'sendToSession not available');
-      }
-
-      // Build context message with condo info
+      // Build context-enriched message with SKILL-PM.md + condo/goal info
       const goals = data.goals.filter(g => g.condoId === condoId);
       const activeGoals = goals.filter(g => !g.completed);
       const allTasks = goals.flatMap(g => g.tasks || []);
       const pendingTasks = allTasks.filter(t => t.status !== 'done');
-      
-      // Get PM skill context
+
+      // Dynamically gather available agent roles from config + defaults
+      const configuredRoles = data.config?.agentRoles || {};
+      const roleDescriptions = data.config?.roles || {};
+      const defaultRoles = getDefaultRoles();
+      const allRoleNames = new Set([...Object.keys(defaultRoles), ...Object.keys(configuredRoles), ...Object.keys(roleDescriptions)]);
+      const availableRoles = {};
+      for (const role of allRoleNames) {
+        // Skip 'pm' role — PM doesn't assign tasks to itself
+        if (role === 'pm') continue;
+        const agentId = configuredRoles[role] || defaultRoles[role] || role;
+        const description = roleDescriptions[role]?.description || null;
+        availableRoles[role] = { agentId, ...(description ? { description } : {}) };
+      }
+
       const pmSkillContext = getPmSkillContext({
         condoId,
         condoName: condo.name,
         activeGoals: activeGoals.length,
         totalTasks: allTasks.length,
         pendingTasks: pendingTasks.length,
+        roles: availableRoles,
       });
-      
+
       const contextPrefix = [
         pmSkillContext || null,
         '',
@@ -137,54 +147,20 @@ export function createPmHandlers(store, options = {}) {
         'User Message:',
       ].filter(line => line != null).join('\n');
 
-      const fullMessage = `${contextPrefix}\n${userMessage}`;
-
-      // Send to PM session and wait for response
-      if (logger) {
-        logger.debug(`pm.chat: sending to session ${targetSession}`);
-      }
-      
-      let response;
-      try {
-        response = await sendToSession(targetSession, {
-          type: 'pm_chat',
-          condoId,
-          goalId,
-          message: fullMessage,
-          expectResponse: true,
-        });
-      } catch (sendErr) {
-        if (logger) {
-          logger.error(`pm.chat: sendToSession failed: ${sendErr.message}`);
-        }
-        throw new Error(`Failed to reach PM session: ${sendErr.message}`);
-      }
-
-      const responseText = response?.text || response?.message || 'No response received';
-
-      // Save assistant response to history
-      const dataAfter = store.load();
-      const goalAfter = dataAfter.goals.find(g => g.id === goalId);
-      if (goalAfter) {
-        addToHistory(goalAfter, 'assistant', responseText);
-        store.save(dataAfter);
-      }
+      const enrichedMessage = `${contextPrefix}\n${userMessage}`;
 
       if (logger) {
-        logger.info(`pm.chat: sent to ${targetSession} for goal ${goal.title} in condo ${condo.name}`);
+        logger.info(`pm.chat: prepared message for ${targetSession}, goal "${goal.title}" in condo "${condo.name}"`);
       }
 
-      // Detect if response contains a plan
-      const hasPlan = detectPlan(responseText);
-
-      // Return last N messages for UI
-      const history = getGoalPmHistory(goalAfter || goal).slice(-20);
+      // Return the enriched message and PM session for the frontend to send via chat.send.
+      // The frontend handles streaming and calls pm.saveResponse when the agent replies.
+      const history = getGoalPmHistory(goal).slice(-20);
 
       respond(true, {
-        response: responseText,
+        enrichedMessage,
         pmSession: targetSession,
         history,
-        hasPlan,
         goalId,
       });
     } catch (err) {
@@ -375,6 +351,51 @@ export function createPmHandlers(store, options = {}) {
   };
 
   /**
+   * pm.saveResponse - Save a PM assistant response to goal history
+   * Called by the frontend after receiving the streamed response from chat.send
+   * Params: { goalId: string, content: string }
+   * Response: { ok: boolean, hasPlan: boolean }
+   */
+  handlers['pm.saveResponse'] = ({ params, respond }) => {
+    const { goalId, content } = params || {};
+
+    if (!goalId) {
+      return respond(false, null, 'goalId is required');
+    }
+
+    if (!content || typeof content !== 'string') {
+      return respond(false, null, 'content is required');
+    }
+
+    try {
+      const data = store.load();
+      const goal = data.goals.find(g => g.id === goalId);
+
+      if (!goal) {
+        return respond(false, null, `Goal ${goalId} not found`);
+      }
+
+      addToHistory(goal, 'assistant', content.trim());
+      goal.updatedAtMs = Date.now();
+      store.save(data);
+
+      const hasPlan = detectPlan(content);
+
+      if (logger) {
+        logger.info(`pm.saveResponse: saved response for goal ${goal.title} (hasPlan: ${hasPlan})`);
+      }
+
+      respond(true, {
+        ok: true,
+        hasPlan,
+        goalId,
+      });
+    } catch (err) {
+      respond(false, null, err.message);
+    }
+  };
+
+  /**
    * pm.createTasksFromPlan - Parse a plan and create tasks on a goal
    * Params: { goalId: string, planContent?: string }
    * - If planContent is not provided, uses goal.plan.content
@@ -461,6 +482,9 @@ export function createPmHandlers(store, options = {}) {
 
       goal.updatedAtMs = now;
 
+      // Store the full plan content so spawned workers can reference it
+      goal.pmPlanContent = contentToParse;
+
       // Update goal plan status to approved if it was awaiting approval
       if (goal.plan?.status === 'awaiting_approval' || goal.plan?.status === 'draft') {
         goal.plan.status = 'approved';
@@ -483,6 +507,115 @@ export function createPmHandlers(store, options = {}) {
     } catch (err) {
       if (logger) {
         logger.error(`pm.createTasksFromPlan error: ${err.message}`);
+      }
+      respond(false, null, err.message);
+    }
+  };
+
+  /**
+   * pm.regenerateTasks - Delete all existing tasks and re-create from plan
+   * Params: { goalId: string, planContent?: string }
+   * - Removes ALL existing tasks and replaces with freshly parsed ones
+   * - Re-parses the plan (or latest PM assistant message) to create fresh tasks
+   * Response: { ok: true, removed: number, tasksCreated: number, tasks: [...] }
+   */
+  handlers['pm.regenerateTasks'] = ({ params, respond }) => {
+    const { goalId, planContent } = params || {};
+
+    if (!goalId) {
+      return respond(false, null, 'goalId is required');
+    }
+
+    try {
+      const data = store.load();
+      const goal = data.goals.find(g => g.id === goalId);
+
+      if (!goal) {
+        return respond(false, null, `Goal ${goalId} not found`);
+      }
+
+      // Remove ALL existing tasks
+      const existingTasks = goal.tasks || [];
+      for (const task of existingTasks) {
+        if (task.sessionKey && data.sessionIndex?.[task.sessionKey]) {
+          delete data.sessionIndex[task.sessionKey];
+        }
+      }
+      const removedCount = existingTasks.length;
+      goal.tasks = [];
+
+      // Determine content to parse (same logic as createTasksFromPlan)
+      let contentToParse = planContent;
+
+      if (!contentToParse) {
+        if (goal.plan?.content) {
+          contentToParse = goal.plan.content;
+        } else if (goal.pmChatHistory?.length) {
+          for (let i = goal.pmChatHistory.length - 1; i >= 0; i--) {
+            if (goal.pmChatHistory[i].role === 'assistant') {
+              contentToParse = goal.pmChatHistory[i].content;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!contentToParse) {
+        store.save(data);
+        return respond(false, null, 'No plan content found to regenerate tasks from');
+      }
+
+      // Parse and create new tasks
+      const { tasks: parsedTasks, hasPlan } = parseTasksFromPlan(contentToParse);
+
+      if (parsedTasks.length === 0) {
+        store.save(data);
+        return respond(false, null, 'Could not extract tasks from plan');
+      }
+
+      const now = Date.now();
+      const createdTasks = [];
+
+      for (const taskData of parsedTasks) {
+        const task = {
+          id: store.newId('task'),
+          text: taskData.text,
+          description: taskData.description || '',
+          status: 'pending',
+          done: false,
+          priority: null,
+          sessionKey: null,
+          assignedAgent: taskData.agent || null,
+          model: null,
+          dependsOn: [],
+          summary: '',
+          estimatedTime: taskData.time || null,
+          createdAtMs: now,
+          updatedAtMs: now,
+        };
+
+        goal.tasks.push(task);
+        createdTasks.push(task);
+      }
+
+      goal.updatedAtMs = now;
+      goal.pmPlanContent = contentToParse;
+      store.save(data);
+
+      if (logger) {
+        logger.info(`pm.regenerateTasks: removed ${removedCount}, created ${createdTasks.length} tasks for goal ${goalId}`);
+      }
+
+      respond(true, {
+        ok: true,
+        removed: removedCount,
+        tasksCreated: createdTasks.length,
+        tasks: createdTasks,
+        goalId,
+      });
+    } catch (err) {
+      if (logger) {
+        logger.error(`pm.regenerateTasks error: ${err.message}`);
       }
       respond(false, null, err.message);
     }

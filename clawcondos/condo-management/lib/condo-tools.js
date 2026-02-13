@@ -1,4 +1,4 @@
-export function createCondoBindExecutor(store) {
+export function createCondoBindExecutor(store, wsOps) {
   return async function execute(toolCallId, params) {
     const { sessionKey, condoId, name, description } = params;
 
@@ -16,14 +16,25 @@ export function createCondoBindExecutor(store) {
       }
     } else {
       const now = Date.now();
+      const newCondoId = store.newId('condo');
       condo = {
-        id: store.newId('condo'),
+        id: newCondoId,
         name: name.trim(),
         description: typeof description === 'string' ? description : '',
         color: null,
+        workspace: null,
         createdAtMs: now,
         updatedAtMs: now,
       };
+
+      // Create workspace if workspaces are enabled
+      if (wsOps) {
+        const wsResult = wsOps.createCondoWorkspace(wsOps.dir, newCondoId, name.trim());
+        if (wsResult.ok) {
+          condo.workspace = { path: wsResult.path, repoUrl: null, createdAtMs: now };
+        }
+      }
+
       data.condos.unshift(condo);
     }
 
@@ -36,7 +47,7 @@ export function createCondoBindExecutor(store) {
   };
 }
 
-export function createCondoCreateGoalExecutor(store) {
+export function createCondoCreateGoalExecutor(store, wsOps) {
   return async function execute(toolCallId, params) {
     const { sessionKey, title, description, priority, tasks } = params;
 
@@ -51,8 +62,9 @@ export function createCondoCreateGoalExecutor(store) {
     }
 
     const now = Date.now();
+    const goalId = store.newId('goal');
     const goal = {
-      id: store.newId('goal'),
+      id: goalId,
       title: title.trim(),
       description: description || '',
       notes: '',
@@ -61,11 +73,23 @@ export function createCondoCreateGoalExecutor(store) {
       condoId,
       priority: priority || null,
       deadline: null,
+      worktree: null,
       tasks: [],
       sessions: [],
       createdAtMs: now,
       updatedAtMs: now,
     };
+
+    // Create worktree if condo has a workspace
+    if (wsOps) {
+      const condo = data.condos.find(c => c.id === condoId);
+      if (condo?.workspace?.path) {
+        const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId);
+        if (wtResult.ok) {
+          goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
+        }
+      }
+    }
 
     // Add initial tasks if provided
     if (Array.isArray(tasks)) {

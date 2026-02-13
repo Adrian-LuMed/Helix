@@ -6,9 +6,10 @@ An [OpenClaw](https://github.com/acastellana/openclaw) plugin for managing goals
 
 - **Goals** — Create, track, and complete goals with tasks and deadlines
 - **Condos** — Group goals into projects ("condos") for multi-goal orchestration
+- **Condo Workspaces** — Git-initialized workspace per condo with worktrees per goal for isolated parallel development (optional, enabled via `CLAWCONDOS_WORKSPACES_DIR`)
 - **Session Binding** — Map agent sessions to goals or condos for context injection
 - **Agent Tools** — Agents can report progress, create goals, and spawn sub-agents
-- **Context Injection** — Automatically prepend goal/project context to agent prompts
+- **Context Injection** — Automatically prepend goal/project context to agent prompts (includes workspace paths when available)
 - **Session Classification** — Auto-route unbound sessions to condos via keyword/topic pattern matching
 - **Learning Loop** — Track classification corrections and suggest keyword improvements
 - **File-backed Storage** — JSON storage with atomic writes, no database required
@@ -32,11 +33,22 @@ Optional — set in your OpenClaw plugin config:
 
 ```json
 {
-  "dataDir": "/custom/path/to/data"
+  "dataDir": "/custom/path/to/data",
+  "workspacesDir": "/path/to/workspaces"
 }
 ```
 
 Default data directory: `.data/` inside the plugin directory.
+
+### Condo Workspaces (optional)
+
+Set `CLAWCONDOS_WORKSPACES_DIR` (or `workspacesDir` in plugin config) to enable git workspace creation for condos and git worktrees for goals:
+
+```bash
+export CLAWCONDOS_WORKSPACES_DIR=$HOME/clawcondos-workspaces
+```
+
+When enabled, each new condo gets a git-initialized workspace directory, and each goal within it gets a dedicated git worktree (branch: `goal/<goalId>`). This allows agents to work on multiple goals simultaneously without conflicts. See [docs/GOALS-PLUGIN.md](../../docs/GOALS-PLUGIN.md) for the full workspace specification.
 
 ## API Overview
 

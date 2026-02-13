@@ -101,6 +101,37 @@ Goals can have files attached via `goal.files[]`. Agents report files through th
 - `getFileIcon(ext)` — maps file extension to emoji icon (JS/TS→📜, CSS→🎨, Python→🐍, etc.)
 - `removeGoalFile(goalId, path)` — calls `goals.removeFile` RPC, refreshes goals, re-renders view
 
+### Condo Workspaces & Goal Worktrees
+
+When `CLAWCONDOS_WORKSPACES_DIR` is set, each condo gets a git-initialized workspace directory and each goal gets a git worktree for isolated parallel development.
+
+**Layout:**
+```
+$CLAWCONDOS_WORKSPACES_DIR/
+  my-project-a1b2c3d4/          <- condo workspace (main git repo)
+    goals/
+      goal_abc123/              <- worktree (branch: goal/goal_abc123)
+      goal_def456/              <- worktree (branch: goal/goal_def456)
+    src/                        <- shared project files (main branch)
+```
+
+**Data model additions:**
+- **Condo** — `workspace: { path, repoUrl, createdAtMs }` (null if workspaces disabled)
+- **Goal** — `worktree: { path, branch, createdAtMs }` (null if parent condo has no workspace)
+
+**Behavior:**
+- Condo creation → `git init` (or `git clone` if `repoUrl` provided) + `goals/` subdir
+- Goal creation → `git worktree add goals/<goalId> -b goal/<goalId>`
+- Goal deletion → `git worktree remove --force` + branch cleanup
+- Condo deletion → `rm -rf` the workspace directory
+- All workspace ops are best-effort — failures are logged but never block condo/goal CRUD
+- When disabled (`CLAWCONDOS_WORKSPACES_DIR` not set), all workspace code is completely skipped
+
+**Agent awareness:**
+- Context injection includes `Workspace: <path>` in goal and condo context blocks
+- Spawned task agents receive a `**Working Directory:**` header with explicit `cd` instruction
+- The `workspacePath` is included in the `goals.spawnTaskSession` response payload
+
 ### OpenClaw Plugin (clawcondos-goals)
 
 Goals, tasks, and session-goal mappings are managed by an OpenClaw plugin at `clawcondos/condo-management/`. The plugin registers gateway RPC methods that the frontend calls over WebSocket.
@@ -114,6 +145,8 @@ Goals, tasks, and session-goal mappings are managed by an OpenClaw plugin at `cl
 - `clawcondos/condo-management/lib/goal-update-tool.js` - Agent tool for reporting task status
 - `clawcondos/condo-management/lib/condo-tools.js` - Agent tools for condo binding, goal creation, task management, and subagent spawning
 - `clawcondos/condo-management/lib/task-spawn.js` - Spawns subagent sessions for task execution
+- `clawcondos/condo-management/lib/workspace-manager.js` - Git workspace creation for condos and git worktree management for goals
+- `clawcondos/condo-management/lib/skill-injector.js` - Reads skill files and builds context strings for PM and worker agents
 - `clawcondos/condo-management/lib/classifier.js` - Tier 1 pattern-based session classifier (keyword/topic matching)
 - `clawcondos/condo-management/lib/classification-log.js` - Classification attempt logging with feedback tracking
 - `clawcondos/condo-management/lib/learning.js` - Analyzes classification corrections and suggests keyword updates
@@ -125,7 +158,7 @@ Goals, tasks, and session-goal mappings are managed by an OpenClaw plugin at `cl
 - Session-condo mapping: `goals.setSessionCondo`, `goals.getSessionCondo`, `goals.listSessionCondos`, `goals.removeSessionCondo`
 - Tasks: `goals.addTask`, `goals.updateTask`, `goals.deleteTask`
 - Files: `goals.addFiles`, `goals.removeFile`
-- Condos: `condos.create`, `condos.list`, `condos.get`, `condos.update`, `condos.delete`
+- Condos: `condos.create` (accepts optional `repoUrl` for cloning), `condos.list`, `condos.get`, `condos.update`, `condos.delete`
 - Spawning: `goals.spawnTaskSession`
 - Classification: `classification.stats`, `classification.learningReport`, `classification.applyLearning`
 
@@ -180,6 +213,7 @@ Tests use **Vitest 2.0** in Node environment. Test files live in `tests/` and ma
 - `CLAWCONDOS_SKILLS_DIRS` - Colon-separated skill directory paths (default: empty)
 - `CLAWCONDOS_UPLOAD_DIR` - Additional upload directory allowed for Whisper transcription
 - `CLAWCONDOS_CLASSIFICATION` - Set to `off` to disable auto-classification of unbound sessions (default: enabled)
+- `CLAWCONDOS_WORKSPACES_DIR` - Base directory for condo git workspaces (disabled if not set). When set, each condo gets a git-initialized workspace and each goal gets a git worktree for isolated parallel development.
 
 ## Reference Files
 

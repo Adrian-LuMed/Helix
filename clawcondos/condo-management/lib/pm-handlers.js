@@ -3,9 +3,9 @@
  * Routes messages to the configured PM agent session
  */
 
-import { getPmSession, getAgentForRole, getDefaultRoles } from './agent-roles.js';
-import { getPmSkillContext } from './skill-injector.js';
-import { parseTasksFromPlan, detectPlan } from './plan-parser.js';
+import { getPmSession, getAgentForRole, getDefaultRoles, getOrCreatePmSessionForGoal, getOrCreatePmSessionForCondo } from './agent-roles.js';
+import { getPmSkillContext, getCondoPmSkillContext } from './skill-injector.js';
+import { parseTasksFromPlan, detectPlan, parseGoalsFromPlan, detectCondoPlan } from './plan-parser.js';
 
 /** Default max history entries per goal */
 const DEFAULT_HISTORY_LIMIT = 100;
@@ -51,7 +51,7 @@ function addToHistory(goal, role, content, maxHistory = DEFAULT_HISTORY_LIMIT) {
  * @returns {object} Map of method names to handlers
  */
 export function createPmHandlers(store, options = {}) {
-  const { sendToSession, logger } = options;
+  const { sendToSession, logger, wsOps } = options;
   const handlers = {};
 
   /**
@@ -104,8 +104,9 @@ export function createPmHandlers(store, options = {}) {
       addToHistory(goal, 'user', userMessage);
       store.save(data);
 
-      // Resolve PM session
-      const targetSession = overrideSession || getPmSession(store, condoId);
+      // Resolve PM session — use per-goal dedicated session
+      const { pmSessionKey: goalPmSession } = getOrCreatePmSessionForGoal(store, goalId);
+      const targetSession = overrideSession || goalPmSession;
 
       // Build context-enriched message with SKILL-PM.md + condo/goal info
       const goals = data.goals.filter(g => g.condoId === condoId);
@@ -295,7 +296,7 @@ export function createPmHandlers(store, options = {}) {
       const condo = data.condos.find(c => c.id === goal.condoId);
       const history = getGoalPmHistory(goal);
       const messages = history.slice(-Math.min(limit, DEFAULT_HISTORY_LIMIT));
-      const pmSession = getPmSession(store, goal.condoId);
+      const pmSession = goal.pmSessionKey || getPmSession(store, goal.condoId);
 
       respond(true, {
         messages,
@@ -643,6 +644,418 @@ export function createPmHandlers(store, options = {}) {
         tasks: tasks.map(t => ({ text: t.text, agent: t.agent })), // Preview only
       });
     } catch (err) {
+      respond(false, null, err.message);
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════
+  // CONDO-LEVEL PM HANDLERS
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Get or initialize PM chat history for a condo
+   */
+  function getCondoPmHistory(condo) {
+    if (!Array.isArray(condo.pmChatHistory)) {
+      condo.pmChatHistory = [];
+    }
+    return condo.pmChatHistory;
+  }
+
+  /**
+   * Add a message to condo PM chat history
+   */
+  function addToCondoHistory(condo, role, content, maxHistory = DEFAULT_HISTORY_LIMIT) {
+    const history = getCondoPmHistory(condo);
+    history.push({
+      role,
+      content,
+      timestamp: Date.now(),
+    });
+    while (history.length > maxHistory) {
+      history.shift();
+    }
+  }
+
+  /**
+   * pm.condoChat - Send a message to the condo-level PM
+   * Params: { condoId: string, message: string }
+   * Response: { enrichedMessage, pmSession, history, condoId }
+   */
+  handlers['pm.condoChat'] = async ({ params, respond }) => {
+    const { condoId, message } = params || {};
+
+    if (!condoId) {
+      return respond(false, null, 'condoId is required');
+    }
+
+    if (!message || typeof message !== 'string' || !message.trim()) {
+      return respond(false, null, 'message is required');
+    }
+
+    try {
+      const data = store.load();
+      const condo = data.condos.find(c => c.id === condoId);
+
+      if (!condo) {
+        return respond(false, null, `Condo ${condoId} not found`);
+      }
+
+      // Save user message to condo history
+      const userMessage = message.trim();
+      addToCondoHistory(condo, 'user', userMessage);
+      store.save(data);
+
+      // Get/create condo PM session (registers in sessionCondoIndex)
+      const { pmSessionKey } = getOrCreatePmSessionForCondo(store, condoId);
+
+      // Build context-enriched message with condo PM skill context
+      const goals = data.goals.filter(g => g.condoId === condoId);
+      const activeGoals = goals.filter(g => !g.completed && g.status !== 'done');
+
+      // Gather roles
+      const configuredRoles = data.config?.agentRoles || {};
+      const roleDescriptions = data.config?.roles || {};
+      const defaultRoles = getDefaultRoles();
+      const allRoleNames = new Set([...Object.keys(defaultRoles), ...Object.keys(configuredRoles), ...Object.keys(roleDescriptions)]);
+      const availableRoles = {};
+      for (const role of allRoleNames) {
+        if (role === 'pm') continue;
+        const agentId = configuredRoles[role] || defaultRoles[role] || role;
+        const description = roleDescriptions[role]?.description || null;
+        availableRoles[role] = { agentId, ...(description ? { description } : {}) };
+      }
+
+      const existingGoalSummaries = goals.map(g => ({
+        title: g.title,
+        status: g.status || (g.completed ? 'done' : 'active'),
+        taskCount: (g.tasks || []).length,
+      }));
+
+      const condoPmSkillContext = getCondoPmSkillContext({
+        condoId,
+        condoName: condo.name,
+        goalCount: goals.length,
+        existingGoals: existingGoalSummaries,
+        roles: availableRoles,
+      });
+
+      const contextPrefix = [
+        `[SESSION IDENTITY] You are the PM for condo "${condo.name}" (ID: ${condoId}). This is an ISOLATED session — do NOT reference context, goals, or conversations from any other condo or project.`,
+        '',
+        condoPmSkillContext || null,
+        '',
+        `[Condo PM Context]`,
+        `Condo: ${condo.name} (${condoId})`,
+        `Active Goals: ${activeGoals.length}`,
+        `Total Goals: ${goals.length}`,
+        '',
+        'User Message:',
+      ].filter(line => line != null).join('\n');
+
+      const enrichedMessage = `${contextPrefix}\n${userMessage}`;
+
+      if (logger) {
+        logger.info(`pm.condoChat: prepared message for ${pmSessionKey}, condo "${condo.name}"`);
+      }
+
+      const history = getCondoPmHistory(condo).slice(-20);
+
+      respond(true, {
+        enrichedMessage,
+        pmSession: pmSessionKey,
+        history,
+        condoId,
+      });
+    } catch (err) {
+      if (logger) {
+        logger.error(`pm.condoChat error: ${err.message}`);
+      }
+      respond(false, null, err.message);
+    }
+  };
+
+  /**
+   * pm.condoSaveResponse - Save a condo PM assistant response to history
+   * Params: { condoId: string, content: string }
+   * Response: { ok, hasPlan, condoId }
+   */
+  handlers['pm.condoSaveResponse'] = ({ params, respond }) => {
+    const { condoId, content } = params || {};
+
+    if (!condoId) {
+      return respond(false, null, 'condoId is required');
+    }
+
+    if (!content || typeof content !== 'string') {
+      return respond(false, null, 'content is required');
+    }
+
+    try {
+      const data = store.load();
+      const condo = data.condos.find(c => c.id === condoId);
+
+      if (!condo) {
+        return respond(false, null, `Condo ${condoId} not found`);
+      }
+
+      addToCondoHistory(condo, 'assistant', content.trim());
+      condo.updatedAtMs = Date.now();
+      store.save(data);
+
+      const hasPlan = detectCondoPlan(content);
+
+      if (logger) {
+        logger.info(`pm.condoSaveResponse: saved response for condo "${condo.name}" (hasPlan: ${hasPlan})`);
+      }
+
+      respond(true, {
+        ok: true,
+        hasPlan,
+        condoId,
+      });
+    } catch (err) {
+      respond(false, null, err.message);
+    }
+  };
+
+  /**
+   * pm.condoGetHistory - Get condo PM chat history
+   * Params: { condoId: string, limit?: number }
+   * Response: { messages, condoId, condoName, total }
+   */
+  handlers['pm.condoGetHistory'] = ({ params, respond }) => {
+    const { condoId, limit = 50 } = params || {};
+
+    if (!condoId) {
+      return respond(false, null, 'condoId is required');
+    }
+
+    try {
+      const data = store.load();
+      const condo = data.condos.find(c => c.id === condoId);
+
+      if (!condo) {
+        return respond(false, null, `Condo ${condoId} not found`);
+      }
+
+      const history = getCondoPmHistory(condo);
+      const messages = history.slice(-Math.min(limit, DEFAULT_HISTORY_LIMIT));
+
+      respond(true, {
+        messages,
+        condoId,
+        condoName: condo.name,
+        total: history.length,
+      });
+    } catch (err) {
+      respond(false, null, err.message);
+    }
+  };
+
+  /**
+   * pm.condoCreateGoals - Create goals from a condo PM plan
+   * Params: { condoId: string, planContent?: string }
+   * If no planContent, uses last assistant message from condo's pmChatHistory
+   * Response: { ok, goalsCreated, goals: [{id, title, taskCount}], condoId }
+   */
+  handlers['pm.condoCreateGoals'] = ({ params, respond }) => {
+    const { condoId, planContent } = params || {};
+
+    if (!condoId) {
+      return respond(false, null, 'condoId is required');
+    }
+
+    try {
+      const data = store.load();
+      const condo = data.condos.find(c => c.id === condoId);
+
+      if (!condo) {
+        return respond(false, null, `Condo ${condoId} not found`);
+      }
+
+      // Determine content to parse
+      let contentToParse = planContent;
+
+      if (!contentToParse) {
+        // Try last assistant message from condo PM history
+        const history = getCondoPmHistory(condo);
+        for (let i = history.length - 1; i >= 0; i--) {
+          if (history[i].role === 'assistant') {
+            contentToParse = history[i].content;
+            break;
+          }
+        }
+      }
+
+      if (!contentToParse) {
+        return respond(false, null, 'No plan content provided and no PM response found in condo history');
+      }
+
+      // Parse goals from the plan
+      const { goals: parsedGoals, hasPlan } = parseGoalsFromPlan(contentToParse);
+
+      if (!hasPlan && parsedGoals.length === 0) {
+        return respond(false, null, 'No plan or goals detected in content');
+      }
+
+      if (parsedGoals.length === 0) {
+        return respond(false, null, 'Plan detected but could not extract any goals');
+      }
+
+      // Create goal objects
+      const now = Date.now();
+      const createdGoals = [];
+
+      if (!data.goals) data.goals = [];
+
+      for (const goalData of parsedGoals) {
+        const goalId = store.newId('goal');
+        const tasks = (goalData.tasks || []).map(t => ({
+          id: store.newId('task'),
+          text: t.text,
+          description: t.description || '',
+          status: 'pending',
+          done: false,
+          priority: null,
+          sessionKey: null,
+          assignedAgent: t.agent || null,
+          model: null,
+          dependsOn: [],
+          summary: '',
+          estimatedTime: t.time || null,
+          createdAtMs: now,
+          updatedAtMs: now,
+        }));
+
+        const goal = {
+          id: goalId,
+          title: goalData.title,
+          description: goalData.description || '',
+          condoId,
+          status: 'active',
+          completed: false,
+          priority: goalData.priority || null,
+          worktree: null,
+          tasks,
+          sessions: [],
+          files: [],
+          createdAtMs: now,
+          updatedAtMs: now,
+        };
+
+        // Create worktree if condo has a workspace
+        if (wsOps && condo.workspace?.path) {
+          const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId);
+          if (wtResult.ok) {
+            goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
+          } else if (logger) {
+            logger.error(`pm.condoCreateGoals: worktree creation failed for goal ${goalId}: ${wtResult.error}`);
+          }
+        }
+
+        data.goals.push(goal);
+        createdGoals.push({
+          id: goalId,
+          title: goalData.title,
+          taskCount: tasks.length,
+        });
+      }
+
+      // Store plan content on condo for reference
+      condo.pmPlanContent = contentToParse;
+      condo.updatedAtMs = now;
+      store.save(data);
+
+      if (logger) {
+        logger.info(`pm.condoCreateGoals: created ${createdGoals.length} goals for condo "${condo.name}"`);
+      }
+
+      respond(true, {
+        ok: true,
+        goalsCreated: createdGoals.length,
+        goals: createdGoals,
+        condoId,
+      });
+    } catch (err) {
+      if (logger) {
+        logger.error(`pm.condoCreateGoals error: ${err.message}`);
+      }
+      respond(false, null, err.message);
+    }
+  };
+
+  /**
+   * pm.condoCascade - Prepare goal-level PM sessions for cascade planning/execution
+   * Params: { condoId: string, mode: 'plan' | 'full' }
+   * - 'plan': Create goal PM sessions and return prompts for frontend to send
+   * - 'full': Same as 'plan', plus marks goals for auto-kickoff after planning
+   * Response: { goals: [{goalId, title, pmSessionKey, prompt}], mode }
+   */
+  handlers['pm.condoCascade'] = ({ params, respond }) => {
+    const { condoId, mode } = params || {};
+
+    if (!condoId) {
+      return respond(false, null, 'condoId is required');
+    }
+
+    if (mode !== 'plan' && mode !== 'full') {
+      return respond(false, null, 'mode must be "plan" or "full"');
+    }
+
+    try {
+      const data = store.load();
+      const condo = data.condos.find(c => c.id === condoId);
+
+      if (!condo) {
+        return respond(false, null, `Condo ${condoId} not found`);
+      }
+
+      // Find goals in this condo that need planning (no tasks yet)
+      const goals = data.goals.filter(g => g.condoId === condoId && g.status !== 'done');
+      const goalsNeedingPlanning = goals.filter(g => !g.tasks || g.tasks.length === 0);
+
+      if (goalsNeedingPlanning.length === 0) {
+        return respond(false, null, 'No goals need planning (all already have tasks)');
+      }
+
+      const cascadeGoals = [];
+
+      for (const goal of goalsNeedingPlanning) {
+        // Create a PM session for this goal
+        const { pmSessionKey } = getOrCreatePmSessionForGoal(store, goal.id);
+
+        // Build a prompt for the goal PM
+        const prompt = `Plan tasks for this goal: "${goal.title}"` +
+          (goal.description ? `\n\nDescription: ${goal.description}` : '') +
+          `\n\nThis goal is part of the "${condo.name}" project. Break it into actionable tasks with agent assignments.`;
+
+        cascadeGoals.push({
+          goalId: goal.id,
+          title: goal.title,
+          pmSessionKey,
+          prompt,
+        });
+      }
+
+      // Store cascade mode on condo so frontend knows how to handle responses
+      condo.cascadeMode = mode;
+      condo.updatedAtMs = Date.now();
+      store.save(data);
+
+      if (logger) {
+        logger.info(`pm.condoCascade: prepared ${cascadeGoals.length} goal PMs for condo "${condo.name}" (mode: ${mode})`);
+      }
+
+      respond(true, {
+        goals: cascadeGoals,
+        mode,
+        condoId,
+      });
+    } catch (err) {
+      if (logger) {
+        logger.error(`pm.condoCascade error: ${err.message}`);
+      }
       respond(false, null, err.message);
     }
   };

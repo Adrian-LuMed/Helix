@@ -22,6 +22,7 @@ import {
   createCondoAddTaskExecutor,
   createCondoSpawnTaskExecutor,
 } from './lib/condo-tools.js';
+import * as workspaceManager from './lib/workspace-manager.js';
 import {
   CLASSIFIER_CONFIG,
   extractLastUserMessage,
@@ -38,7 +39,18 @@ export default function register(api) {
     || join(dirname(fileURLToPath(import.meta.url)), '.data');
   const store = createGoalsStore(dataDir);
   const classificationLog = createClassificationLog(dataDir);
-  const handlers = createGoalHandlers(store);
+
+  // ── Workspace management ──
+  const workspacesDir = process.env.CLAWCONDOS_WORKSPACES_DIR || api.pluginConfig?.workspacesDir || null;
+  const wsOps = workspacesDir
+    ? { dir: workspacesDir, ...workspaceManager }
+    : null;
+
+  if (wsOps) {
+    api.logger.info(`clawcondos-goals: workspaces enabled at ${workspacesDir}`);
+  }
+
+  const handlers = createGoalHandlers(store, { wsOps, logger: api.logger });
 
   // Wrap setSessionCondo to track reclassifications
   const originalSetSessionCondo = handlers['goals.setSessionCondo'];
@@ -111,7 +123,7 @@ export default function register(api) {
     }
   }
 
-  const condoHandlers = createCondoHandlers(store);
+  const condoHandlers = createCondoHandlers(store, { wsOps, logger: api.logger });
   for (const [method, handler] of Object.entries(condoHandlers)) {
     api.registerGatewayMethod(method, handler);
   }
@@ -149,6 +161,7 @@ export default function register(api) {
   const pmHandlers = createPmHandlers(store, {
     sendToSession: api.sendToSession,
     logger: api.logger,
+    wsOps,
   });
   for (const [method, handler] of Object.entries(pmHandlers)) {
     api.registerGatewayMethod(method, handler);
@@ -709,7 +722,7 @@ export default function register(api) {
   );
 
   // Tool: condo_bind for agents to bind their session to a condo
-  const condoBindExecute = createCondoBindExecutor(store);
+  const condoBindExecute = createCondoBindExecutor(store, wsOps);
 
   api.registerTool(
     (ctx) => {
@@ -739,7 +752,7 @@ export default function register(api) {
   );
 
   // Tool: condo_create_goal for agents to create goals in their bound condo
-  const condoCreateGoalExecute = createCondoCreateGoalExecutor(store);
+  const condoCreateGoalExecute = createCondoCreateGoalExecutor(store, wsOps);
 
   api.registerTool(
     (ctx) => {

@@ -60,10 +60,14 @@ All data lives in a single JSON file (`clawcondos/condo-management/.data/goals.j
 - `priority`, `dependsOn[]`, `summary`
 - `createdAtMs`, `updatedAtMs`
 
+**Goals** additionally have:
+- `worktree` (nullable `{ path, branch, createdAtMs }` — present when parent condo has a workspace)
+
 **Condos** group goals. Each condo has:
 - `id`, `name`, `description`, `color`
 - `keywords` (array of strings for auto-classification)
 - `telegramTopicIds` (array of strings for topic-based routing)
+- `workspace` (nullable `{ path, repoUrl, createdAtMs }` — present when `CLAWCONDOS_WORKSPACES_DIR` is set)
 - `createdAtMs`, `updatedAtMs`
 
 **Indexes** provide fast lookups:
@@ -86,6 +90,8 @@ clawcondos/condo-management/
     goal-update-tool.js     # Agent tool executor for reporting task status
     condo-tools.js          # Agent tools for condo binding, goal creation, task management
     task-spawn.js           # Spawn subagent session for a task
+    workspace-manager.js    # Git workspace/worktree management for condos and goals
+    skill-injector.js       # Reads skill files and builds context for PM/worker agents
     classifier.js           # Tier 1 pattern-based session classifier
     classification-log.js   # Classification attempt logging with feedback
     learning.js             # Correction analysis and keyword suggestions
@@ -107,7 +113,7 @@ All methods follow the standard OpenClaw JSON-RPC protocol over WebSocket.
 | Method | Params | Returns | Notes |
 |--------|--------|---------|-------|
 | `goals.list` | — | `{ goals }` | All goals |
-| `goals.create` | `title`, `condoId?`, `description?`, `status?`, `priority?`, `deadline?`, `notes?` | `{ goal }` | Tasks always start empty (use `addTask`) |
+| `goals.create` | `title`, `condoId?`, `description?`, `status?`, `priority?`, `deadline?`, `notes?` | `{ goal }` | Tasks always start empty (use `addTask`). If `condoId` references a condo with a workspace, a git worktree is created automatically. |
 | `goals.get` | `id` | `{ goal }` | |
 | `goals.update` | `id`, plus any of: `title`, `description`, `status`, `completed`, `condoId`, `priority`, `deadline`, `notes`, `tasks` | `{ goal }` | Whitelist prevents overwriting `id`, `sessions`, `createdAtMs`. Title validated. Status/completed synced. |
 | `goals.delete` | `id` | `{ ok }` | Cleans up sessionIndex entries |
@@ -140,7 +146,7 @@ All methods follow the standard OpenClaw JSON-RPC protocol over WebSocket.
 
 | Method | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `goals.spawnTaskSession` | `goalId`, `taskId`, `agentId?`, `model?` | `{ sessionKey, taskContext, agentId, model, goalId, taskId }` | Generates session key, links to goal, builds context, guards against re-spawning |
+| `goals.spawnTaskSession` | `goalId`, `taskId`, `agentId?`, `model?` | `{ sessionKey, taskContext, agentId, model, goalId, taskId, workspacePath }` | Generates session key, links to goal, builds context with workspace path, guards against re-spawning |
 
 ### Classification
 
@@ -167,10 +173,13 @@ Fires before an agent processes a message. Checks in order:
 
 The injected goal context includes:
 - Goal title, description, status, priority, deadline
+- Workspace path and branch (if goal has a worktree)
 - Task checklist with completion markers (`[x]` / `[ ]`)
 - Session assignments (marks tasks as "you", "assigned: <key>", or "unassigned")
 - Completed task summaries
 - Reminder to use `goal_update` tool when tasks remain
+
+The injected condo context includes workspace path if the condo has a workspace.
 
 ### `agent_end`
 
@@ -233,6 +242,73 @@ Spawns a subagent session for a task in the bound condo.
 - `agentId` (string, optional) — agent to use (default: `main`)
 - `model` (string, optional) — model override
 
+## Condo Workspaces & Goal Worktrees
+
+When `CLAWCONDOS_WORKSPACES_DIR` is set, the plugin creates git workspaces for condos and git worktrees for goals, enabling agents to work on multiple goals in parallel without conflicts.
+
+### Setup
+
+Set the environment variable to enable:
+
+```bash
+export CLAWCONDOS_WORKSPACES_DIR=/path/to/workspaces
+```
+
+When not set, all workspace functionality is completely disabled — full backward compatibility.
+
+### Workspace Layout
+
+```
+$CLAWCONDOS_WORKSPACES_DIR/
+  my-project-a1b2c3d4/          <- condo workspace (git init or git clone)
+    .git/
+    goals/
+      goal_abc123/              <- worktree (branch: goal/goal_abc123)
+      goal_def456/              <- worktree (branch: goal/goal_def456)
+    src/                        <- shared project files (main branch)
+```
+
+### Lifecycle
+
+| Event | Action |
+|-------|--------|
+| `condos.create` | `git init` (or `git clone <repoUrl>`) → empty initial commit → `goals/` subdir |
+| `condos.create` with `repoUrl` | `git clone <repoUrl>` into workspace path |
+| `goals.create` (in condo with workspace) | `git worktree add goals/<goalId> -b goal/<goalId>` |
+| `goals.delete` (with worktree) | `git worktree remove --force` + `git branch -D` + prune |
+| `condos.delete` (with workspace) | `rm -rf` the workspace directory |
+| `condo_bind` (new condo via name) | Same as `condos.create` workspace flow |
+| `condo_create_goal` | Same as `goals.create` worktree flow |
+| `pm.condoCreateGoals` | Creates worktrees for each goal in bulk |
+
+### Error Handling
+
+All workspace operations are best-effort. Failures are logged but never block condo/goal CRUD:
+- Workspace creation fails → condo created with `workspace: null`
+- Worktree creation fails → goal created with `worktree: null`
+- Removal fails → deletion still proceeds
+
+### Agent Awareness
+
+- `context-builder.js` adds `Workspace: <path>` to goal context (with branch) and condo context
+- `skill-injector.js` adds `**Working Directory:** <path>` to worker task headers
+- `task-spawn.js` includes `cd <path>` instruction in task context and `workspacePath` in response payload
+
+### workspace-manager.js Functions
+
+| Function | Purpose |
+|----------|---------|
+| `sanitizeDirName(name)` | Slug a condo name for directory use |
+| `condoWorkspacePath(baseDir, condoId, name)` | `<baseDir>/<slug>-<id-suffix>/` |
+| `goalWorktreePath(condoWs, goalId)` | `<condoWs>/goals/<goalId>/` |
+| `goalBranchName(goalId)` | `goal/<goalId>` |
+| `createCondoWorkspace(baseDir, condoId, name, repoUrl?)` | mkdir + git init/clone + empty commit + goals/ |
+| `createGoalWorktree(condoWs, goalId)` | `git worktree add` with new branch |
+| `removeGoalWorktree(condoWs, goalId)` | `git worktree remove --force` + prune + branch delete |
+| `removeCondoWorkspace(condoWs)` | `rm -rf` the workspace |
+
+All functions return `{ ok, path?, error? }` result objects and never throw.
+
 ## Storage Layer
 
 `goals-store.js` provides a simple file-backed JSON store:
@@ -258,7 +334,7 @@ All handlers follow consistent validation:
 
 ## Testing
 
-Tests across 14 test files. Run with `npm test`.
+Tests across 15+ test files. Run with `npm test`.
 
 | Test File | Coverage |
 |-----------|----------|
@@ -272,6 +348,7 @@ Tests across 14 test files. Run with `npm test`.
 | `classifier.test.js` | Tier 1 classification, topic/keyword/name scoring, ambiguity detection, goal intent |
 | `classification-log.test.js` | Append, feedback, corrections, stats, reclassification, load error safety |
 | `learning.test.js` | Correction analysis, keyword suggestion, apply learning with dry run |
+| `workspace-manager.test.js` | Workspace creation, worktree creation/removal, idempotency, path builders |
 | `plugin-index.test.js` | Plugin registration, hook integration, tool factory, classification wiring |
 | `config.test.js` | Config loader (not plugin-specific) |
 | `message-shaping.test.js` | Message formatting (not plugin-specific) |

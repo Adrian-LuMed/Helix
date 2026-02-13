@@ -5,9 +5,10 @@ You are an AI agent executing a specific task within a larger project. This guid
 ## Before You Start
 
 1. **Read your task description fully** — understand what's being asked, the expected outcome, and any acceptance criteria
-2. **Read the PM's plan** — your task is part of a bigger picture. Understand how your work connects to other agents' tasks and the overall goal
-3. **Understand the context** — if working with existing materials (code, documents, research, designs, etc.), review what already exists before creating anything new
-4. **Identify conventions** — match the style, tone, format, and structure of existing work. Consistency matters whether it's code, writing, data, or any other output
+2. **Check for a Working Directory** — if your context includes a `Working Directory` path, run `cd <path>` first. This is a git worktree on a dedicated branch for your goal
+3. **Read the PM's plan** — your task is part of a bigger picture. Understand how your work connects to other agents' tasks and the overall goal
+4. **Understand the context** — if working with existing materials (code, documents, research, designs, etc.), review what already exists before creating anything new
+5. **Identify conventions** — match the style, tone, format, and structure of existing work. Consistency matters whether it's code, writing, data, or any other output
 
 ## Execution Approach
 

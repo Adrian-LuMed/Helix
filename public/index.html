@@ -59,6 +59,11 @@
         <input type="text" class="form-input" id="createCondoDescription" placeholder="Brief description...">
       </div>
       <div class="form-group">
+        <label class="form-label">Repository URL (optional)</label>
+        <input type="text" class="form-input" id="createCondoRepoUrl" placeholder="https://github.com/user/repo.git">
+        <small style="color: var(--text-dim); font-size: 0.75rem;">Leave empty for a fresh git repo</small>
+      </div>
+      <div class="form-group">
         <label class="form-label">Color (optional)</label>
         <input type="color" class="form-input" id="createCondoColor" value="#60a5fa" style="height: 40px; padding: 4px;">
       </div>
@@ -6631,6 +6636,7 @@ Response format:
       document.getElementById('createCondoModal').classList.remove('hidden');
       document.getElementById('createCondoName').value = '';
       document.getElementById('createCondoDescription').value = '';
+      document.getElementById('createCondoRepoUrl').value = '';
       document.getElementById('createCondoColor').value = '#60a5fa';
       document.getElementById('createCondoError').style.display = 'none';
       setTimeout(() => document.getElementById('createCondoName')?.focus(), 0);
@@ -6643,6 +6649,7 @@ Response format:
     async function createCondo() {
       const name = document.getElementById('createCondoName').value.trim();
       const description = document.getElementById('createCondoDescription').value.trim();
+      const repoUrl = document.getElementById('createCondoRepoUrl').value.trim();
       const color = document.getElementById('createCondoColor').value;
       const errEl = document.getElementById('createCondoError');
       if (!name) {
@@ -6653,6 +6660,7 @@ Response format:
       try {
         const params = { name };
         if (description) params.description = description;
+        if (repoUrl) params.repoUrl = repoUrl;
         if (color && color !== '#60a5fa') params.color = color;
         await rpcCall('condos.create', params);
         hideCreateCondoModal();

@@ -153,6 +153,101 @@ function getDefaultRoleDescription(role) {
 }
 
 /**
+ * Get condo-level PM skill context for injection into condo PM agent prompts.
+ * Instructs the PM to break a project into goals rather than tasks.
+ *
+ * @param {object} options - Context options
+ * @param {string} [options.condoId] - Condo ID
+ * @param {string} [options.condoName] - Condo name
+ * @param {number} [options.goalCount] - Current number of goals
+ * @param {Array} [options.existingGoals] - Existing goal summaries [{title, status, taskCount}]
+ * @param {object} [options.roles] - Available roles with descriptions
+ * @returns {string|null} Condo PM skill context or null if unavailable
+ */
+export function getCondoPmSkillContext(options = {}) {
+  const skillContent = loadSkillFile('pm');
+
+  const {
+    condoId,
+    condoName,
+    goalCount,
+    existingGoals,
+    roles,
+  } = options;
+
+  // Build condo PM context header
+  const header = [
+    '---',
+    '## You are the CONDO-LEVEL PM',
+    '',
+    'Your job is to break the user\'s project description into **GOALS** (not tasks).',
+    'Each goal should be a distinct milestone or deliverable that can be planned independently.',
+    'Goal-level PMs will handle task planning for each goal.',
+    '',
+    '### Output Format',
+    '',
+    'Present your goals in a markdown table:',
+    '',
+    '```',
+    '| # | Goal | Description | Priority |',
+    '|---|------|-------------|----------|',
+    '| 1 | Goal title | What this goal achieves | high/medium/low |',
+    '```',
+    '',
+    'You may also add per-goal task suggestions as subsections:',
+    '',
+    '```',
+    '#### 1. Goal Title',
+    '- Task description (role)',
+    '- Another task (role)',
+    '```',
+    '',
+    'Keep goals focused and independently deliverable.',
+    'Use priority to indicate execution order or importance.',
+  ];
+
+  if (condoId && condoName) {
+    header.push('');
+    header.push(`### Project: ${condoName} (${condoId})`);
+  }
+
+  if (typeof goalCount === 'number' && goalCount > 0) {
+    header.push(`- **Existing Goals:** ${goalCount}`);
+  }
+
+  if (existingGoals && existingGoals.length > 0) {
+    header.push('');
+    header.push('### Current Goals');
+    for (const g of existingGoals) {
+      const status = g.status || 'active';
+      const tasks = typeof g.taskCount === 'number' ? ` (${g.taskCount} tasks)` : '';
+      header.push(`- **${g.title}** — ${status}${tasks}`);
+    }
+  }
+
+  // Add available roles section if provided
+  if (roles && typeof roles === 'object' && Object.keys(roles).length > 0) {
+    header.push('');
+    header.push('### Available Roles');
+
+    for (const [role, info] of Object.entries(roles)) {
+      const desc = info?.description || getDefaultRoleDescription(role);
+      const agentId = info?.agentId || role;
+      header.push(`- **${role}** (${agentId}): ${desc}`);
+    }
+  }
+
+  header.push('---', '');
+
+  // Append PM skill content for general PM coordination knowledge
+  if (skillContent) {
+    return header.join('\n') + skillContent;
+  }
+
+  return header.join('\n');
+}
+
+/**
  * Get worker skill context for injection into agent prompts
  * @param {object} taskContext - Task-specific context
  * @param {string} taskContext.goalId - Goal ID
@@ -165,6 +260,7 @@ function getDefaultRoleDescription(role) {
  * @param {string} [taskContext.autonomyMode] - Autonomy level
  * @param {string} [taskContext.planFilePath] - Expected plan file path
  * @param {string} [taskContext.assignedRole] - Role assigned to this task
+ * @param {string} [taskContext.workspacePath] - Working directory path for the task
  * @returns {string|null} Worker skill context or null if unavailable
  */
 export function getWorkerSkillContext(taskContext = {}) {
@@ -172,7 +268,7 @@ export function getWorkerSkillContext(taskContext = {}) {
   if (!skillContent) return null;
 
   const agentSkillContent = loadSkillFile('agent');
-  
+
   const {
     goalId,
     taskId,
@@ -184,6 +280,7 @@ export function getWorkerSkillContext(taskContext = {}) {
     autonomyMode,
     planFilePath,
     assignedRole,
+    workspacePath,
   } = taskContext;
   
   // Build task assignment header
@@ -215,10 +312,14 @@ export function getWorkerSkillContext(taskContext = {}) {
     header.push(`- **Autonomy:** ${autonomyMode}`);
   }
   
+  if (workspacePath) {
+    header.push(`- **Working Directory:** \`${workspacePath}\``);
+  }
+
   if (planFilePath) {
     header.push(`- **Plan File:** \`${planFilePath}\``);
   }
-  
+
   header.push('---', '');
 
   // Combine: task header + agent execution guide + worker API reference

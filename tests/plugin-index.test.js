@@ -63,6 +63,9 @@ describe('Plugin index.js', () => {
         'pm.chat', 'pm.getConfig', 'pm.setConfig', 'pm.getAgent',
         'pm.getHistory', 'pm.clearHistory', 'pm.saveResponse',
         'pm.createTasksFromPlan', 'pm.regenerateTasks', 'pm.detectPlan',
+        // Condo PM handlers
+        'pm.condoChat', 'pm.condoSaveResponse', 'pm.condoGetHistory',
+        'pm.condoCreateGoals', 'pm.condoCascade',
         // Config handlers
         'config.get', 'config.set', 'config.setRole', 'config.getRole', 'config.listRoles',
         // Team handlers

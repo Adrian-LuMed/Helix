@@ -1,4 +1,5 @@
-export function createGoalHandlers(store) {
+export function createGoalHandlers(store, options = {}) {
+  const { wsOps, logger } = options;
   function loadData() { return store.load(); }
   function saveData(data) { store.save(data); }
 
@@ -22,8 +23,9 @@ export function createGoalHandlers(store) {
         const data = loadData();
         const now = Date.now();
         const isCompleted = completed === true || status === 'done';
+        const goalId = store.newId('goal');
         const goal = {
-          id: store.newId('goal'),
+          id: goalId,
           title: title.trim(),
           description: description || notes || '',
           notes: notes || '',
@@ -32,11 +34,26 @@ export function createGoalHandlers(store) {
           condoId: condoId || null,
           priority: priority || null,
           deadline: deadline || null,
+          worktree: null,
           tasks: [],
           sessions: [],
           createdAtMs: now,
           updatedAtMs: now,
         };
+
+        // Create worktree if parent condo has a workspace
+        if (wsOps && condoId) {
+          const condo = data.condos.find(c => c.id === condoId);
+          if (condo?.workspace?.path) {
+            const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId);
+            if (wtResult.ok) {
+              goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
+            } else if (logger) {
+              logger.error(`clawcondos-goals: worktree creation failed for goal ${goalId}: ${wtResult.error}`);
+            }
+          }
+        }
+
         data.goals.unshift(goal);
         saveData(data);
         respond(true, { goal });
@@ -113,6 +130,19 @@ export function createGoalHandlers(store) {
           respond(false, undefined, { message: 'Goal not found' });
           return;
         }
+        const deletedGoal = data.goals[idx];
+
+        // Remove worktree if it exists
+        if (wsOps && deletedGoal.worktree?.path && deletedGoal.condoId) {
+          const condo = data.condos.find(c => c.id === deletedGoal.condoId);
+          if (condo?.workspace?.path) {
+            const rmResult = wsOps.removeGoalWorktree(condo.workspace.path, deletedGoal.id);
+            if (!rmResult.ok && logger) {
+              logger.error(`clawcondos-goals: worktree removal failed for goal ${params.id}: ${rmResult.error}`);
+            }
+          }
+        }
+
         // Clean up session index entries pointing to this goal
         for (const [key, val] of Object.entries(data.sessionIndex)) {
           if (val.goalId === params.id) delete data.sessionIndex[key];

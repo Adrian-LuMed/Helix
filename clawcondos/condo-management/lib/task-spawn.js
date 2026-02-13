@@ -72,6 +72,9 @@ export function createTaskSpawnHandler(store) {
       const ps = getProjectSummaryForGoal(goal, data);
       const projectPrefix = ps ? ps + '\n\n' : '';
       
+      // Resolve workspace path: goal worktree > condo workspace > null
+      const workspacePath = goal.worktree?.path || condo?.workspace?.path || null;
+
       // Get worker skill context with task details
       const workerSkillContext = getWorkerSkillContext({
         goalId,
@@ -84,6 +87,7 @@ export function createTaskSpawnHandler(store) {
         autonomyMode,
         planFilePath,
         assignedRole: task.assignedAgent || null,
+        workspacePath,
       });
       
       // Include the PM's full plan so the worker understands the bigger picture
@@ -102,6 +106,9 @@ export function createTaskSpawnHandler(store) {
         '---',
         `## Your Assignment: ${task.text}`,
         task.description ? `\n${task.description}` : null,
+        '',
+        // Working directory instruction
+        workspacePath ? `**Working Directory:** \`${workspacePath}\`\nIMPORTANT: Start by running \`cd ${workspacePath}\` to work in the correct directory.` : null,
         '',
         autonomyDirective,
         '',
@@ -130,6 +137,7 @@ export function createTaskSpawnHandler(store) {
         taskId,
         autonomyMode,
         planFilePath,
+        workspacePath,
       });
     } catch (err) {
       respond(false, undefined, { message: String(err) });

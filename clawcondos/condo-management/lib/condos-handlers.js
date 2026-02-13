@@ -1,27 +1,41 @@
-export function createCondoHandlers(store) {
+export function createCondoHandlers(store, options = {}) {
+  const { wsOps, logger } = options;
   function loadData() { return store.load(); }
   function saveData(data) { store.save(data); }
 
   return {
     'condos.create': ({ params, respond }) => {
       try {
-        const { name, description, color } = params;
+        const { name, description, color, repoUrl } = params;
         if (!name || typeof name !== 'string' || !name.trim()) {
           respond(false, undefined, { message: 'name is required' });
           return;
         }
         const data = loadData();
         const now = Date.now();
+        const condoId = store.newId('condo');
         const condo = {
-          id: store.newId('condo'),
+          id: condoId,
           name: name.trim(),
           description: typeof description === 'string' ? description : '',
           color: color || null,
           keywords: Array.isArray(params.keywords) ? params.keywords : [],
           telegramTopicIds: Array.isArray(params.telegramTopicIds) ? params.telegramTopicIds : [],
+          workspace: null,
           createdAtMs: now,
           updatedAtMs: now,
         };
+
+        // Create workspace if workspaces are enabled
+        if (wsOps) {
+          const wsResult = wsOps.createCondoWorkspace(wsOps.dir, condoId, name.trim(), repoUrl || undefined);
+          if (wsResult.ok) {
+            condo.workspace = { path: wsResult.path, repoUrl: repoUrl || null, createdAtMs: now };
+          } else if (logger) {
+            logger.error(`clawcondos-goals: workspace creation failed for condo ${condoId}: ${wsResult.error}`);
+          }
+        }
+
         data.condos.unshift(condo);
         saveData(data);
         respond(true, { condo });
@@ -101,6 +115,16 @@ export function createCondoHandlers(store) {
           respond(false, undefined, { message: 'Condo not found' });
           return;
         }
+        const deletedCondo = data.condos[idx];
+
+        // Remove workspace if it exists
+        if (wsOps && deletedCondo.workspace?.path) {
+          const rmResult = wsOps.removeCondoWorkspace(deletedCondo.workspace.path);
+          if (!rmResult.ok && logger) {
+            logger.error(`clawcondos-goals: workspace removal failed for condo ${params.id}: ${rmResult.error}`);
+          }
+        }
+
         // Nullify condoId on all linked goals (cascade)
         for (const goal of data.goals) {
           if (goal.condoId === params.id) {
@@ -108,8 +132,14 @@ export function createCondoHandlers(store) {
           }
         }
         // Clean up sessionCondoIndex entries pointing to this condo
-        for (const [key, val] of Object.entries(data.sessionCondoIndex)) {
-          if (val === params.id) delete data.sessionCondoIndex[key];
+        if (data.sessionCondoIndex) {
+          for (const [key, val] of Object.entries(data.sessionCondoIndex)) {
+            if (val === params.id) delete data.sessionCondoIndex[key];
+          }
+        }
+        // Clean up sessionIndex entries for this condo's PM session
+        if (deletedCondo.pmCondoSessionKey && data.sessionIndex) {
+          delete data.sessionIndex[deletedCondo.pmCondoSessionKey];
         }
         data.condos.splice(idx, 1);
         saveData(data);

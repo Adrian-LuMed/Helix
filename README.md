@@ -25,6 +25,7 @@ No build step. No framework. Vanilla HTML/JS/CSS. Edit and refresh.
 ## Features
 
 - **Goals-First Organization** - Group agent sessions into high-level goals/projects ("Condos")
+- **Condo Workspaces** - Optional git-initialized workspaces per condo with worktrees per goal for isolated parallel development
 - **Real-time Chat** - WebSocket-based streaming responses, tool activity indicators, message queue
 - **Embedded Apps Platform** - Register any web app and get it embedded with an AI assistant sidebar
 - **Smart Filters** - Filter sessions by channel (Telegram, Discord, etc.) and status (Running, Unread, Error)
@@ -101,9 +102,10 @@ See [docs/BUILDING-APPS.md](docs/BUILDING-APPS.md) for the full guide including 
 
 ClawCondos includes an [OpenClaw](https://github.com/acastellana/openclaw) plugin for goals and task management. When installed in your gateway, it provides:
 
-- **21 RPC methods** for goals, tasks, condos, and session management
-- **Context injection** — agents automatically receive their goal/project context
+- **26+ RPC methods** for goals, tasks, condos, PM coordination, and session management
+- **Context injection** — agents automatically receive their goal/project context (including workspace paths)
 - **Agent tools** — agents can report progress, create goals, and spawn sub-agents
+- **Condo workspaces** — optional git workspaces per condo with worktrees per goal (set `CLAWCONDOS_WORKSPACES_DIR`)
 - **File-backed storage** — no database required
 
 See [docs/GOALS-PLUGIN.md](docs/GOALS-PLUGIN.md) for the full specification and [clawcondos/condo-management/](clawcondos/condo-management/) for the plugin source.
@@ -128,8 +130,8 @@ clawcondos/
 │   ├── media-upload.css           # Upload UI styles
 │   └── voice-recorder.css         # Recorder UI styles
 ├── clawcondos/condo-management/   # OpenClaw goals plugin
-│   ├── index.js                   # Plugin entry (21 methods, 2 hooks, 5 tools)
-│   └── lib/                       # Handlers, storage, context, tools
+│   ├── index.js                   # Plugin entry (26+ methods, 2 hooks, 5 tools)
+│   └── lib/                       # Handlers, storage, context, tools, workspace manager
 ├── .registry/
 │   ├── apps.json                  # Your registered apps (gitignored)
 │   └── apps.example.json          # Example app registry

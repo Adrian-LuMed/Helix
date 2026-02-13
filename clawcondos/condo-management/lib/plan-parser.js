@@ -397,6 +397,258 @@ export function parseTasksFromPlan(content) {
 }
 
 /**
+ * Detect if content contains a condo-level plan (goals breakdown)
+ * Looks for goal-level plan markers like goal tables, milestone headers, etc.
+ * Falls back to general plan detection.
+ *
+ * @param {string} content - Content to check
+ * @returns {boolean} True if content appears to contain a goals plan
+ */
+export function detectCondoPlan(content) {
+  if (!content || typeof content !== 'string') {
+    return false;
+  }
+
+  const lowerContent = content.toLowerCase();
+
+  // Check for goal-level headers
+  const goalHeaders = [
+    '## goals',
+    '## milestones',
+    '## objectives',
+    '### goals',
+    '### milestones',
+    '### objectives',
+    '# goals',
+    '**goals:**',
+    '**milestones:**',
+    '**objectives:**',
+    '## proposed goals',
+    '## goal breakdown',
+  ];
+
+  for (const header of goalHeaders) {
+    if (lowerContent.includes(header)) {
+      return true;
+    }
+  }
+
+  // Check for goal tables (| Goal | or | Milestone | or | Objective |)
+  const goalTablePatterns = [
+    /\|\s*#?\s*\|\s*goal/i,
+    /\|\s*goal\s*\|/i,
+    /\|\s*milestone\s*\|/i,
+    /\|\s*objective\s*\|/i,
+  ];
+
+  for (const pattern of goalTablePatterns) {
+    if (pattern.test(content)) {
+      return true;
+    }
+  }
+
+  // Fall back to general plan detection
+  return detectPlan(content);
+}
+
+/**
+ * Parse goals from a condo-level plan markdown.
+ * Extracts goals from tables and/or section headers, with optional embedded tasks.
+ *
+ * Supported formats:
+ * 1. Goals table: | # | Goal | Description | Priority |
+ * 2. Per-goal sections: #### 1. Goal Title  followed by task lists
+ *
+ * @param {string} content - Plan markdown content
+ * @returns {{ goals: Array<{title: string, description: string, priority: string|null, tasks: Array<{text: string, agent: string|null}>}>, hasPlan: boolean }}
+ */
+export function parseGoalsFromPlan(content) {
+  if (!content || typeof content !== 'string') {
+    return { goals: [], hasPlan: false };
+  }
+
+  const hasPlan = detectCondoPlan(content);
+  const goals = [];
+
+  // Step 1: Try to parse goals from a table
+  const tableGoals = parseGoalsFromTable(content);
+  if (tableGoals.length > 0) {
+    goals.push(...tableGoals);
+  }
+
+  // Step 2: Parse per-goal task sections
+  // Look for patterns like: #### 1. Goal Title  or  ### Goal: Title
+  const goalSections = parseGoalSections(content);
+
+  // Merge: if we got goals from table, attach tasks from matching sections
+  if (goals.length > 0 && goalSections.length > 0) {
+    for (const goal of goals) {
+      // Try to match section by title similarity
+      const matchingSection = goalSections.find(s =>
+        s.title.toLowerCase().includes(goal.title.toLowerCase()) ||
+        goal.title.toLowerCase().includes(s.title.toLowerCase())
+      );
+      if (matchingSection && matchingSection.tasks.length > 0) {
+        goal.tasks = matchingSection.tasks;
+      }
+    }
+  } else if (goals.length === 0 && goalSections.length > 0) {
+    // No table found — use sections as goals
+    goals.push(...goalSections);
+  }
+
+  return { goals, hasPlan };
+}
+
+/**
+ * Parse goals from a markdown table
+ * @param {string} content - Markdown content
+ * @returns {Array<{title: string, description: string, priority: string|null, tasks: Array}>}
+ */
+function parseGoalsFromTable(content) {
+  const goals = [];
+  const lines = content.split('\n');
+
+  let headerIndices = { goal: -1, description: -1, priority: -1 };
+  let headerProcessed = false;
+  let inTable = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      inTable = false;
+      headerProcessed = false;
+      continue;
+    }
+
+    if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+      inTable = false;
+      headerProcessed = false;
+      continue;
+    }
+
+    const columns = trimmed.split('|').map(c => c.trim()).filter(c => c !== '');
+
+    // Skip separator rows
+    if (columns.every(c => /^[-:]+$/.test(c))) {
+      continue;
+    }
+
+    // Process header row
+    if (!headerProcessed) {
+      columns.forEach((col, idx) => {
+        const lc = col.toLowerCase();
+        if (lc.includes('goal') || lc.includes('milestone') || lc.includes('objective')) {
+          headerIndices.goal = idx;
+        } else if (lc.includes('description') || lc.includes('detail') || lc.includes('scope')) {
+          headerIndices.description = idx;
+        } else if (lc.includes('priority') || lc.includes('importance') || lc.includes('order')) {
+          headerIndices.priority = idx;
+        }
+      });
+      headerProcessed = true;
+      inTable = true;
+      continue;
+    }
+
+    // Process data row
+    if (inTable && headerIndices.goal >= 0) {
+      let title = columns[headerIndices.goal];
+
+      // Skip if title is just a number (row index column)
+      if (!title || /^\d+$/.test(title)) {
+        // Try to find a text column
+        title = columns.find(c => c && !/^\d+$/.test(c) && c.length > 3);
+        if (!title) continue;
+      }
+
+      // Clean up markdown formatting
+      title = title.replace(/\*\*/g, '').replace(/`/g, '').trim();
+
+      goals.push({
+        title,
+        description: headerIndices.description >= 0 ? (columns[headerIndices.description] || '').replace(/\*\*/g, '').trim() : '',
+        priority: headerIndices.priority >= 0 ? (columns[headerIndices.priority] || '').trim() || null : null,
+        tasks: [],
+      });
+    }
+  }
+
+  return goals;
+}
+
+/**
+ * Parse goal sections with embedded tasks from markdown
+ * Looks for headings like #### 1. Goal Title followed by task lists
+ * @param {string} content - Markdown content
+ * @returns {Array<{title: string, description: string, priority: string|null, tasks: Array<{text: string, agent: string|null}>}>}
+ */
+function parseGoalSections(content) {
+  const goals = [];
+  const lines = content.split('\n');
+
+  // Match headings like: #### 1. Goal Title  or  ### Goal: Title  or  **1. Goal Title**
+  const headingPattern = /^#{2,5}\s+(?:\d+\.\s*)?(.+)$/;
+
+  let currentGoal = null;
+  let currentTaskBlock = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    const headingMatch = trimmed.match(headingPattern);
+    if (headingMatch) {
+      // Save previous goal
+      if (currentGoal) {
+        if (currentTaskBlock.length > 0) {
+          currentGoal.tasks = parseTasksFromLists(currentTaskBlock.join('\n'));
+        }
+        goals.push(currentGoal);
+      }
+
+      const title = headingMatch[1].replace(/\*\*/g, '').trim();
+
+      // Skip headers that are clearly not goal titles
+      const skipHeaders = ['goals', 'milestones', 'objectives', 'plan', 'tasks', 'task breakdown',
+        'overview', 'summary', 'introduction', 'proposed goals', 'goal breakdown',
+        'available roles', 'pm session context', 'implementation plan', 'development plan',
+        'execution plan'];
+      if (skipHeaders.includes(title.toLowerCase())) {
+        currentGoal = null;
+        currentTaskBlock = [];
+        continue;
+      }
+
+      currentGoal = {
+        title,
+        description: '',
+        priority: null,
+        tasks: [],
+      };
+      currentTaskBlock = [];
+      continue;
+    }
+
+    // Collect lines under a goal heading for task extraction
+    if (currentGoal) {
+      currentTaskBlock.push(line);
+    }
+  }
+
+  // Save last goal
+  if (currentGoal) {
+    if (currentTaskBlock.length > 0) {
+      currentGoal.tasks = parseTasksFromLists(currentTaskBlock.join('\n'));
+    }
+    goals.push(currentGoal);
+  }
+
+  return goals;
+}
+
+/**
  * Get all supported agent roles
  * @returns {string[]} List of role identifiers
  */

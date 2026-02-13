@@ -9,6 +9,7 @@ As a task agent, you:
 - **Report progress** — update status, log what you're doing
 - **Ask for clarity** — if requirements are unclear, ask PM
 - **Complete or escalate** — finish the task or report blockers
+- **Use your workspace** — if a working directory is specified, `cd` there before starting work
 
 ## Status Updates
 
@@ -105,14 +106,25 @@ goal_update({
 
 This helps the PM and other agents find and build on your work.
 
+## Working Directory
+
+If your task context includes a **Working Directory**, this is a git worktree dedicated to your goal. Each goal gets its own branch, so you can work without conflicts with other agents.
+
+1. **Start by running `cd <path>`** to enter your workspace
+2. **Commit your work** on your goal's branch — other agents are on separate branches
+3. **Don't modify files outside your workspace** unless your task explicitly requires it
+
+If no working directory is specified, work in whatever directory is appropriate for your task.
+
 ## Best Practices
 
 1. **Read your assignment carefully** — understand what's expected
-2. **Update status early and often** — don't go silent
-3. **Scope tightly** — do your task, not adjacent ones
-4. **Ask early** — don't spend time on unclear requirements
-5. **Verify your work** — check against acceptance criteria before marking done
-6. **Document** — leave notes for anyone who needs to understand or continue your work
+2. **Use your working directory** — if one is provided, `cd` there first
+3. **Update status early and often** — don't go silent
+4. **Scope tightly** — do your task, not adjacent ones
+5. **Ask early** — don't spend time on unclear requirements
+6. **Verify your work** — check against acceptance criteria before marking done
+7. **Document** — leave notes for anyone who needs to understand or continue your work
 
 ## Autonomy Levels
 

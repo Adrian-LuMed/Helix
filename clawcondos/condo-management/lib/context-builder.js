@@ -13,6 +13,10 @@ export function buildGoalContext(goal, opts = {}) {
   if (goal.deadline) meta.push(`Deadline: ${goal.deadline}`);
   if (meta.length) lines.push(meta.join(' · '));
 
+  if (goal.worktree?.path) {
+    lines.push(`Workspace: ${goal.worktree.path} (branch: ${goal.worktree.branch})`);
+  }
+
   if (goal.description) lines.push('', goal.description);
 
   if (goal.tasks?.length) {
@@ -113,8 +117,14 @@ export function buildCondoContext(condo, goals, opts = {}) {
   const { currentSessionKey } = opts;
 
   const lines = [
+    `[SESSION SCOPE: condo ${condo.id}] This session is exclusively for condo "${condo.name}". Do not reference or mix context from other condos or projects.`,
+    '',
     `# Condo: ${condo.name}`,
   ];
+
+  if (condo.workspace?.path) {
+    lines.push(`Workspace: ${condo.workspace.path}`);
+  }
 
   if (condo.description) lines.push('', condo.description);
 

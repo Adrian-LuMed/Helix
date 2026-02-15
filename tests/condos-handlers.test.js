@@ -566,7 +566,7 @@ describe('CondoHandlers', () => {
   // ─── condos.delete ────────────────────────────────────────────────
 
   describe('condos.delete', () => {
-    it('deletes a condo and nullifies condoId on linked goals', () => {
+    it('deletes a condo and cascade-deletes linked goals', () => {
       const condo = createCondo(handlers, { name: 'Doomed' });
       const goal = createGoal(goalHandlers, { title: 'Linked Goal', condoId: condo.id });
 
@@ -579,13 +579,14 @@ describe('CondoHandlers', () => {
       handlers['condos.list']({ params: {}, respond: r2.respond });
       expect(r2.getResult().payload.condos).toHaveLength(0);
 
-      // Verify goal's condoId is nullified
+      // Verify linked goal is deleted (not just nullified)
       const r3 = makeResponder();
       goalHandlers['goals.get']({ params: { id: goal.id }, respond: r3.respond });
-      expect(r3.getResult().payload.goal.condoId).toBeNull();
+      expect(r3.getResult().ok).toBe(false);
+      expect(r3.getResult().error.message).toBe('Goal not found');
     });
 
-    it('cascade nullifies multiple linked goals', () => {
+    it('cascade-deletes multiple linked goals', () => {
       const condo = createCondo(handlers, { name: 'Hub' });
       const g1 = createGoal(goalHandlers, { title: 'G1', condoId: condo.id });
       const g2 = createGoal(goalHandlers, { title: 'G2', condoId: condo.id });
@@ -593,11 +594,17 @@ describe('CondoHandlers', () => {
 
       handlers['condos.delete']({ params: { id: condo.id }, respond: makeResponder().respond });
 
+      // All linked goals should be deleted
       for (const gid of [g1.id, g2.id, g3.id]) {
         const { respond, getResult } = makeResponder();
         goalHandlers['goals.get']({ params: { id: gid }, respond });
-        expect(getResult().payload.goal.condoId).toBeNull();
+        expect(getResult().ok).toBe(false);
       }
+
+      // goals.list should be empty
+      const r = makeResponder();
+      goalHandlers['goals.list']({ params: {}, respond: r.respond });
+      expect(r.getResult().payload.goals).toHaveLength(0);
     });
 
     it('does not affect goals linked to other condos', () => {
@@ -624,6 +631,45 @@ describe('CondoHandlers', () => {
       goalHandlers['goals.get']({ params: { id: orphan.id }, respond });
       expect(getResult().payload.goal.condoId).toBeNull();
       expect(getResult().payload.goal.title).toBe('Orphan');
+    });
+
+    it('cascade-deletes goals with tasks and cleans up session index', () => {
+      const condo = createCondo(handlers, { name: 'Full' });
+      const goal = createGoal(goalHandlers, { title: 'With Tasks', condoId: condo.id });
+
+      // Add a task and simulate a spawned session
+      goalHandlers['goals.addTask']({
+        params: { id: goal.id, text: 'Task 1' },
+        respond: makeResponder().respond,
+      });
+      goalHandlers['goals.addSession']({
+        params: { id: goal.id, sessionKey: 'agent:main:subagent:t1' },
+        respond: makeResponder().respond,
+      });
+
+      // Verify session is tracked
+      const r1 = makeResponder();
+      goalHandlers['goals.sessionLookup']({
+        params: { sessionKey: 'agent:main:subagent:t1' },
+        respond: r1.respond,
+      });
+      expect(r1.getResult().payload.goalId).toBe(goal.id);
+
+      // Delete condo
+      handlers['condos.delete']({ params: { id: condo.id }, respond: makeResponder().respond });
+
+      // Goal should be gone
+      const r2 = makeResponder();
+      goalHandlers['goals.get']({ params: { id: goal.id }, respond: r2.respond });
+      expect(r2.getResult().ok).toBe(false);
+
+      // Session index should be cleaned up
+      const r3 = makeResponder();
+      goalHandlers['goals.sessionLookup']({
+        params: { sessionKey: 'agent:main:subagent:t1' },
+        respond: r3.respond,
+      });
+      expect(r3.getResult().payload.goalId).toBeNull();
     });
 
     it('does not affect other condos', () => {

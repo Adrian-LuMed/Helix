@@ -94,6 +94,7 @@ function connect() {
           type: 'req', id: nextId(), method: 'connect',
           params: {
             minProtocol: 3, maxProtocol: 3,
+            scopes: ['operator.admin'],
             client: { id: 'webchat-ui', displayName: 'E2E Pipeline', mode: 'webchat', version: '2.0.0', platform: 'node' },
             auth: { token: PASSWORD },
           },

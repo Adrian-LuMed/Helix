@@ -138,11 +138,23 @@ export function createCondoHandlers(store, options = {}) {
           }
         }
 
-        // Nullify condoId on all linked goals (cascade)
-        for (const goal of data.goals) {
-          if (goal.condoId === params.id) {
-            goal.condoId = null;
+        // Cascade-delete all goals linked to this condo (and their task sessions)
+        const linkedGoalIds = data.goals
+          .filter(g => g.condoId === params.id)
+          .map(g => g.id);
+        for (const goalId of linkedGoalIds) {
+          const gIdx = data.goals.findIndex(g => g.id === goalId);
+          if (gIdx === -1) continue;
+          const goal = data.goals[gIdx];
+          // Clean up session index entries for this goal and its tasks
+          for (const [key, val] of Object.entries(data.sessionIndex || {})) {
+            if (val.goalId === goalId) delete data.sessionIndex[key];
           }
+          // Remove worktree (workspace dir removal above handles this too, but be explicit)
+          if (wsOps && goal.worktree?.path && deletedCondo.workspace?.path) {
+            try { wsOps.removeGoalWorktree(deletedCondo.workspace.path, goalId); } catch {}
+          }
+          data.goals.splice(gIdx, 1);
         }
         // Clean up sessionCondoIndex entries pointing to this condo
         if (data.sessionCondoIndex) {

@@ -930,6 +930,9 @@
       
       // Pin
       pinnedSessions: JSON.parse(localStorage.getItem('sharp_pinned_sessions') || '[]'),
+
+      // Killed sessions (hidden from UI since gateway has no delete API)
+      killedSessions: new Set(JSON.parse(localStorage.getItem('sharp_killed_sessions') || '[]')),
       
       // Custom session names
       sessionNames: JSON.parse(localStorage.getItem('sharp_session_names') || '{}'),
@@ -6981,7 +6984,7 @@ Response format:
         const result = await rpcCall('sessions.list', { limit: 50 });
         console.log('[ClawCondos] Sessions result:', result);
         if (result?.sessions) {
-          state.sessions = result.sessions;
+          state.sessions = result.sessions.filter(function(s) { return !state.killedSessions.has(s.key); });
           // Goals chips depend on total session count
           renderGoals();
           // Initialize/update status for sessions
@@ -9494,6 +9497,10 @@ Response format:
       renderGoalView();
     }
 
+    function saveKilledSessions() {
+      localStorage.setItem('sharp_killed_sessions', JSON.stringify([...state.killedSessions]));
+    }
+
     async function killStaleSessions() {
       var STALE_THRESHOLD_MS = 36 * 60 * 60 * 1000; // 36 hours
       var now = Date.now();
@@ -9512,28 +9519,24 @@ Response format:
       for (var i = 0; i < staleSessions.length; i++) {
         var sk = staleSessions[i].key;
         try {
-          // Abort any active run first
+          // Abort any active run
           try { await rpcCall('chat.abort', { sessionKey: sk }, 5000); } catch (e) { /* ok if not running */ }
-          // Delete the session via gateway HTTP API
-          var resp = await fetch('/api/gateway/sessions/' + encodeURIComponent(sk), { method: 'DELETE' });
-          if (resp.ok || resp.status === 204 || resp.status === 404) {
-            killed++;
-          } else {
-            // Fallback: try RPC delete
-            try {
-              await rpcCall('sessions.delete', { sessionKey: sk }, 5000);
-              killed++;
-            } catch (e2) {
-              console.warn('Could not delete session', sk, resp.status, e2);
-            }
-          }
+          state.killedSessions.add(sk);
+          killed++;
         } catch (err) {
-          console.error('Failed to kill stale session', sk, err);
+          console.error('Failed to abort stale session', sk, err);
+          // Still hide it even if abort fails — session is stale anyway
+          state.killedSessions.add(sk);
+          killed++;
         }
       }
 
-      showToast('Deleted ' + killed + '/' + staleSessions.length + ' stale sessions', 'success');
-      await loadSessions();
+      saveKilledSessions();
+      // Remove killed sessions from state immediately
+      state.sessions = state.sessions.filter(function(s) { return !state.killedSessions.has(s.key); });
+      showToast('Killed ' + killed + ' stale session(s)', 'success');
+      renderSessions();
+      renderSessionsGrid();
       renderAgentsOverview();
     }
 

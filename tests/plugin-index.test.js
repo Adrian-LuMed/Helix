@@ -79,6 +79,10 @@ describe('Plugin index.js', () => {
         'autonomy.getTaskInfo', 'autonomy.setTask', 'autonomy.setCondo', 'autonomy.modes',
         // Classification
         'classification.stats', 'classification.learningReport', 'classification.applyLearning',
+        // Session lifecycle
+        'sessions.killForGoal', 'sessions.killForCondo', 'sessions.cleanupStale', 'sessions.listForCondo',
+        // Conflict detection
+        'goals.checkConflicts',
       ];
       for (const name of expected) {
         expect(api._methods).toHaveProperty(name);

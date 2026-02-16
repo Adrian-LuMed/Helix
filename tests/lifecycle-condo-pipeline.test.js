@@ -241,7 +241,7 @@ describe('Full Lifecycle Integration — Condo Pipeline', () => {
         // Worktree metadata is stored on goal
         expect(wt).toBeDefined();
         expect(wt.path).toBeTruthy();
-        expect(wt.branch).toBe(`goal/${goalId}`);
+        expect(wt.branch).toMatch(/^goal\//); // Branch has readable name derived from title
         expect(wt.createdAtMs).toBeTypeOf('number');
 
         // Worktree directory exists on disk
@@ -251,10 +251,11 @@ describe('Full Lifecycle Integration — Condo Pipeline', () => {
         expect(wt.path).toContain(join(condoWsPath, 'goals'));
       }
 
-      // All 3 goal branches exist in the condo repo
+      // All goal branches exist in the condo repo
       const branches = execSync('git branch --list', { cwd: condoWsPath, encoding: 'utf-8' });
       for (const goalId of goalIds) {
-        expect(branches).toContain(`goal/${goalId}`);
+        const goalResult = await callMethod(api, 'goals.get', { id: goalId });
+        expect(branches).toContain(goalResult.goal.worktree.branch);
       }
     });
   });
@@ -669,10 +670,11 @@ describe('Full Lifecycle Integration — Condo Pipeline', () => {
         expect(existsSync(goalResult.goal.worktree.path)).toBe(true);
       }
 
-      // All 3 goal branches are present in the condo git repo
+      // All goal branches are present in the condo git repo (using stored branch names)
       const branches = execSync('git branch --list', { cwd: condoWsPath, encoding: 'utf-8' });
       for (const goalId of goalIds) {
-        expect(branches).toContain(`goal/${goalId}`);
+        const goalResult = await callMethod(api, 'goals.get', { id: goalId });
+        expect(branches).toContain(goalResult.goal.worktree.branch);
       }
     });
 
@@ -681,13 +683,14 @@ describe('Full Lifecycle Integration — Condo Pipeline', () => {
       for (const goalId of goalIds) {
         const goalResult = await callMethod(api, 'goals.get', { id: goalId });
         const wtPath = goalResult.goal.worktree.path;
+        const expectedBranch = goalResult.goal.worktree.branch;
 
         const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
           cwd: wtPath,
           encoding: 'utf-8',
         }).trim();
 
-        expect(currentBranch).toBe(`goal/${goalId}`);
+        expect(currentBranch).toBe(expectedBranch);
       }
     });
   });

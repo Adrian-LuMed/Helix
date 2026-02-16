@@ -1,7 +1,7 @@
 import { AUTONOMY_MODES } from './autonomy.js';
 
 export function createCondoHandlers(store, options = {}) {
-  const { wsOps, logger } = options;
+  const { wsOps, logger, rpcCall } = options;
   function loadData() { return store.load(); }
   function saveData(data) { store.save(data); }
 
@@ -120,7 +120,7 @@ export function createCondoHandlers(store, options = {}) {
       }
     },
 
-    'condos.delete': ({ params, respond }) => {
+    'condos.delete': async ({ params, respond }) => {
       try {
         const data = loadData();
         const idx = data.condos.findIndex(c => c.id === params.id);
@@ -129,6 +129,23 @@ export function createCondoHandlers(store, options = {}) {
           return;
         }
         const deletedCondo = data.condos[idx];
+
+        // Kill all running sessions for this condo (best-effort)
+        if (rpcCall) {
+          const allSessionKeys = new Set();
+          for (const [sk, cId] of Object.entries(data.sessionCondoIndex || {})) {
+            if (cId === params.id) allSessionKeys.add(sk);
+          }
+          for (const goal of data.goals.filter(g => g.condoId === params.id)) {
+            for (const sk of goal.sessions || []) allSessionKeys.add(sk);
+            for (const task of goal.tasks || []) {
+              if (task.sessionKey) allSessionKeys.add(task.sessionKey);
+            }
+          }
+          for (const sk of allSessionKeys) {
+            try { await rpcCall('chat.abort', { sessionKey: sk }); } catch { /* best-effort */ }
+          }
+        }
 
         // Remove workspace if it exists
         if (wsOps && deletedCondo.workspace?.path) {
@@ -152,7 +169,7 @@ export function createCondoHandlers(store, options = {}) {
           }
           // Remove worktree (workspace dir removal above handles this too, but be explicit)
           if (wsOps && goal.worktree?.path && deletedCondo.workspace?.path) {
-            try { wsOps.removeGoalWorktree(deletedCondo.workspace.path, goalId); } catch {}
+            try { wsOps.removeGoalWorktree(deletedCondo.workspace.path, goalId, goal.worktree?.branch); } catch {}
           }
           data.goals.splice(gIdx, 1);
         }

@@ -84,7 +84,7 @@ export function createCondoCreateGoalExecutor(store, wsOps) {
     if (wsOps) {
       const condo = data.condos.find(c => c.id === condoId);
       if (condo?.workspace?.path) {
-        const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId);
+        const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId, title.trim());
         if (wtResult.ok) {
           goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
         }

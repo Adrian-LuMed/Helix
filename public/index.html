@@ -430,6 +430,7 @@
       <div class="section">
         <div class="section-header">
           <span class="section-title">Agents</span>
+          <button class="section-action" onclick="showAgentsOverview()" title="Agents overview">&#x1F4CA;</button>
           <button class="section-action" onclick="showRoleConfigModal()" title="Configure roles">⚙️</button>
         </div>
         <div id="agentsList"></div>
@@ -488,6 +489,15 @@
               <div class="stat-label">Errors</div>
               <div class="stat-value stat-error" id="statErrors">-</div>
             </div>
+          </div>
+
+          <!-- Condo Status Board -->
+          <div class="grid-section" id="condoStatusSection">
+            <div class="grid-header">
+              <h2 class="grid-title">Projects</h2>
+              <span class="grid-count" id="condoCount">0</span>
+            </div>
+            <div id="condoStatusBoard"></div>
           </div>
 
           <!-- Recent Sessions -->
@@ -580,6 +590,7 @@
               <div class="goal-tab active" id="goalTabTasks" onclick="setGoalTab('tasks')">Tasks</div>
               <div class="goal-tab" id="goalTabPlans" onclick="setGoalTab('plans')">Plans</div>
               <div class="goal-tab" id="goalTabFiles" onclick="setGoalTab('files')">Files</div>
+              <div class="goal-tab" id="goalTabContext" onclick="setGoalTab('context')">Context</div>
             </div>
 
             <div class="goal-pane" id="goalPane"></div>
@@ -743,6 +754,54 @@
         <div class="search-view-actions" id="searchViewActions">
           <span class="search-view-sel-count" id="searchViewSelCount">0 selected</span>
           <button class="btn-primary search-view-action-btn" onclick="startSessionWithSelected()">New Session &#x2192;</button>
+        </div>
+      </div>
+
+      <!-- Agents Overview View -->
+      <div class="view" id="agentsView">
+        <div class="agents-overview">
+          <div class="agents-overview-header">
+            <h2 class="agents-overview-title">Agents Overview</h2>
+            <div class="agents-overview-controls">
+              <button class="btn btn-secondary btn-sm" onclick="refreshAgentsOverview()">Refresh</button>
+            </div>
+          </div>
+          <div class="agents-summary-grid" id="agentsSummaryGrid"></div>
+          <div class="agents-activity-section">
+            <h3 class="section-label">Active Work</h3>
+            <div class="agents-activity-list" id="agentsActivityList"></div>
+          </div>
+          <div class="agents-workload-section">
+            <h3 class="section-label">Agent Workload</h3>
+            <div class="agents-workload-grid" id="agentsWorkloadGrid"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Condo Context View -->
+      <div class="view" id="condoContextView">
+        <div class="condo-context">
+          <div class="condo-context-header">
+            <div class="condo-context-header-left">
+              <h2 class="condo-context-title" id="condoContextTitle">Condo</h2>
+              <span class="condo-context-subtitle" id="condoContextSubtitle"></span>
+            </div>
+            <div class="condo-context-actions">
+              <button class="btn btn-secondary btn-sm" onclick="checkCondoConflicts()">Check Conflicts</button>
+              <button class="btn btn-secondary btn-sm" onclick="killCondoSessionsFromContext()">Stop All</button>
+              <button class="btn btn-ghost btn-sm" onclick="showOverview()">Back</button>
+            </div>
+          </div>
+          <div class="condo-context-body">
+            <div class="condo-context-left">
+              <div class="condo-info-panel" id="condoInfoPanel"></div>
+              <div class="condo-workspace-panel" id="condoWorkspacePanel"></div>
+            </div>
+            <div class="condo-context-right">
+              <div class="condo-goals-graph" id="condoGoalsGraph"></div>
+              <div class="condo-timeline" id="condoTimeline"></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2968,12 +3027,8 @@
       state.condoPmMode = false;
       state.goalPanelOpen = false;
 
-      document.getElementById('overviewView').classList.remove('active');
-      document.getElementById('chatView').classList.remove('active');
-      document.getElementById('searchView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('panel-mode');
+      deactivateAllViews();
       document.getElementById('goalView').classList.add('active');
-      document.querySelector('.main-content').classList.remove('split-view');
 
       document.getElementById('mainTitle').textContent = 'Goal';
       document.getElementById('mainSubtitle').textContent = '';
@@ -3471,9 +3526,11 @@
       var tabTasks = document.getElementById('goalTabTasks');
       var tabPlans = document.getElementById('goalTabPlans');
       var tabFiles = document.getElementById('goalTabFiles');
+      var tabContext = document.getElementById('goalTabContext');
       if (tabTasks) tabTasks.classList.toggle('active', which === 'tasks');
       if (tabPlans) tabPlans.classList.toggle('active', which === 'plans');
       if (tabFiles) tabFiles.classList.toggle('active', which === 'files');
+      if (tabContext) tabContext.classList.toggle('active', which === 'context');
       renderGoalPane();
     }
 
@@ -4623,12 +4680,7 @@
       state.currentView = 'condo';
 
       // Switch to condo view as main content (like goal view)
-      document.getElementById('overviewView').classList.remove('active');
-      document.getElementById('chatView').classList.remove('active');
-      document.getElementById('searchView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('panel-mode');
-      document.querySelector('.main-content').classList.remove('split-view');
+      deactivateAllViews();
       document.getElementById('condoView').classList.add('active');
 
       document.getElementById('mainTitle').textContent = 'Condo';
@@ -5392,7 +5444,66 @@
       var goal = state.goals.find(function(g) { return g.id === state.currentGoalOpenId; });
       if (!goal) { pane.innerHTML = ''; return; }
 
-      if (state.goalTab === 'files') {
+      if (state.goalTab === 'context') {
+        // Context tab — workspace, branch, sessions, merge status
+        var condo = goal.condoId ? (state.condos || []).find(function(c) { return c.id === goal.condoId; }) : null;
+        var wt = goal.worktree;
+        var ctxSessions = (goal.sessions || []).map(function(sk) {
+          var s = (state.sessions || []).find(function(ss) { return ss.key === sk; });
+          return { key: sk, session: s, status: s ? getAgentStatus(sk) : 'unknown' };
+        });
+
+        var ctxHtml = '<div class="goal-context-panel">';
+
+        // Workspace section
+        ctxHtml += '<div class="goal-context-section"><div class="goal-context-section-title">Workspace</div>';
+        if (wt && wt.path) {
+          ctxHtml += '<div class="goal-context-row"><span class="goal-context-label">Path</span><span class="goal-context-value mono">' + escapeHtml(wt.path) + '</span></div>';
+          ctxHtml += '<div class="goal-context-row"><span class="goal-context-label">Branch</span><span class="goal-context-value mono">' + escapeHtml(wt.branch || 'unknown') + '</span></div>';
+          if (wt.createdAtMs) ctxHtml += '<div class="goal-context-row"><span class="goal-context-label">Created</span><span class="goal-context-value">' + timeAgo(wt.createdAtMs) + '</span></div>';
+        } else {
+          ctxHtml += '<div class="goal-context-empty">No worktree configured</div>';
+        }
+        ctxHtml += '</div>';
+
+        // Merge status
+        if (goal.mergeStatus) {
+          ctxHtml += '<div class="goal-context-section"><div class="goal-context-section-title">Merge Status</div>' +
+            '<div class="goal-context-row"><span class="goal-context-label">Status</span>' + renderMergeBadge(goal) + '</div>';
+          if (goal.mergedAtMs) ctxHtml += '<div class="goal-context-row"><span class="goal-context-label">Merged</span><span class="goal-context-value">' + timeAgo(goal.mergedAtMs) + '</span></div>';
+          if (goal.mergeError) ctxHtml += '<div class="goal-context-row"><span class="goal-context-label">Error</span><span class="goal-context-value" style="color:var(--red);">' + escapeHtml(goal.mergeError.slice(0, 200)) + '</span></div>';
+          ctxHtml += '</div>';
+        }
+
+        // Sessions section
+        ctxHtml += '<div class="goal-context-section"><div class="goal-context-section-title">Sessions (' + ctxSessions.length + ')</div>';
+        if (ctxSessions.length > 0) {
+          ctxHtml += ctxSessions.map(function(si) {
+            var name = si.session ? getSessionName(si.session) : si.key;
+            return '<div class="goal-context-session" onclick="openSession(\'' + escapeHtml(si.key) + '\')">' +
+              '<span class="agent-status ' + si.status + '" style="width:8px;height:8px;flex-shrink:0;"></span>' +
+              '<span class="goal-context-session-name">' + escapeHtml(name) + '</span>' +
+              '<span class="goal-context-session-status">' + escapeHtml(si.status) + '</span>' +
+            '</div>';
+          }).join('');
+          ctxHtml += '<button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="killGoalSessions(\'' + escapeHtml(goal.id) + '\')">Stop All Sessions</button>';
+        } else {
+          ctxHtml += '<div class="goal-context-empty">No sessions yet</div>';
+        }
+        ctxHtml += '</div>';
+
+        // Condo section
+        if (condo) {
+          ctxHtml += '<div class="goal-context-section">' +
+            '<div class="goal-context-section-title">Condo</div>' +
+            '<div class="goal-context-row"><span class="goal-context-label">Name</span><span class="goal-context-value condo-clickable" onclick="showCondoContext(\'' + escapeHtml(condo.id) + '\')">' + escapeHtml(condo.name || 'Unnamed') + '</span></div>' +
+            '<div class="goal-context-row"><span class="goal-context-label">ID</span><span class="goal-context-value mono" style="font-size:0.72rem;">' + escapeHtml(condo.id) + '</span></div>' +
+          '</div>';
+        }
+
+        ctxHtml += '</div>';
+        pane.innerHTML = ctxHtml;
+      } else if (state.goalTab === 'files') {
         // Tracked files — all values escaped via escapeHtml()
         var files = Array.isArray(goal.files) ? goal.files : [];
         if (!files.length) {
@@ -8011,12 +8122,8 @@ Response format:
       // Close detail panel if open (suppress route push since we're already routing)
       closeDetailPanel({ fromRouter: true });
 
+      deactivateAllViews();
       document.getElementById('overviewView').classList.add('active');
-      document.getElementById('chatView').classList.remove('active');
-      document.getElementById('searchView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('panel-mode');
-      document.querySelector('.main-content').classList.remove('split-view');
       document.getElementById('mainTitle').textContent = 'Dashboard';
       document.getElementById('mainSubtitle').textContent = '';
       document.getElementById('headerAction').style.display = 'none';
@@ -8161,8 +8268,7 @@ Response format:
         localStorage.setItem('sharp_session_agent_status', JSON.stringify(state.sessionAgentStatus));
       }
       
-      document.getElementById('overviewView').classList.remove('active');
-      document.getElementById('searchView').classList.remove('active');
+      deactivateAllViews();
       document.getElementById('chatView').classList.add('active');
       document.getElementById('mainTitle').textContent = getSessionName(session);
       document.getElementById('mainSubtitle').textContent = session.key;
@@ -9272,6 +9378,412 @@ Response format:
     }
     
     // ═══════════════════════════════════════════════════════════════
+    // HELPER FUNCTIONS (Progress, Badges, View Switching)
+    // ═══════════════════════════════════════════════════════════════
+    function goalTaskBreakdown(goal) {
+      const tasks = Array.isArray(goal?.tasks) ? goal.tasks : [];
+      const counts = { done: 0, 'in-progress': 0, pending: 0, failed: 0, blocked: 0 };
+      for (const t of tasks) {
+        if (!t) continue;
+        const s = t.status || (t.done ? 'done' : 'pending');
+        if (s === 'done') counts.done++;
+        else if (s === 'in-progress') counts['in-progress']++;
+        else if (s === 'failed') counts.failed++;
+        else if (s === 'blocked' || s === 'waiting') counts.blocked++;
+        else counts.pending++;
+      }
+      counts.total = tasks.length;
+      return counts;
+    }
+
+    function renderGoalProgressBar(goal) {
+      const b = goalTaskBreakdown(goal);
+      if (b.total === 0) return '';
+      const pct = function(n) { return ((n / b.total) * 100).toFixed(1); };
+      return '<div class="goal-progress-bar">' +
+        (b.done > 0 ? '<div class="segment done" style="width:' + pct(b.done) + '%"></div>' : '') +
+        (b['in-progress'] > 0 ? '<div class="segment in-progress" style="width:' + pct(b['in-progress']) + '%"></div>' : '') +
+        (b.blocked > 0 ? '<div class="segment blocked" style="width:' + pct(b.blocked) + '%"></div>' : '') +
+        (b.failed > 0 ? '<div class="segment failed" style="width:' + pct(b.failed) + '%"></div>' : '') +
+        (b.pending > 0 ? '<div class="segment pending" style="width:' + pct(b.pending) + '%"></div>' : '') +
+      '</div>';
+    }
+
+    function renderMergeBadge(goal) {
+      if (!goal.mergeStatus) return '';
+      if (goal.mergeStatus === 'merged') return '<span class="merge-badge merged">Merged</span>';
+      if (goal.mergeStatus === 'conflict') return '<span class="merge-badge conflict">Conflict</span>';
+      return '<span class="merge-badge error">Merge Error</span>';
+    }
+
+    function renderActiveAgents(goals) {
+      const active = [];
+      for (const goal of goals) {
+        for (const task of goal.tasks || []) {
+          if (task.sessionKey && task.status === 'in-progress') {
+            active.push({ goalTitle: goal.title, taskText: task.text, sessionKey: task.sessionKey });
+          }
+        }
+      }
+      if (active.length === 0) return '';
+      return '<div class="active-agents-panel">' + active.map(function(a) {
+        return '<div class="active-agent-card"><div class="agent-dot"></div><span>' + escapeHtml(a.taskText.slice(0, 40)) + '</span></div>';
+      }).join('') + '</div>';
+    }
+
+    async function retryFailedTask(goalId, taskId) {
+      var goal = state.goals.find(function(g) { return g.id === goalId; });
+      if (!goal) return;
+      var task = (goal.tasks || []).find(function(t) { return t.id === taskId; });
+      if (!task) return;
+      await rpcCall('goals.updateTask', { goalId: goalId, taskId: taskId, status: 'pending', done: false });
+      await loadGoals();
+      await rpcCall('goals.kickoff', { goalId: goalId });
+      renderGoalView();
+    }
+
+    async function killGoalSessions(goalId) {
+      await rpcCall('sessions.killForGoal', { goalId: goalId });
+      await loadGoals();
+      renderGoalView();
+    }
+
+    async function killCondoSessions(condoId) {
+      await rpcCall('sessions.killForCondo', { condoId: condoId });
+      await loadGoals();
+      renderGoalView();
+    }
+
+    function deactivateAllViews() {
+      document.querySelectorAll('.view').forEach(function(v) { v.classList.remove('active'); });
+      document.getElementById('goalView').classList.remove('panel-mode');
+      document.querySelector('.main-content').classList.remove('split-view');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // AGENTS OVERVIEW
+    // ═══════════════════════════════════════════════════════════════
+    function showAgentsOverview(opts) {
+      if (!(opts && opts.fromRouter)) {
+        navigateTo('agents');
+        return;
+      }
+      state.currentView = 'agents';
+      deactivateAllViews();
+      document.getElementById('agentsView').classList.add('active');
+      document.getElementById('mainTitle').textContent = 'Agents Overview';
+      document.getElementById('mainSubtitle').textContent = '';
+      document.getElementById('headerAction').style.display = 'none';
+      document.getElementById('headerStatusIndicator').style.display = 'none';
+      renderAgentsOverview();
+      closeSidebar();
+    }
+
+    function refreshAgentsOverview() {
+      loadAgents();
+      loadGoals();
+      setTimeout(renderAgentsOverview, 500);
+    }
+
+    function renderAgentsOverview() {
+      var agents = state.agents || [];
+      var goals = state.goals || [];
+      var sessions = state.sessions || [];
+
+      var summaryGrid = document.getElementById('agentsSummaryGrid');
+      if (!summaryGrid) return;
+
+      var totalAgents = agents.length;
+      var activeSessions = 0;
+      var totalTasks = 0;
+      var doneTasks = 0;
+      for (var gi = 0; gi < goals.length; gi++) {
+        var g = goals[gi];
+        for (var ti = 0; ti < (g.tasks || []).length; ti++) {
+          var t = g.tasks[ti];
+          totalTasks++;
+          if (t.done || t.status === 'done') doneTasks++;
+          if (t.sessionKey && t.status === 'in-progress') activeSessions++;
+        }
+      }
+      var idleSessions = sessions.filter(function(s) { return !s.key.includes(':subagent:'); }).length - activeSessions;
+      if (idleSessions < 0) idleSessions = 0;
+
+      var tasksInProgress = goals.reduce(function(n, g) {
+        return n + (g.tasks || []).filter(function(t) { return t.status === 'in-progress'; }).length;
+      }, 0);
+
+      summaryGrid.innerHTML =
+        '<div class="agent-summary-card accent-blue"><div class="agent-summary-label">Total Agents</div><div class="agent-summary-value">' + totalAgents + '</div></div>' +
+        '<div class="agent-summary-card accent-green"><div class="agent-summary-label">Active Sessions</div><div class="agent-summary-value">' + activeSessions + '</div></div>' +
+        '<div class="agent-summary-card accent-yellow"><div class="agent-summary-label">Tasks In Progress</div><div class="agent-summary-value">' + tasksInProgress + '</div></div>' +
+        '<div class="agent-summary-card accent-purple"><div class="agent-summary-label">Completion Rate</div><div class="agent-summary-value">' + (totalTasks ? Math.round((doneTasks / totalTasks) * 100) : 0) + '%</div></div>';
+
+      // Active work list
+      var activityList = document.getElementById('agentsActivityList');
+      var activeWork = [];
+      for (var ai = 0; ai < goals.length; ai++) {
+        var ag = goals[ai];
+        for (var ati = 0; ati < (ag.tasks || []).length; ati++) {
+          var at = ag.tasks[ati];
+          if (at.sessionKey && at.status === 'in-progress') {
+            var agentMatch = at.sessionKey.match(/^agent:([^:]+):/);
+            var agentId = agentMatch ? agentMatch[1] : 'unknown';
+            var agent = agents.find(function(a) { return a.id === agentId; });
+            activeWork.push({
+              agentName: agent ? (agent.identity?.name || agent.name || agent.id) : agentId,
+              agentEmoji: agent ? (agent.identity?.emoji || '') : '',
+              taskText: at.text || 'Untitled task',
+              goalTitle: ag.title || 'Untitled goal',
+              goalId: ag.id,
+              sessionKey: at.sessionKey,
+              status: getAgentStatus(at.sessionKey)
+            });
+          }
+        }
+      }
+
+      if (activeWork.length === 0) {
+        activityList.innerHTML = '<div class="agents-empty-state">No agents currently working on tasks</div>';
+      } else {
+        activityList.innerHTML = activeWork.map(function(w) {
+          return '<div class="agent-activity-row" onclick="openGoal(\'' + escapeHtml(w.goalId) + '\')">' +
+            '<div class="agent-activity-avatar">' + escapeHtml(w.agentEmoji || '') + '</div>' +
+            '<div class="agent-activity-info">' +
+              '<div class="agent-activity-name">' + escapeHtml(w.agentName) + '</div>' +
+              '<div class="agent-activity-task">' + escapeHtml(w.taskText) + '</div>' +
+              '<div class="agent-activity-goal">' + escapeHtml(w.goalTitle) + '</div>' +
+            '</div>' +
+            '<div class="agent-activity-status ' + w.status + '"><span class="activity-status-dot"></span>' + escapeHtml(w.status) + '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      // Agent workload grid
+      var workloadGrid = document.getElementById('agentsWorkloadGrid');
+      workloadGrid.innerHTML = agents.map(function(agent) {
+        var emoji = agent.identity?.emoji || '';
+        var name = agent.identity?.name || agent.name || agent.id;
+        var agentSessions = sessions.filter(function(s) {
+          return s.key.startsWith('agent:' + agent.id + ':');
+        });
+        var agentTasks = [];
+        for (var wgi = 0; wgi < goals.length; wgi++) {
+          var wg = goals[wgi];
+          for (var wti = 0; wti < (wg.tasks || []).length; wti++) {
+            var wt = wg.tasks[wti];
+            if (wt.sessionKey && wt.sessionKey.startsWith('agent:' + agent.id + ':')) {
+              agentTasks.push({ task: wt, goal: wg });
+            }
+          }
+        }
+        var active = agentTasks.filter(function(at) { return at.task.status === 'in-progress'; }).length;
+        var completed = agentTasks.filter(function(at) { return at.task.done || at.task.status === 'done'; }).length;
+        var failed = agentTasks.filter(function(at) { return at.task.status === 'failed'; }).length;
+
+        return '<div class="agent-workload-card">' +
+          '<div class="agent-workload-header">' +
+            '<span class="agent-workload-emoji">' + escapeHtml(emoji) + '</span>' +
+            '<span class="agent-workload-name">' + escapeHtml(name) + '</span>' +
+            (agent.isDefault ? '<span class="agent-workload-default">default</span>' : '') +
+          '</div>' +
+          '<div class="agent-workload-stats">' +
+            '<div class="agent-workload-stat"><span class="stat-num green">' + completed + '</span><span class="stat-label-sm">Done</span></div>' +
+            '<div class="agent-workload-stat"><span class="stat-num yellow">' + active + '</span><span class="stat-label-sm">Active</span></div>' +
+            '<div class="agent-workload-stat"><span class="stat-num red">' + failed + '</span><span class="stat-label-sm">Failed</span></div>' +
+            '<div class="agent-workload-stat"><span class="stat-num">' + agentSessions.length + '</span><span class="stat-label-sm">Sessions</span></div>' +
+          '</div>' +
+          '<div class="agent-workload-model">' + escapeHtml(agent.model || 'Default model') + '</div>' +
+          (agentTasks.length > 0 ?
+            '<div class="agent-workload-tasks">' + agentTasks.slice(0, 5).map(function(at) {
+              var st = at.task.status || (at.task.done ? 'done' : 'pending');
+              return '<div class="agent-workload-task-row">' +
+                '<span class="goal-task-status ' + escapeHtml(st) + '" style="width:8px;height:8px;"></span>' +
+                '<span class="agent-workload-task-text">' + escapeHtml((at.task.text || '').slice(0, 50)) + '</span>' +
+              '</div>';
+            }).join('') + '</div>'
+          : '<div class="agent-workload-empty">No tasks assigned</div>') +
+        '</div>';
+      }).join('');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CONDO CONTEXT VIEW
+    // ═══════════════════════════════════════════════════════════════
+    function showCondoContext(condoId, opts) {
+      if (!(opts && opts.fromRouter)) {
+        navigateTo('condo/' + encodeURIComponent(condoId));
+        return;
+      }
+      state.currentView = 'condoContext';
+      state.currentCondoContextId = condoId;
+      deactivateAllViews();
+      document.getElementById('condoContextView').classList.add('active');
+      document.getElementById('mainTitle').textContent = 'Condo';
+      document.getElementById('mainSubtitle').textContent = '';
+      document.getElementById('headerAction').style.display = 'none';
+      document.getElementById('headerStatusIndicator').style.display = 'none';
+      renderCondoContext();
+      closeSidebar();
+    }
+
+    function killCondoSessionsFromContext() {
+      if (state.currentCondoContextId) killCondoSessions(state.currentCondoContextId);
+    }
+
+    async function checkCondoConflicts() {
+      if (!state.currentCondoContextId) return;
+      try {
+        var result = await rpcCall('goals.checkConflicts', { condoId: state.currentCondoContextId });
+        showToast(JSON.stringify(result, null, 2).slice(0, 200), 'info');
+      } catch (err) {
+        showToast('Conflict check failed: ' + err.message, 'error');
+      }
+    }
+
+    function renderCondoContext() {
+      var condoId = state.currentCondoContextId;
+      var condo = (state.condos || []).find(function(c) { return c.id === condoId; });
+      if (!condo) return;
+
+      var goals = (state.goals || []).filter(function(g) { return g.condoId === condoId; });
+
+      document.getElementById('condoContextTitle').textContent = condo.name || 'Unnamed Condo';
+      document.getElementById('condoContextSubtitle').textContent = condoId;
+
+      // Info panel
+      var infoPanel = document.getElementById('condoInfoPanel');
+      var totalTasks = goals.reduce(function(n, g) { return n + (g.tasks || []).length; }, 0);
+      var doneTasks = goals.reduce(function(n, g) { return n + (g.tasks || []).filter(function(t) { return t.done || t.status === 'done'; }).length; }, 0);
+      var activeSessionCount = goals.reduce(function(n, g) { return n + (g.sessions || []).filter(function(sk) { return getAgentStatus(sk) === 'thinking'; }).length; }, 0);
+      var totalSessionCount = goals.reduce(function(n, g) { return n + (g.sessions || []).length; }, 0);
+
+      infoPanel.innerHTML =
+        '<div class="condo-info-title">Project Info</div>' +
+        '<div class="condo-info-grid">' +
+          '<div class="condo-info-item"><span class="condo-info-label">Goals</span><span class="condo-info-value">' + goals.length + '</span></div>' +
+          '<div class="condo-info-item"><span class="condo-info-label">Tasks</span><span class="condo-info-value">' + doneTasks + ' / ' + totalTasks + '</span></div>' +
+          '<div class="condo-info-item"><span class="condo-info-label">Sessions</span><span class="condo-info-value">' + activeSessionCount + ' active / ' + totalSessionCount + '</span></div>' +
+          '<div class="condo-info-item"><span class="condo-info-label">Created</span><span class="condo-info-value">' + timeAgo(condo.createdAtMs || Date.now()) + '</span></div>' +
+        '</div>' +
+        (totalTasks > 0 ? '<div class="condo-overall-progress"><div class="condo-overall-progress-label">Overall Progress</div><div class="goal-progress-bar"><div class="segment done" style="width:' + ((doneTasks / totalTasks) * 100).toFixed(1) + '%"></div><div class="segment pending" style="width:' + (((totalTasks - doneTasks) / totalTasks) * 100).toFixed(1) + '%"></div></div><div class="condo-progress-pct">' + Math.round((doneTasks / totalTasks) * 100) + '%</div></div>' : '');
+
+      // Workspace panel
+      var wsPanel = document.getElementById('condoWorkspacePanel');
+      if (condo.workspace && condo.workspace.path) {
+        wsPanel.innerHTML =
+          '<div class="condo-info-title">Workspace</div>' +
+          '<div class="condo-workspace-path">' + escapeHtml(condo.workspace.path) + '</div>' +
+          (condo.workspace.repoUrl ? '<div class="condo-workspace-repo">' + escapeHtml(condo.workspace.repoUrl) + '</div>' : '');
+      } else {
+        wsPanel.innerHTML = '<div class="condo-info-title">Workspace</div><div class="condo-workspace-none">No workspace configured</div>';
+      }
+
+      // Goals graph (task dependency visualization)
+      renderTaskGraph(goals);
+
+      // Timeline
+      renderCondoTimeline(goals);
+    }
+
+    function renderTaskGraph(goals) {
+      var container = document.getElementById('condoGoalsGraph');
+      if (!container) return;
+
+      if (!goals.length) {
+        container.innerHTML = '<div class="graph-empty">No goals to display</div>';
+        return;
+      }
+
+      var html = '<div class="task-graph-title">Goals &amp; Tasks</div><div class="task-graph-container">';
+
+      for (var gi = 0; gi < goals.length; gi++) {
+        var g = goals[gi];
+        var tasks = g.tasks || [];
+        var b = goalTaskBreakdown(g);
+        var pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
+        var statusClass = g.status === 'done' ? 'done' : (b['in-progress'] > 0 ? 'active' : 'pending');
+        var mergeBadge = renderMergeBadge(g);
+
+        html += '<div class="task-graph-goal ' + statusClass + '">' +
+          '<div class="task-graph-goal-header" onclick="openGoal(\'' + escapeHtml(g.id) + '\')">' +
+            '<div class="task-graph-goal-title">' + escapeHtml(g.title || 'Untitled') + '</div>' +
+            '<div class="task-graph-goal-meta">' + pct + '% ' + mergeBadge + '</div>' +
+          '</div>' +
+          '<div class="task-graph-goal-bar"><div class="segment done" style="width:' + pct + '%"></div></div>';
+
+        if (tasks.length > 0) {
+          html += '<div class="task-graph-tasks">';
+          for (var ti = 0; ti < tasks.length; ti++) {
+            var t = tasks[ti];
+            var ts = t.status || (t.done ? 'done' : 'pending');
+            var depText = '';
+            if (t.dependsOn && t.dependsOn.length) {
+              var depNames = t.dependsOn.map(function(depId) {
+                var dep = tasks.find(function(tt) { return tt.id === depId; });
+                return dep ? (dep.text || '').slice(0, 20) : depId.slice(0, 8);
+              });
+              depText = ' (after: ' + depNames.join(', ') + ')';
+            }
+            html += '<div class="task-graph-task">' +
+              '<div class="task-graph-task-connector"></div>' +
+              '<div class="goal-task-status ' + escapeHtml(ts) + '" style="width:8px;height:8px;flex-shrink:0;"></div>' +
+              '<div class="task-graph-task-text">' + escapeHtml((t.text || '').slice(0, 60)) +
+                (depText ? '<span class="task-graph-dep">' + escapeHtml(depText) + '</span>' : '') +
+              '</div>' +
+              '<div class="task-graph-task-status">' + escapeHtml(ts) + '</div>' +
+            '</div>';
+          }
+          html += '</div>';
+        }
+
+        html += '</div>';
+
+        if (gi < goals.length - 1) {
+          html += '<div class="task-graph-connector"></div>';
+        }
+      }
+
+      html += '</div>';
+      container.innerHTML = html;
+    }
+
+    function renderCondoTimeline(goals) {
+      var container = document.getElementById('condoTimeline');
+      if (!container) return;
+
+      var events = [];
+      for (var gi = 0; gi < goals.length; gi++) {
+        var g = goals[gi];
+        events.push({ type: 'goal', title: g.title || 'Untitled', time: g.createdAtMs || 0, status: g.status || 'active' });
+        for (var ti = 0; ti < (g.tasks || []).length; ti++) {
+          var t = g.tasks[ti];
+          if (t.createdAtMs) events.push({ type: 'task', title: (t.text || '').slice(0, 40), time: t.createdAtMs, status: t.status || 'pending', goalTitle: g.title });
+          if (t.updatedAtMs && t.updatedAtMs !== t.createdAtMs) events.push({ type: 'update', title: (t.text || '').slice(0, 40) + ' -> ' + (t.status || 'updated'), time: t.updatedAtMs, status: t.status || 'pending', goalTitle: g.title });
+        }
+      }
+      events.sort(function(a, b) { return b.time - a.time; });
+
+      if (events.length === 0) {
+        container.innerHTML = '<div class="graph-empty">No timeline events</div>';
+        return;
+      }
+
+      container.innerHTML = '<div class="timeline-title">Activity Timeline</div>' +
+        '<div class="timeline-list">' + events.slice(0, 30).map(function(ev) {
+          var statusClass = ev.status === 'done' ? 'done' : (ev.status === 'in-progress' ? 'active' : (ev.status === 'failed' ? 'failed' : ''));
+          return '<div class="timeline-item ' + statusClass + '">' +
+            '<div class="timeline-dot ' + statusClass + '"></div>' +
+            '<div class="timeline-content">' +
+              '<div class="timeline-event-title">' + escapeHtml(ev.title) + '</div>' +
+              (ev.goalTitle ? '<div class="timeline-event-goal">' + escapeHtml(ev.goalTitle) + '</div>' : '') +
+              '<div class="timeline-event-time">' + timeAgo(ev.time) + '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('') + '</div>';
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // OVERVIEW
     // ═══════════════════════════════════════════════════════════════
     function updateOverview() {
@@ -9394,7 +9906,7 @@ Response format:
       return '<div class="condo-status-card' + attentionBorder + '">' +
         '<div class="condo-status-header">' +
           '<div class="condo-status-header-left">' +
-            '<span class="condo-status-name">' + escapeHtml(condoName) + '</span>' +
+            '<span class="condo-status-name"' + (isRealCondo ? ' onclick="event.stopPropagation(); showCondoContext(\'' + escapeHtml(condoId) + '\')" style="cursor:pointer;"' : '') + '>' + escapeHtml(condoName) + '</span>' +
             (activeSessions > 0 ? '<span class="condo-running-badge">' + activeSessions + ' running</span>' : '') +
           '</div>' +
           '<div class="condo-status-header-right" style="display: flex; align-items: center; gap: 4px;">' +
@@ -9717,11 +10229,7 @@ Response format:
       // Close detail panel if open
       closeDetailPanel({ fromRouter: true });
 
-      document.getElementById('overviewView').classList.remove('active');
-      document.getElementById('chatView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('active');
-      document.getElementById('goalView').classList.remove('panel-mode');
-      document.querySelector('.main-content').classList.remove('split-view');
+      deactivateAllViews();
       document.getElementById('searchView').classList.add('active');
 
       document.getElementById('mainTitle').textContent = 'Search';
@@ -10380,6 +10888,19 @@ Response format:
             } else {
               state.pendingRouteDetailKey = detailKey;
             }
+          } else {
+            showOverview({ fromRouter: true });
+          }
+          break;
+        case 'agents':
+          closeDetailPanel({ fromRouter: true });
+          showAgentsOverview({ fromRouter: true });
+          break;
+        case 'condo':
+          if (payload) {
+            var condoCtxId = decodeURIComponent(payload);
+            closeDetailPanel({ fromRouter: true });
+            showCondoContext(condoCtxId, { fromRouter: true });
           } else {
             showOverview({ fromRouter: true });
           }

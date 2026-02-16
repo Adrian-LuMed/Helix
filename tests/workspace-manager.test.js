@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import {
@@ -11,6 +11,9 @@ import {
   createGoalWorktree,
   removeGoalWorktree,
   removeCondoWorkspace,
+  getMainBranch,
+  mergeGoalBranch,
+  checkBranchStatus,
 } from '../clawcondos/condo-management/lib/workspace-manager.js';
 
 const TEST_BASE = join(import.meta.dirname, '__fixtures__', 'workspace-manager-test');
@@ -72,8 +75,16 @@ describe('workspace-manager', () => {
   });
 
   describe('goalBranchName', () => {
-    it('prefixes with goal/', () => {
+    it('prefixes with goal/ using ID when no title provided', () => {
       expect(goalBranchName('goal_abc123')).toBe('goal/goal_abc123');
+    });
+
+    it('uses slugified title when title is provided', () => {
+      expect(goalBranchName('goal_abc123', 'Project Foundation')).toBe('goal/project-foundation');
+    });
+
+    it('falls back to ID when title is empty', () => {
+      expect(goalBranchName('goal_abc123', '')).toBe('goal/goal_abc123');
     });
   });
 
@@ -135,28 +146,51 @@ describe('workspace-manager', () => {
       condoWs = r.path;
     });
 
-    it('creates a worktree with the correct branch', () => {
+    it('creates a worktree with ID-based branch when no title given', () => {
       const result = createGoalWorktree(condoWs, 'goal_abc');
       expect(result.ok).toBe(true);
       expect(result.branch).toBe('goal/goal_abc');
       expect(existsSync(result.path)).toBe(true);
 
-      // Verify the branch exists
       const branches = execSync('git branch --list', { cwd: condoWs, encoding: 'utf-8' });
       expect(branches).toContain('goal/goal_abc');
     });
 
+    it('creates a worktree with readable branch name from title', () => {
+      const result = createGoalWorktree(condoWs, 'goal_abc', 'Project Foundation');
+      expect(result.ok).toBe(true);
+      expect(result.branch).toBe('goal/project-foundation');
+      expect(existsSync(result.path)).toBe(true);
+
+      const branches = execSync('git branch --list', { cwd: condoWs, encoding: 'utf-8' });
+      expect(branches).toContain('goal/project-foundation');
+    });
+
+    it('appends ID suffix on branch name conflict', () => {
+      const r1 = createGoalWorktree(condoWs, 'goal_111111', 'Setup');
+      expect(r1.ok).toBe(true);
+      expect(r1.branch).toBe('goal/setup');
+
+      // Second goal with the same title but different ID
+      const r2 = createGoalWorktree(condoWs, 'goal_222222', 'Setup');
+      expect(r2.ok).toBe(true);
+      expect(r2.branch).toBe('goal/setup-222222');
+
+      const branches = execSync('git branch --list', { cwd: condoWs, encoding: 'utf-8' });
+      expect(branches).toContain('goal/setup');
+      expect(branches).toContain('goal/setup-222222');
+    });
+
     it('creates multiple independent worktrees', () => {
-      const r1 = createGoalWorktree(condoWs, 'goal_one');
-      const r2 = createGoalWorktree(condoWs, 'goal_two');
+      const r1 = createGoalWorktree(condoWs, 'goal_one', 'First Goal');
+      const r2 = createGoalWorktree(condoWs, 'goal_two', 'Second Goal');
       expect(r1.ok).toBe(true);
       expect(r2.ok).toBe(true);
       expect(r1.path).not.toBe(r2.path);
 
-      // Both branches exist
       const branches = execSync('git branch --list', { cwd: condoWs, encoding: 'utf-8' });
-      expect(branches).toContain('goal/goal_one');
-      expect(branches).toContain('goal/goal_two');
+      expect(branches).toContain('goal/first-goal');
+      expect(branches).toContain('goal/second-goal');
     });
 
     it('is idempotent — returns existed: true if worktree already exists', () => {
@@ -197,6 +231,18 @@ describe('workspace-manager', () => {
       expect(branches).not.toContain('goal/goal_del');
     });
 
+    it('removes worktree using stored branch name', () => {
+      const wt = createGoalWorktree(condoWs, 'goal_stored', 'My Feature');
+      expect(wt.ok).toBe(true);
+      expect(wt.branch).toBe('goal/my-feature');
+
+      const result = removeGoalWorktree(condoWs, 'goal_stored', wt.branch);
+      expect(result.ok).toBe(true);
+
+      const branches = execSync('git branch --list', { cwd: condoWs, encoding: 'utf-8' });
+      expect(branches).not.toContain('goal/my-feature');
+    });
+
     it('succeeds even if worktree does not exist (no-op)', () => {
       const result = removeGoalWorktree(condoWs, 'goal_nonexistent');
       expect(result.ok).toBe(true);
@@ -218,6 +264,123 @@ describe('workspace-manager', () => {
     it('succeeds if directory does not exist (no-op)', () => {
       const result = removeCondoWorkspace(join(TEST_BASE, 'nonexistent'));
       expect(result.ok).toBe(true);
+    });
+  });
+
+  // ── getMainBranch ──────────────────────────────────────────────
+
+  describe('getMainBranch', () => {
+    it('detects the main branch of a new repo', () => {
+      const r = createCondoWorkspace(TEST_BASE, 'condo_main', 'Main Test');
+      const branch = getMainBranch(r.path);
+      // git init creates either 'main' or 'master' depending on git config
+      expect(['main', 'master']).toContain(branch);
+    });
+  });
+
+  // ── mergeGoalBranch ────────────────────────────────────────────
+
+  describe('mergeGoalBranch', () => {
+    let condoWs;
+
+    beforeEach(() => {
+      const r = createCondoWorkspace(TEST_BASE, 'condo_merge', 'Merge Test');
+      condoWs = r.path;
+    });
+
+    it('merges a non-conflicting branch into main', () => {
+      const wt = createGoalWorktree(condoWs, 'goal_m1', 'Feature A');
+      expect(wt.ok).toBe(true);
+
+      // Make a commit on the goal branch
+      execSync(`echo "hello" > feature.txt && git add feature.txt && git commit -m "add feature"`, {
+        cwd: wt.path,
+        stdio: 'pipe',
+        env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@test' },
+      });
+
+      const result = mergeGoalBranch(condoWs, wt.branch);
+      expect(result.ok).toBe(true);
+      expect(result.merged).toBe(true);
+
+      // Verify the file exists on main
+      expect(existsSync(join(condoWs, 'feature.txt'))).toBe(true);
+    });
+
+    it('detects merge conflicts and aborts', () => {
+      const wt = createGoalWorktree(condoWs, 'goal_conflict', 'Conflict Goal');
+      expect(wt.ok).toBe(true);
+
+      const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@test' };
+
+      // Make a commit on main with a file
+      execSync(`echo "main content" > shared.txt && git add shared.txt && git commit -m "main change"`, {
+        cwd: condoWs,
+        stdio: 'pipe',
+        env: gitEnv,
+      });
+
+      // Make a conflicting commit on the goal branch with the same file
+      execSync(`echo "branch content" > shared.txt && git add shared.txt && git commit -m "branch change"`, {
+        cwd: wt.path,
+        stdio: 'pipe',
+        env: gitEnv,
+      });
+
+      const result = mergeGoalBranch(condoWs, wt.branch);
+      expect(result.ok).toBe(false);
+      expect(result.conflict).toBe(true);
+    });
+  });
+
+  // ── checkBranchStatus ──────────────────────────────────────────
+
+  describe('checkBranchStatus', () => {
+    let condoWs;
+
+    beforeEach(() => {
+      const r = createCondoWorkspace(TEST_BASE, 'condo_status', 'Status Test');
+      condoWs = r.path;
+    });
+
+    it('reports ahead count for a branch with commits', () => {
+      const wt = createGoalWorktree(condoWs, 'goal_ahead', 'Ahead Branch');
+      expect(wt.ok).toBe(true);
+
+      // Make a commit on the goal branch
+      execSync(`echo "new" > newfile.txt && git add newfile.txt && git commit -m "ahead"`, {
+        cwd: wt.path,
+        stdio: 'pipe',
+        env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@test' },
+      });
+
+      const status = checkBranchStatus(condoWs, wt.branch);
+      expect(status.ok).toBe(true);
+      expect(status.aheadOfMain).toBe(1);
+      expect(status.behindMain).toBe(0);
+    });
+
+    it('reports behind count when main has diverged', () => {
+      const wt = createGoalWorktree(condoWs, 'goal_behind', 'Behind Branch');
+      expect(wt.ok).toBe(true);
+
+      // Make a commit on main
+      execSync(`echo "main" > mainfile.txt && git add mainfile.txt && git commit -m "main ahead"`, {
+        cwd: condoWs,
+        stdio: 'pipe',
+        env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@test' },
+      });
+
+      const status = checkBranchStatus(condoWs, wt.branch);
+      expect(status.ok).toBe(true);
+      expect(status.behindMain).toBe(1);
+      expect(status.aheadOfMain).toBe(0);
+    });
+
+    it('returns error for non-existent branch', () => {
+      const status = checkBranchStatus(condoWs, 'goal/nonexistent');
+      expect(status.ok).toBe(false);
+      expect(status.error).toBeTruthy();
     });
   });
 });

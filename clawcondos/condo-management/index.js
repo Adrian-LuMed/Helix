@@ -33,6 +33,7 @@ import {
 } from './lib/classifier.js';
 import { createClassificationLog } from './lib/classification-log.js';
 import { analyzeCorrections, applyLearning } from './lib/learning.js';
+import { createSessionLifecycleHandlers } from './lib/session-lifecycle.js';
 
 export default function register(api) {
   const dataDir = api.pluginConfig?.dataDir
@@ -204,6 +205,24 @@ export default function register(api) {
   // Autonomy handlers
   const autonomyHandlers = createAutonomyHandlers(store);
   for (const [method, handler] of Object.entries(autonomyHandlers)) {
+    api.registerGatewayMethod(method, handler);
+  }
+
+  // Session lifecycle handlers
+  const sessionLifecycleHandlers = createSessionLifecycleHandlers(store, {
+    rpcCall: async (method, params) => {
+      // Use api.callMethod if available, otherwise try direct gateway call
+      if (api.callMethod) {
+        return api.callMethod(method, params);
+      }
+      return new Promise((resolve, reject) => {
+        const respond = (ok, data, err) => ok ? resolve(data) : reject(new Error(err?.message || err || 'RPC failed'));
+        api.handleMessage?.({ type: 'req', method, params, respond }) || reject(new Error('No RPC mechanism available'));
+      });
+    },
+    logger: api.logger,
+  });
+  for (const [method, handler] of Object.entries(sessionLifecycleHandlers)) {
     api.registerGatewayMethod(method, handler);
   }
 
@@ -561,10 +580,10 @@ export default function register(api) {
     }
   });
 
-  // Hook: track session activity on goals and condos + cleanup plan file watchers
+  // Hook: track session activity on goals and condos + cleanup plan file watchers + error recovery
   api.registerHook('agent_end', async (event) => {
     const sessionKey = event.context?.sessionKey;
-    if (!sessionKey || !event.success) return;
+    if (!sessionKey) return;
 
     try {
       const data = store.load();
@@ -587,15 +606,77 @@ export default function register(api) {
       const goal = data.goals.find(g => g.id === entry.goalId);
       if (!goal) return;
       goal.updatedAtMs = Date.now();
-      store.save(data);
-      api.logger.info(`clawcondos-goals: agent_end for session ${sessionKey} (goal: ${goal.title})`);
 
-      // Check if task is complete and cleanup watcher
+      // Find the task associated with this session
       const task = (goal.tasks || []).find(t => t.sessionKey === sessionKey);
+
       if (task && task.status === 'done') {
+        // Task completed successfully — cleanup watcher
+        store.save(data);
+        api.logger.info(`clawcondos-goals: agent_end for session ${sessionKey} (goal: ${goal.title})`);
         unwatchPlanFile(sessionKey);
-        // Clear plan log buffer for completed sessions
         planLogBuffer.clear(sessionKey);
+      } else if (task && task.status === 'in-progress') {
+        // Task was in progress but agent ended without completing — error recovery
+        const retryCount = task.retryCount || 0;
+        const maxRetries = goal.maxRetries ?? 1;
+
+        if (retryCount < maxRetries) {
+          // Retry: reset task for re-kickoff
+          task.sessionKey = null;
+          task.status = 'pending';
+          task.retryCount = retryCount + 1;
+          task.lastError = event.success === false
+            ? 'Agent failed while working on task'
+            : 'Agent ended without completing task';
+          task.updatedAtMs = Date.now();
+          store.save(data);
+
+          api.logger.warn(`clawcondos-goals: task ${task.id} retry ${task.retryCount}/${maxRetries} for goal "${goal.title}"`);
+
+          // Broadcast retry event
+          broadcastPlanUpdate({
+            event: 'goal.task_retry',
+            goalId: goal.id,
+            taskId: task.id,
+            retryCount: task.retryCount,
+            maxRetries,
+            timestamp: Date.now(),
+          });
+
+          // Auto re-kickoff after a delay
+          setTimeout(async () => {
+            try {
+              await internalKickoff(goal.id);
+              api.logger.info(`clawcondos-goals: auto re-kickoff for goal ${goal.id} after retry`);
+            } catch (err) {
+              api.logger.error(`clawcondos-goals: auto re-kickoff failed for goal ${goal.id}: ${err.message}`);
+            }
+          }, 2000);
+        } else {
+          // Max retries exhausted — mark task as failed
+          task.status = 'failed';
+          task.lastError = 'Max retries exhausted — agent ended without completing task';
+          task.updatedAtMs = Date.now();
+          store.save(data);
+
+          api.logger.error(`clawcondos-goals: task ${task.id} FAILED after ${retryCount} retries for goal "${goal.title}"`);
+
+          // Broadcast failure event
+          broadcastPlanUpdate({
+            event: 'goal.task_failed',
+            goalId: goal.id,
+            taskId: task.id,
+            retryCount,
+            timestamp: Date.now(),
+          });
+        }
+
+        unwatchPlanFile(sessionKey);
+        planLogBuffer.clear(sessionKey);
+      } else {
+        store.save(data);
+        api.logger.info(`clawcondos-goals: agent_end for session ${sessionKey} (goal: ${goal.title})`);
       }
     } catch (err) {
       api.logger.error(`clawcondos-goals: agent_end error for ${sessionKey}: ${err.message}`);
@@ -754,6 +835,47 @@ export default function register(api) {
               allTasksDone: result._meta.allTasksDone,
               timestamp: Date.now(),
             });
+
+            // Auto-merge when all tasks in a goal are done
+            if (result._meta.allTasksDone && wsOps) {
+              try {
+                const mergeData = store.load();
+                const mergeGoal = mergeData.goals.find(g => g.id === result._meta.goalId);
+                if (mergeGoal?.worktree?.branch) {
+                  const mergeCondo = mergeData.condos.find(c => c.id === mergeGoal.condoId);
+                  if (mergeCondo?.workspace?.path) {
+                    const mergeResult = wsOps.mergeGoalBranch(mergeCondo.workspace.path, mergeGoal.worktree.branch);
+                    mergeGoal.mergeStatus = mergeResult.ok ? 'merged' : (mergeResult.conflict ? 'conflict' : 'error');
+                    mergeGoal.mergedAtMs = mergeResult.ok ? Date.now() : null;
+                    mergeGoal.mergeError = mergeResult.error || null;
+                    store.save(mergeData);
+
+                    broadcastPlanUpdate({
+                      event: 'goal.merged',
+                      goalId: mergeGoal.id,
+                      mergeStatus: mergeGoal.mergeStatus,
+                      branch: mergeGoal.worktree.branch,
+                      timestamp: Date.now(),
+                    });
+
+                    api.logger.info(`clawcondos-goals: auto-merge ${mergeGoal.worktree.branch} → ${mergeGoal.mergeStatus}`);
+                  }
+                }
+              } catch (mergeErr) {
+                api.logger.error(`clawcondos-goals: auto-merge error: ${mergeErr.message}`);
+              }
+            }
+
+            // Auto-kickoff next tasks after task completion
+            if (!result._meta.allTasksDone) {
+              setTimeout(async () => {
+                try {
+                  await internalKickoff(result._meta.goalId);
+                } catch (err) {
+                  api.logger.error(`clawcondos-goals: auto-kickoff after task completion failed: ${err.message}`);
+                }
+              }, 1000);
+            }
           }
 
           return result;

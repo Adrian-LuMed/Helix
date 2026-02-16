@@ -6,6 +6,7 @@
 import { getPmSession, getAgentForRole, getDefaultRoles, getOrCreatePmSessionForGoal, getOrCreatePmSessionForCondo } from './agent-roles.js';
 import { getPmSkillContext, getCondoPmSkillContext } from './skill-injector.js';
 import { parseTasksFromPlan, detectPlan, parseGoalsFromPlan, detectCondoPlan } from './plan-parser.js';
+import { buildProjectSnapshot } from './project-snapshot.js';
 
 /** Default max history entries per goal */
 const DEFAULT_HISTORY_LIMIT = 100;
@@ -148,8 +149,16 @@ export function createPmHandlers(store, options = {}) {
         roles: availableRoles,
       });
 
+      // Build project snapshot if workspace exists
+      let projectSnapshotContext = null;
+      if (wsOps && condo?.workspace?.path) {
+        const { snapshot } = buildProjectSnapshot(condo.workspace.path);
+        if (snapshot) projectSnapshotContext = snapshot;
+      }
+
       const contextPrefix = [
         pmSkillContext || null,
+        projectSnapshotContext || null,
         '',
         `[PM Mode Context]`,
         `Condo: ${condo.name}`,
@@ -757,10 +766,18 @@ export function createPmHandlers(store, options = {}) {
         roles: availableRoles,
       });
 
+      // Build project snapshot if workspace exists
+      let projectSnapshotContext = null;
+      if (wsOps && condo?.workspace?.path) {
+        const { snapshot } = buildProjectSnapshot(condo.workspace.path);
+        if (snapshot) projectSnapshotContext = snapshot;
+      }
+
       const contextPrefix = [
         `[SESSION IDENTITY] You are the PM for condo "${condo.name}" (ID: ${condoId}). This is an ISOLATED session — do NOT reference context, goals, or conversations from any other condo or project.`,
         '',
         condoPmSkillContext || null,
+        projectSnapshotContext || null,
         '',
         `[Condo PM Context]`,
         `Condo: ${condo.name} (${condoId})`,
@@ -970,7 +987,7 @@ export function createPmHandlers(store, options = {}) {
 
         // Create worktree if condo has a workspace
         if (wsOps && condo.workspace?.path) {
-          const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId);
+          const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId, goalData.title);
           if (wtResult.ok) {
             goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
           } else if (logger) {

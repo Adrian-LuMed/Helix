@@ -1,5 +1,5 @@
 export function createGoalHandlers(store, options = {}) {
-  const { wsOps, logger } = options;
+  const { wsOps, logger, rpcCall } = options;
   function loadData() { return store.load(); }
   function saveData(data) { store.save(data); }
 
@@ -46,7 +46,7 @@ export function createGoalHandlers(store, options = {}) {
         if (wsOps && condoId) {
           const condo = data.condos.find(c => c.id === condoId);
           if (condo?.workspace?.path) {
-            const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId);
+            const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId, title.trim());
             if (wtResult.ok) {
               goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
             } else if (logger) {
@@ -123,7 +123,7 @@ export function createGoalHandlers(store, options = {}) {
       }
     },
 
-    'goals.delete': ({ params, respond }) => {
+    'goals.delete': async ({ params, respond }) => {
       try {
         const data = loadData();
         const idx = data.goals.findIndex(g => g.id === params.id);
@@ -133,11 +133,22 @@ export function createGoalHandlers(store, options = {}) {
         }
         const deletedGoal = data.goals[idx];
 
+        // Kill running sessions for this goal (best-effort)
+        if (rpcCall) {
+          const sessionKeys = new Set([
+            ...(deletedGoal.sessions || []),
+            ...(deletedGoal.tasks || []).filter(t => t.sessionKey).map(t => t.sessionKey),
+          ]);
+          for (const sk of sessionKeys) {
+            try { await rpcCall('chat.abort', { sessionKey: sk }); } catch { /* best-effort */ }
+          }
+        }
+
         // Remove worktree if it exists
         if (wsOps && deletedGoal.worktree?.path && deletedGoal.condoId) {
           const condo = data.condos.find(c => c.id === deletedGoal.condoId);
           if (condo?.workspace?.path) {
-            const rmResult = wsOps.removeGoalWorktree(condo.workspace.path, deletedGoal.id);
+            const rmResult = wsOps.removeGoalWorktree(condo.workspace.path, deletedGoal.id, deletedGoal.worktree?.branch);
             if (!rmResult.ok && logger) {
               logger.error(`clawcondos-goals: worktree removal failed for goal ${params.id}: ${rmResult.error}`);
             }
@@ -494,6 +505,39 @@ export function createGoalHandlers(store, options = {}) {
         saveData(data);
 
         respond(true, { goal, plan: newPlan });
+      } catch (err) {
+        respond(false, undefined, { message: String(err) });
+      }
+    },
+
+    'goals.checkConflicts': ({ params, respond }) => {
+      try {
+        const { condoId } = params || {};
+        if (!condoId) {
+          respond(false, undefined, { message: 'condoId is required' });
+          return;
+        }
+        const data = loadData();
+        const condo = data.condos.find(c => c.id === condoId);
+        if (!condo) {
+          respond(false, undefined, { message: 'Condo not found' });
+          return;
+        }
+        if (!wsOps || !condo.workspace?.path) {
+          respond(true, { condoId, results: [], message: 'No workspace configured' });
+          return;
+        }
+        const goals = data.goals.filter(g => g.condoId === condoId && g.worktree?.branch);
+        const results = goals.map(g => {
+          const status = wsOps.checkBranchStatus(condo.workspace.path, g.worktree.branch);
+          return {
+            goalId: g.id,
+            goalTitle: g.title,
+            branch: g.worktree.branch,
+            ...status,
+          };
+        });
+        respond(true, { condoId, results });
       } catch (err) {
         respond(false, undefined, { message: String(err) });
       }

@@ -224,6 +224,11 @@ export function getCondoPmSkillContext(options = {}) {
     '',
     'Use priority to indicate execution order (high = first, then medium, then low).',
     'Goals with priority "high" run first. Lower priority goals start after higher ones complete.',
+    '',
+    '### Project Intelligence',
+    'You may receive a Project Snapshot showing the workspace file tree and key config files.',
+    'Plan INCREMENTALLY — build on what already exists. Do NOT recreate existing structures.',
+    'Reference existing files, patterns, and conventions when planning tasks.',
   ];
 
   if (condoId && condoName) {

@@ -37,9 +37,17 @@ No build step. No framework. Vanilla HTML/JS/CSS. Edit and refresh.
 
 ## Screenshots
 
-| Dashboard | Login |
+| Dashboard | Condo Context |
 |---|---|
-| ![Dashboard with stat cards, sidebar, and condo board](public/media/screenshots/dashboard-overview.png) | ![Login modal with gradient border and brand styling](public/media/screenshots/login-modal.png) |
+| ![Dashboard with stat cards, sidebar, and project board](public/media/screenshots/dashboard-overview.png) | ![Condo context with goals graph, workspace, and timeline](public/media/screenshots/condo-context.png) |
+
+| Agents Overview | Settings |
+|---|---|
+| ![Agents overview with active work and workload cards](public/media/screenshots/agents-overview.png) | ![Services configuration with connected integrations](public/media/screenshots/settings-services.png) |
+
+| Search | Login |
+|---|---|
+| ![Global search across goals and sessions](public/media/screenshots/search-view.png) | ![Login modal with gradient border and brand styling](public/media/screenshots/login-modal.png) |
 
 ## Quick Start
 

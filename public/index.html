@@ -764,6 +764,7 @@
             <h2 class="agents-overview-title">Agents Overview</h2>
             <div class="agents-overview-controls">
               <button class="btn btn-secondary btn-sm" onclick="refreshAgentsOverview()">Refresh</button>
+              <button class="btn btn-secondary btn-sm" style="color:var(--danger,#e55); border-color:var(--danger,#e55);" onclick="killStaleSessions()" title="Kill sessions inactive for 36+ hours">Kill Stale</button>
             </div>
           </div>
           <div class="agents-summary-grid" id="agentsSummaryGrid"></div>
@@ -2035,15 +2036,31 @@
                 state.condoCascadePending.delete(cascadeGoal.id);
 
                 if (state.condoCascadeMode === 'full') {
-                  // Auto-create tasks and auto-kickoff
+                  // Auto-create tasks and then check dependencies before kickoff
                   rpcCall('pm.createTasksFromPlan', {
                     goalId: cascadeGoal.id,
                     planContent: text,
                   }, 30000).then(function(taskResult) {
                     if (taskResult && taskResult.ok) {
                       showToast('Tasks created for "' + (cascadeGoal.title || cascadeGoal.id) + '"', 'success');
-                      // Auto-kickoff
-                      return rpcCall('goals.kickoff', { goalId: cascadeGoal.id }, 120000);
+                      // Reload goals to get fresh state with dependsOn
+                      return loadGoals().then(function() {
+                        var freshGoal = state.goals.find(function(g) { return g.id === cascadeGoal.id; });
+                        // Check if goal's dependencies are satisfied
+                        if (freshGoal && freshGoal.dependsOn && freshGoal.dependsOn.length > 0) {
+                          var allDepsDone = freshGoal.dependsOn.every(function(depId) {
+                            var dep = state.goals.find(function(g) { return g.id === depId; });
+                            return dep && dep.status === 'done';
+                          });
+                          if (!allDepsDone) {
+                            var phaseLabel = freshGoal.phase ? ' (Phase ' + freshGoal.phase + ')' : '';
+                            showToast('"' + (freshGoal.title || freshGoal.id) + '" queued' + phaseLabel + ' — waiting for dependencies', 'info');
+                            return null; // Skip kickoff — backend will auto-kickoff when deps complete
+                          }
+                        }
+                        // Dependencies satisfied or none — kickoff
+                        return rpcCall('goals.kickoff', { goalId: cascadeGoal.id }, 120000);
+                      });
                     }
                   }).then(function(kickoffResult) {
                     if (kickoffResult && kickoffResult.spawnedSessions && kickoffResult.spawnedSessions.length > 0) {
@@ -5050,20 +5067,43 @@
         return;
       }
 
+      // Sort goals by phase for display
+      condoGoals.sort(function(a, b) { return (a.phase || 999) - (b.phase || 999); });
+
       var html = '';
+      var lastPhase = null;
       for (var i = 0; i < condoGoals.length; i++) {
         var g = condoGoals[i];
         var taskStats = goalTaskStats(g);
         var pct = taskStats.total ? Math.round((taskStats.done / taskStats.total) * 100) : 0;
-        var statusClass = g.status === 'done' ? 'done' : (taskStats.total > 0 ? 'active' : 'pending');
         var cascading = state.condoCascadePending.has(g.id);
 
-        html += '<div class="goal-status-row" style="cursor:pointer;" onclick="closeCondoPanel(); openGoalPanel(\'' + escapeHtml(g.id) + '\')">' +
+        // Check if goal is blocked by dependencies
+        var isBlocked = false;
+        if (g.dependsOn && g.dependsOn.length > 0) {
+          isBlocked = !g.dependsOn.every(function(depId) {
+            var dep = state.goals.find(function(gg) { return gg.id === depId; });
+            return dep && dep.status === 'done';
+          });
+        }
+        var statusClass = g.status === 'done' ? 'done' : isBlocked ? 'pending' : (taskStats.total > 0 ? 'active' : 'pending');
+
+        // Phase group header
+        if (g.phase && g.phase !== lastPhase) {
+          html += '<div style="padding:6px 12px 2px; font-size:0.75rem; color:var(--text-dim); font-weight:600; text-transform:uppercase; letter-spacing:0.05em;">Phase ' + g.phase + '</div>';
+          lastPhase = g.phase;
+        }
+
+        var phaseBadge = g.phase ? ' <span class="goal-pill" style="background:var(--accent-subtle); color:var(--accent); font-size:0.7rem;">P' + g.phase + '</span>' : '';
+        var blockedBadge = isBlocked && g.status !== 'done' ? ' <span class="goal-pill" style="background:var(--warning-subtle,#3a3000); color:var(--warning,#f0c000); font-size:0.7rem;">Queued</span>' : '';
+
+        html += '<div class="goal-status-row" style="cursor:pointer;' + (isBlocked && g.status !== 'done' ? ' opacity:0.7;' : '') + '" onclick="closeCondoPanel(); openGoalPanel(\'' + escapeHtml(g.id) + '\')">' +
           '<div class="goal-row-left">' +
             '<div class="agent-status ' + (cascading ? 'thinking' : statusClass) + '" style="width:8px; height:8px; flex-shrink:0;"></div>' +
             '<div class="goal-row-info">' +
               '<div class="goal-row-title">' + escapeHtml(g.title || 'Untitled goal') +
                 (g.priority ? ' <span class="goal-pill pr">' + escapeHtml(g.priority) + '</span>' : '') +
+                phaseBadge + blockedBadge +
                 (cascading ? ' <span class="btn-spinner" style="margin-left:4px;"></span>' : '') +
               '</div>' +
               '<div class="goal-row-meta">' +
@@ -9454,6 +9494,49 @@ Response format:
       renderGoalView();
     }
 
+    async function killStaleSessions() {
+      var STALE_THRESHOLD_MS = 36 * 60 * 60 * 1000; // 36 hours
+      var now = Date.now();
+      var staleSessions = (state.sessions || []).filter(function(s) {
+        return s.updatedAt && (now - s.updatedAt) > STALE_THRESHOLD_MS;
+      });
+
+      if (staleSessions.length === 0) {
+        showToast('No stale sessions found (36h+ inactive)', 'info');
+        return;
+      }
+
+      if (!confirm('Kill ' + staleSessions.length + ' session(s) inactive for 36+ hours?')) return;
+
+      var killed = 0;
+      for (var i = 0; i < staleSessions.length; i++) {
+        var sk = staleSessions[i].key;
+        try {
+          // Abort any active run first
+          try { await rpcCall('chat.abort', { sessionKey: sk }, 5000); } catch (e) { /* ok if not running */ }
+          // Delete the session via gateway HTTP API
+          var resp = await fetch('/api/gateway/sessions/' + encodeURIComponent(sk), { method: 'DELETE' });
+          if (resp.ok || resp.status === 204 || resp.status === 404) {
+            killed++;
+          } else {
+            // Fallback: try RPC delete
+            try {
+              await rpcCall('sessions.delete', { sessionKey: sk }, 5000);
+              killed++;
+            } catch (e2) {
+              console.warn('Could not delete session', sk, resp.status, e2);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to kill stale session', sk, err);
+        }
+      }
+
+      showToast('Deleted ' + killed + '/' + staleSessions.length + ' stale sessions', 'success');
+      await loadSessions();
+      renderAgentsOverview();
+    }
+
     function deactivateAllViews() {
       document.querySelectorAll('.view').forEach(function(v) { v.classList.remove('active'); });
       document.getElementById('goalView').classList.remove('panel-mode');
@@ -9695,19 +9778,44 @@ Response format:
         return;
       }
 
+      // Sort goals by phase for display
+      var sortedGoals = goals.slice().sort(function(a, b) { return (a.phase || 999) - (b.phase || 999); });
+
       var html = '<div class="task-graph-title">Goals &amp; Tasks</div><div class="task-graph-container">';
 
-      for (var gi = 0; gi < goals.length; gi++) {
-        var g = goals[gi];
+      var lastGraphPhase = null;
+      for (var gi = 0; gi < sortedGoals.length; gi++) {
+        var g = sortedGoals[gi];
         var tasks = g.tasks || [];
         var b = goalTaskBreakdown(g);
         var pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
-        var statusClass = g.status === 'done' ? 'done' : (b['in-progress'] > 0 ? 'active' : 'pending');
-        var mergeBadge = renderMergeBadge(g);
 
-        html += '<div class="task-graph-goal ' + statusClass + '">' +
+        // Check if goal is blocked by dependencies
+        var graphBlocked = false;
+        if (g.dependsOn && g.dependsOn.length > 0) {
+          graphBlocked = !g.dependsOn.every(function(depId) {
+            var dep = sortedGoals.find(function(gg) { return gg.id === depId; });
+            return dep && dep.status === 'done';
+          });
+        }
+        var statusClass = g.status === 'done' ? 'done' : graphBlocked ? 'pending' : (b['in-progress'] > 0 ? 'active' : 'pending');
+        var mergeBadge = renderMergeBadge(g);
+        var phaseBadgeGraph = g.phase ? '<span style="font-size:0.7rem; opacity:0.7; margin-left:4px;">P' + g.phase + '</span>' : '';
+        var blockedLabel = graphBlocked && g.status !== 'done' ? ' <span style="font-size:0.7rem; color:var(--warning,#f0c000);">Queued</span>' : '';
+
+        // Phase separator
+        if (g.phase && g.phase !== lastGraphPhase) {
+          if (lastGraphPhase !== null) {
+            html += '<div class="task-graph-connector" style="text-align:center; font-size:0.7rem; color:var(--text-dim); padding:4px 0;">Phase ' + g.phase + '</div>';
+          }
+          lastGraphPhase = g.phase;
+        } else if (gi > 0) {
+          html += '<div class="task-graph-connector"></div>';
+        }
+
+        html += '<div class="task-graph-goal ' + statusClass + '"' + (graphBlocked && g.status !== 'done' ? ' style="opacity:0.7;"' : '') + '>' +
           '<div class="task-graph-goal-header" onclick="openGoal(\'' + escapeHtml(g.id) + '\')">' +
-            '<div class="task-graph-goal-title">' + escapeHtml(g.title || 'Untitled') + '</div>' +
+            '<div class="task-graph-goal-title">' + escapeHtml(g.title || 'Untitled') + phaseBadgeGraph + blockedLabel + '</div>' +
             '<div class="task-graph-goal-meta">' + pct + '% ' + mergeBadge + '</div>' +
           '</div>' +
           '<div class="task-graph-goal-bar"><div class="segment done" style="width:' + pct + '%"></div></div>';
@@ -9738,10 +9846,6 @@ Response format:
         }
 
         html += '</div>';
-
-        if (gi < goals.length - 1) {
-          html += '<div class="task-graph-connector"></div>';
-        }
       }
 
       html += '</div>';

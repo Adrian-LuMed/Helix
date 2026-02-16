@@ -89,6 +89,8 @@ describe('buildProjectSnapshot', () => {
     expect(error).toBeUndefined();
     expect(snapshot).toBeTruthy();
     expect(snapshot).toContain('Tech Stack: Unknown');
+    expect(snapshot).toContain('NEW PROJECT');
+    expect(snapshot).toContain('Foundation goal (Phase 1)');
   });
 
   it('truncates large files', () => {

@@ -509,7 +509,7 @@ function parseGoalsFromTable(content) {
   const goals = [];
   const lines = content.split('\n');
 
-  let headerIndices = { goal: -1, description: -1, priority: -1 };
+  let headerIndices = { goal: -1, description: -1, priority: -1, phase: -1 };
   let headerProcessed = false;
   let inTable = false;
 
@@ -545,6 +545,8 @@ function parseGoalsFromTable(content) {
           headerIndices.description = idx;
         } else if (lc.includes('priority') || lc.includes('importance') || lc.includes('order')) {
           headerIndices.priority = idx;
+        } else if (lc.includes('phase') || lc.includes('wave') || lc.includes('stage')) {
+          headerIndices.phase = idx;
         }
       });
       headerProcessed = true;
@@ -566,10 +568,21 @@ function parseGoalsFromTable(content) {
       // Clean up markdown formatting
       title = title.replace(/\*\*/g, '').replace(/`/g, '').trim();
 
+      // Parse phase value
+      let phase = null;
+      if (headerIndices.phase >= 0) {
+        const rawPhase = (columns[headerIndices.phase] || '').trim();
+        const parsed = parseInt(rawPhase, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          phase = parsed;
+        }
+      }
+
       goals.push({
         title,
         description: headerIndices.description >= 0 ? (columns[headerIndices.description] || '').replace(/\*\*/g, '').trim() : '',
         priority: headerIndices.priority >= 0 ? (columns[headerIndices.priority] || '').trim() || null : null,
+        phase,
         tasks: [],
       });
     }
@@ -643,6 +656,42 @@ function parseGoalSections(content) {
       currentGoal.tasks = parseTasksFromLists(currentTaskBlock.join('\n'));
     }
     goals.push(currentGoal);
+  }
+
+  return goals;
+}
+
+/**
+ * Convert phase numbers on goals into dependsOn arrays.
+ * Goals in phase N depend on ALL goals in phase N-1, creating wave-based execution.
+ *
+ * @param {Array<{phase?: number|null, id?: string}>} goals - Parsed goals with optional phase and id
+ * @returns {Array} The same goals array, mutated with dependsOn set
+ */
+export function convertPhasesToDependsOn(goals) {
+  if (!Array.isArray(goals) || goals.length === 0) return goals;
+
+  // Group goals by phase
+  const byPhase = new Map();
+  for (const goal of goals) {
+    const p = goal.phase || null;
+    if (p == null) continue;
+    if (!byPhase.has(p)) byPhase.set(p, []);
+    byPhase.get(p).push(goal);
+  }
+
+  // Sort phases ascending
+  const phases = [...byPhase.keys()].sort((a, b) => a - b);
+
+  // For each phase > first, depend on all goals from the previous phase
+  for (let i = 1; i < phases.length; i++) {
+    const prevPhaseGoals = byPhase.get(phases[i - 1]);
+    const prevIds = prevPhaseGoals.map(g => g.id).filter(Boolean);
+    if (prevIds.length === 0) continue;
+
+    for (const goal of byPhase.get(phases[i])) {
+      goal.dependsOn = prevIds;
+    }
   }
 
   return goals;

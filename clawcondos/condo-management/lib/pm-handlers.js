@@ -5,7 +5,7 @@
 
 import { getPmSession, getAgentForRole, getDefaultRoles, getOrCreatePmSessionForGoal, getOrCreatePmSessionForCondo } from './agent-roles.js';
 import { getPmSkillContext, getCondoPmSkillContext } from './skill-injector.js';
-import { parseTasksFromPlan, detectPlan, parseGoalsFromPlan, detectCondoPlan } from './plan-parser.js';
+import { parseTasksFromPlan, detectPlan, parseGoalsFromPlan, detectCondoPlan, convertPhasesToDependsOn } from './plan-parser.js';
 import { buildProjectSnapshot } from './project-snapshot.js';
 
 /** Default max history entries per goal */
@@ -937,14 +937,21 @@ export function createPmHandlers(store, options = {}) {
         return respond(false, null, 'Plan detected but could not extract any goals');
       }
 
-      // Create goal objects
+      // Pre-allocate IDs for all goals so convertPhasesToDependsOn can reference them
       const now = Date.now();
       const createdGoals = [];
 
       if (!data.goals) data.goals = [];
 
       for (const goalData of parsedGoals) {
-        const goalId = store.newId('goal');
+        goalData.id = store.newId('goal');
+      }
+
+      // Convert phase numbers into dependsOn arrays (wave-based execution)
+      convertPhasesToDependsOn(parsedGoals);
+
+      for (const goalData of parsedGoals) {
+        const goalId = goalData.id;
         const tasks = (goalData.tasks || []).map(t => ({
           id: store.newId('task'),
           text: t.text,
@@ -973,6 +980,8 @@ export function createPmHandlers(store, options = {}) {
           status: 'active',
           completed: false,
           priority: goalData.priority || null,
+          phase: goalData.phase || null,
+          dependsOn: goalData.dependsOn || [],
           autonomyMode: condo.autonomyMode || null,
           worktree: null,
           tasks,

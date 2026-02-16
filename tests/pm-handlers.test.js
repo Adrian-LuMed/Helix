@@ -331,6 +331,64 @@ describe('PM Handlers - Condo PM', () => {
       const data = store.getData();
       expect(data.condos[0].pmPlanContent).toBe(planContent);
     });
+
+    it('creates goals with phase and dependsOn from Phase column', async () => {
+      const planContent = `## Goals
+
+| # | Goal | Description | Priority | Phase |
+|---|------|-------------|----------|-------|
+| 1 | Foundation | Project setup | high | 1 |
+| 2 | Recipe CRUD | Recipe management | high | 2 |
+| 3 | Search | Search and filter | medium | 2 |`;
+
+      const result = await callHandler(handlers['pm.condoCreateGoals'], {
+        condoId: 'condo_1',
+        planContent,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.goalsCreated).toBe(3);
+
+      const data = store.getData();
+      const createdGoals = data.goals.filter(g => g.condoId === 'condo_1' && g.id.startsWith('goal_test'));
+
+      // Phase 1 goal
+      const foundation = createdGoals.find(g => g.title === 'Foundation');
+      expect(foundation.phase).toBe(1);
+      expect(foundation.dependsOn).toEqual([]);
+
+      // Phase 2 goals depend on phase 1 goal
+      const recipeCrud = createdGoals.find(g => g.title === 'Recipe CRUD');
+      expect(recipeCrud.phase).toBe(2);
+      expect(recipeCrud.dependsOn).toContain(foundation.id);
+
+      const search = createdGoals.find(g => g.title === 'Search');
+      expect(search.phase).toBe(2);
+      expect(search.dependsOn).toContain(foundation.id);
+    });
+
+    it('creates goals without phase when no Phase column', async () => {
+      const planContent = `## Goals
+
+| # | Goal | Description | Priority |
+|---|------|-------------|----------|
+| 1 | Auth | Build auth | high |
+| 2 | Dashboard | Build UI | medium |`;
+
+      const result = await callHandler(handlers['pm.condoCreateGoals'], {
+        condoId: 'condo_1',
+        planContent,
+      });
+
+      expect(result.ok).toBe(true);
+      const data = store.getData();
+      const createdGoals = data.goals.filter(g => g.condoId === 'condo_1' && g.id.startsWith('goal_test'));
+
+      for (const g of createdGoals) {
+        expect(g.phase).toBeNull();
+        expect(g.dependsOn).toEqual([]);
+      }
+    });
   });
 
   describe('pm.condoCascade', () => {

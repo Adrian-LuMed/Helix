@@ -838,6 +838,87 @@ describe('Plugin index.js', () => {
     });
   });
 
+  describe('goals.kickoff with goal-level dependencies', () => {
+    it('blocks kickoff when goal dependsOn are not done', async () => {
+      // Create condo
+      let condoResult;
+      api._methods['condos.create']({
+        params: { name: 'Phase Condo' },
+        respond: (ok, payload) => { condoResult = payload; },
+      });
+      const condoId = condoResult.condo.id;
+
+      // Create phase 1 goal
+      let goal1Result;
+      api._methods['goals.create']({
+        params: { title: 'Foundation', condoId },
+        respond: (ok, payload) => { goal1Result = payload; },
+      });
+
+      // Create phase 2 goal that depends on phase 1
+      let goal2Result;
+      api._methods['goals.create']({
+        params: { title: 'Features', condoId },
+        respond: (ok, payload) => { goal2Result = payload; },
+      });
+      const goal2Id = goal2Result.goal.id;
+
+      // Manually set dependsOn on goal 2
+      api._methods['goals.update']({
+        params: { id: goal2Id, dependsOn: [goal1Result.goal.id], phase: 2 },
+        respond: () => {},
+      });
+
+      // Add a task to goal 2 so kickoff has something to try
+      api._methods['goals.addTask']({
+        params: { goalId: goal2Id, text: 'Build feature', assignedAgent: 'backend' },
+        respond: () => {},
+      });
+
+      // Kickoff goal 2 — should be blocked because goal 1 is not done
+      let kickoffResult;
+      await api._methods['goals.kickoff']({
+        params: { goalId: goal2Id },
+        respond: (ok, payload) => { kickoffResult = { ok, payload }; },
+      });
+
+      expect(kickoffResult.ok).toBe(true);
+      expect(kickoffResult.payload.spawnedSessions).toHaveLength(0);
+      expect(kickoffResult.payload.message).toContain('blocked by dependencies');
+    });
+
+    it('allows kickoff when goal has no dependsOn', async () => {
+      // Create a goal with a task but no dependsOn
+      let goalResult;
+      api._methods['goals.create']({
+        params: { title: 'Independent Goal' },
+        respond: (ok, payload) => { goalResult = payload; },
+      });
+      const goalId = goalResult.goal.id;
+
+      api._methods['goals.addTask']({
+        params: { goalId, text: 'Do something', assignedAgent: 'backend' },
+        respond: () => {},
+      });
+
+      // Kickoff should proceed (may fail to actually spawn because no real gateway, but should not be blocked)
+      let kickoffResult;
+      try {
+        await api._methods['goals.kickoff']({
+          params: { goalId },
+          respond: (ok, payload, err) => { kickoffResult = { ok, payload, err }; },
+        });
+      } catch {
+        // Spawn may fail in test env — that's fine, we just need to check it wasn't blocked
+      }
+
+      // Should not have returned 'blocked by dependencies'
+      if (kickoffResult?.ok && kickoffResult?.payload) {
+        expect(kickoffResult.payload.message).not.toContain('blocked by dependencies');
+      }
+    });
+  });
+
   describe('agent_end hook (error handling)', () => {
     it('catches errors and logs them without crashing', async () => {
       // Create a condo and bind session (condo path calls save immediately)

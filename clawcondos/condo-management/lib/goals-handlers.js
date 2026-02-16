@@ -102,7 +102,7 @@ export function createGoalHandlers(store, options = {}) {
         }
 
         // Whitelist allowed patch fields (prevent overwriting internal fields)
-        const allowed = ['title', 'description', 'status', 'completed', 'condoId', 'priority', 'deadline', 'notes', 'tasks', 'nextTask', 'dropped', 'droppedAtMs', 'files', 'plan', 'autonomyMode'];
+        const allowed = ['title', 'description', 'status', 'completed', 'condoId', 'priority', 'deadline', 'notes', 'tasks', 'nextTask', 'dropped', 'droppedAtMs', 'files', 'plan', 'autonomyMode', 'phase', 'dependsOn'];
         for (const f of allowed) {
           if (f in params) goal[f] = params[f];
         }

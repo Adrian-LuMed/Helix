@@ -8,6 +8,7 @@ import {
   parseGoalsFromPlan,
   normalizeAgentToRole,
   getSupportedRoles,
+  convertPhasesToDependsOn,
 } from '../clawcondos/condo-management/lib/plan-parser.js';
 
 describe('plan-parser', () => {
@@ -171,6 +172,131 @@ This wraps things up.`;
 
       const result = parseGoalsFromPlan(content);
       expect(result.goals[0].title).toBe('Bold Goal');
+    });
+  });
+
+  describe('parseGoalsFromPlan with Phase column', () => {
+    it('parses phase values from table', () => {
+      const content = `## Goals
+
+| # | Goal | Description | Priority | Phase |
+|---|------|-------------|----------|-------|
+| 1 | Project Foundation | Set up project | high | 1 |
+| 2 | Recipe Management | Recipe CRUD | high | 2 |
+| 3 | Search & Favorites | Search + favorites | medium | 2 |`;
+
+      const result = parseGoalsFromPlan(content);
+      expect(result.hasPlan).toBe(true);
+      expect(result.goals).toHaveLength(3);
+      expect(result.goals[0].phase).toBe(1);
+      expect(result.goals[1].phase).toBe(2);
+      expect(result.goals[2].phase).toBe(2);
+    });
+
+    it('returns null phase when no Phase column present', () => {
+      const content = `## Goals
+
+| # | Goal | Description | Priority |
+|---|------|-------------|----------|
+| 1 | Setup auth | JWT auth | high |`;
+
+      const result = parseGoalsFromPlan(content);
+      expect(result.goals).toHaveLength(1);
+      expect(result.goals[0].phase).toBeNull();
+    });
+
+    it('handles wave/stage column headers as phase', () => {
+      const content = `## Goals
+
+| # | Goal | Description | Wave |
+|---|------|-------------|------|
+| 1 | Foundation | Setup | 1 |
+| 2 | Features | Build | 2 |`;
+
+      const result = parseGoalsFromPlan(content);
+      expect(result.goals[0].phase).toBe(1);
+      expect(result.goals[1].phase).toBe(2);
+    });
+
+    it('ignores non-numeric phase values', () => {
+      const content = `## Goals
+
+| # | Goal | Description | Phase |
+|---|------|-------------|-------|
+| 1 | Setup | Initial | first |
+| 2 | Build | Features | 2 |`;
+
+      const result = parseGoalsFromPlan(content);
+      expect(result.goals[0].phase).toBeNull();
+      expect(result.goals[1].phase).toBe(2);
+    });
+  });
+
+  describe('convertPhasesToDependsOn', () => {
+    it('sets dependsOn for phase 2 goals to all phase 1 goal IDs', () => {
+      const goals = [
+        { id: 'g1', phase: 1 },
+        { id: 'g2', phase: 2 },
+        { id: 'g3', phase: 2 },
+      ];
+
+      convertPhasesToDependsOn(goals);
+
+      expect(goals[0].dependsOn).toBeUndefined();
+      expect(goals[1].dependsOn).toEqual(['g1']);
+      expect(goals[2].dependsOn).toEqual(['g1']);
+    });
+
+    it('chains three phases correctly', () => {
+      const goals = [
+        { id: 'g1', phase: 1 },
+        { id: 'g2', phase: 1 },
+        { id: 'g3', phase: 2 },
+        { id: 'g4', phase: 3 },
+      ];
+
+      convertPhasesToDependsOn(goals);
+
+      // Phase 1 goals: no deps
+      expect(goals[0].dependsOn).toBeUndefined();
+      expect(goals[1].dependsOn).toBeUndefined();
+      // Phase 2 depends on phase 1
+      expect(goals[2].dependsOn).toEqual(['g1', 'g2']);
+      // Phase 3 depends on phase 2
+      expect(goals[3].dependsOn).toEqual(['g3']);
+    });
+
+    it('handles empty array', () => {
+      const result = convertPhasesToDependsOn([]);
+      expect(result).toEqual([]);
+    });
+
+    it('handles goals without phases', () => {
+      const goals = [
+        { id: 'g1', phase: null },
+        { id: 'g2' },
+      ];
+
+      convertPhasesToDependsOn(goals);
+
+      // No deps set since no phases
+      expect(goals[0].dependsOn).toBeUndefined();
+      expect(goals[1].dependsOn).toBeUndefined();
+    });
+
+    it('handles mix of phased and unphased goals', () => {
+      const goals = [
+        { id: 'g1', phase: 1 },
+        { id: 'g2' }, // no phase
+        { id: 'g3', phase: 2 },
+      ];
+
+      convertPhasesToDependsOn(goals);
+
+      // g3 depends on g1 (phase 1)
+      expect(goals[2].dependsOn).toEqual(['g1']);
+      // unphased goal unchanged
+      expect(goals[1].dependsOn).toBeUndefined();
     });
   });
 

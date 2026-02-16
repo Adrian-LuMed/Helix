@@ -245,6 +245,17 @@ export default function register(api) {
       throw new Error(`Goal ${goalId} not found`);
     }
 
+    // Check goal-level dependencies (phase-based)
+    if (goal.dependsOn?.length > 0) {
+      const allGoalDepsDone = goal.dependsOn.every(depGoalId => {
+        const depGoal = data.goals.find(g => g.id === depGoalId);
+        return depGoal && depGoal.status === 'done';
+      });
+      if (!allGoalDepsDone) {
+        return { goalId, spawnedSessions: [], message: 'Goal blocked by dependencies' };
+      }
+    }
+
     const tasks = goal.tasks || [];
 
     // Collect IDs of tasks that are already done
@@ -334,6 +345,51 @@ export default function register(api) {
       errors: errors.length > 0 ? errors : undefined,
       message: `Spawned ${spawnedSessions.length} session(s)${errors.length > 0 ? `, ${errors.length} error(s)` : ''}`,
     };
+  }
+
+  /**
+   * Kick off all unblocked goals in a condo (phase-based cascade).
+   * Called when a goal completes to start the next wave of goals.
+   * @param {string} condoId
+   */
+  async function kickoffUnblockedGoals(condoId) {
+    const data = store.load();
+    const condoGoals = data.goals.filter(g => g.condoId === condoId);
+
+    for (const goal of condoGoals) {
+      // Skip done goals or goals with no tasks
+      if (goal.status === 'done' || !goal.tasks || goal.tasks.length === 0) continue;
+      // Skip goals that already have spawned sessions
+      if (goal.tasks.some(t => t.sessionKey)) continue;
+      // Skip goals without dependsOn (they should already have been kicked off)
+      if (!goal.dependsOn || goal.dependsOn.length === 0) continue;
+
+      try {
+        const result = await internalKickoff(goal.id);
+        if (result.spawnedSessions.length > 0) {
+          api.logger.info(`clawcondos-goals: kickoffUnblockedGoals: started goal "${goal.title}" (phase ${goal.phase || '?'})`);
+          broadcastPlanUpdate({
+            event: 'goal.kickoff',
+            goalId: goal.id,
+            spawnedCount: result.spawnedSessions.length,
+            spawnedSessions: result.spawnedSessions,
+          });
+
+          // Start agents by sending taskContext via chat.send
+          for (const s of result.spawnedSessions) {
+            if (s.taskContext && api.sendToSession) {
+              try {
+                api.sendToSession(s.sessionKey, s.taskContext);
+              } catch (err) {
+                api.logger.error(`clawcondos-goals: kickoffUnblockedGoals: failed to send taskContext to ${s.sessionKey}: ${err.message}`);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        api.logger.error(`clawcondos-goals: kickoffUnblockedGoals: failed for goal ${goal.id}: ${err.message}`);
+      }
+    }
   }
 
   api.registerGatewayMethod('goals.kickoff', async ({ params, respond }) => {
@@ -875,6 +931,30 @@ export default function register(api) {
                   api.logger.error(`clawcondos-goals: auto-kickoff after task completion failed: ${err.message}`);
                 }
               }, 1000);
+            }
+
+            // When all tasks in a goal are done, kick off unblocked goals in the same condo
+            if (result._meta.allTasksDone) {
+              const completedGoalData = store.load();
+              const completedGoal = completedGoalData.goals.find(g => g.id === result._meta.goalId);
+              if (completedGoal?.condoId) {
+                // Broadcast goal.completed event
+                broadcastPlanUpdate({
+                  event: 'goal.completed',
+                  goalId: completedGoal.id,
+                  condoId: completedGoal.condoId,
+                  phase: completedGoal.phase || null,
+                  timestamp: Date.now(),
+                });
+
+                setTimeout(async () => {
+                  try {
+                    await kickoffUnblockedGoals(completedGoal.condoId);
+                  } catch (err) {
+                    api.logger.error(`clawcondos-goals: kickoffUnblockedGoals after goal completion failed: ${err.message}`);
+                  }
+                }, 2000);
+              }
             }
           }
 

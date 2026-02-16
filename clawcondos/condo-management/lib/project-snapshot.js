@@ -167,6 +167,15 @@ export function buildProjectSnapshot(workspacePath) {
 
     // File tree
     const tree = getFileTree(workspacePath);
+    const isEmpty = !tree || tree === '(empty)';
+
+    if (isEmpty) {
+      parts.push('### NEW PROJECT — Empty Workspace');
+      parts.push('This is a brand-new project with no existing code.');
+      parts.push('You MUST plan a Foundation goal (Phase 1) before any feature goals.');
+      parts.push('');
+    }
+
     parts.push('### File Tree');
     parts.push('```');
     parts.push(tree);

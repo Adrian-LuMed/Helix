@@ -11,12 +11,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Skill file paths (relative to plugin root)
 const SKILL_PM_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-PM.md');
+const SKILL_PM_CONDO_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-PM-CONDO.md');
+const SKILL_PM_GOAL_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-PM-GOAL.md');
 const SKILL_WORKER_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-WORKER.md');
 const SKILL_AGENT_PATH = join(__dirname, '..', '..', '..', 'docs', 'SKILL-AGENT.md');
 
 // Cache for skill file contents
 let skillCache = {
   pm: null,
+  pmCondo: null,
+  pmGoal: null,
   worker: null,
   agent: null,
   loadedAt: null,
@@ -45,7 +49,23 @@ function loadSkillFile(type) {
   } catch {
     skillCache.pm = null;
   }
-  
+
+  try {
+    skillCache.pmCondo = existsSync(SKILL_PM_CONDO_PATH)
+      ? readFileSync(SKILL_PM_CONDO_PATH, 'utf-8')
+      : null;
+  } catch {
+    skillCache.pmCondo = null;
+  }
+
+  try {
+    skillCache.pmGoal = existsSync(SKILL_PM_GOAL_PATH)
+      ? readFileSync(SKILL_PM_GOAL_PATH, 'utf-8')
+      : null;
+  } catch {
+    skillCache.pmGoal = null;
+  }
+
   try {
     skillCache.worker = existsSync(SKILL_WORKER_PATH)
       ? readFileSync(SKILL_WORKER_PATH, 'utf-8')
@@ -70,7 +90,7 @@ function loadSkillFile(type) {
  * Clear skill cache (for testing or hot reload)
  */
 export function clearSkillCache() {
-  skillCache = { pm: null, worker: null, agent: null, loadedAt: null };
+  skillCache = { pm: null, pmCondo: null, pmGoal: null, worker: null, agent: null, loadedAt: null };
 }
 
 /**
@@ -85,7 +105,7 @@ export function clearSkillCache() {
  * @returns {string|null} PM skill context or null if unavailable
  */
 export function getPmSkillContext(options = {}) {
-  const skillContent = loadSkillFile('pm');
+  const skillContent = loadSkillFile('pmGoal') || loadSkillFile('pm');
   if (!skillContent) return null;
   
   const {
@@ -165,7 +185,7 @@ function getDefaultRoleDescription(role) {
  * @returns {string|null} Condo PM skill context or null if unavailable
  */
 export function getCondoPmSkillContext(options = {}) {
-  const skillContent = loadSkillFile('pm');
+  const skillContent = loadSkillFile('pmCondo') || loadSkillFile('pm');
 
   const {
     condoId,
@@ -175,76 +195,14 @@ export function getCondoPmSkillContext(options = {}) {
     roles,
   } = options;
 
-  // Build condo PM context header
+  // Build dynamic context header (project-specific info)
   const header = [
     '---',
-    '## You are the CONDO-LEVEL PM',
-    '',
-    'Your job is to break the user\'s project description into **GOALS** (not tasks).',
-    'Goal-level PMs will handle detailed task planning for each goal.',
-    '',
-    '### CRITICAL: Goals Must Be Self-Contained (Vertical Slices)',
-    '',
-    'Each goal MUST be a **vertical feature slice** that includes ALL work needed to deliver it:',
-    '- Backend tasks, frontend tasks, design tasks, and testing tasks — all within the SAME goal',
-    '- A goal must NEVER depend on tasks from another goal to be functional',
-    '- Each goal is worked on by multiple agents in parallel, so it must contain the full stack',
-    '',
-    '**WRONG** (horizontal layers — creates cross-goal dependencies):',
-    '- Goal 1: "Backend API" / Goal 2: "Frontend UI" / Goal 3: "Search & Filters"',
-    '- This fails because Goal 2 needs Goal 1\'s API, and Goal 3 needs both',
-    '',
-    '**RIGHT** (vertical slices — each goal is self-contained):',
-    '- Goal 1: "Project Foundation" — server setup, base HTML/CSS, folder structure, initial config (all roles)',
-    '- Goal 2: "Recipe Management" — recipe API endpoints + recipe UI forms + recipe display (backend + frontend + designer)',
-    '- Goal 3: "Browse, Search & Favorites" — search API + search UI + favorites API + favorites view (backend + frontend)',
-    '',
-    'The first goal should typically be **Foundation/Setup** — bootstrapping the project so other goals have something to build on.',
-    'Subsequent goals add complete features on top of that foundation.',
-    '',
-    '### CRITICAL: Phased Execution for New Projects',
-    '',
-    'If the project workspace is EMPTY or has no existing code:',
-    '- Phase 1 MUST be a single "Foundation/Setup" goal that creates the project skeleton, installs dependencies, and sets up the base structure',
-    '- Phase 2+ goals build features on top of the foundation',
-    '- Phase 2 goals will NOT start until ALL Phase 1 goals complete',
-    '- This prevents conflicts from multiple goals trying to set up the same base simultaneously',
-    '',
-    'For existing projects with code already in place, you may use Phase 1 for all goals (parallel execution).',
-    '',
-    '### Output Format',
-    '',
-    'Present your goals in a markdown table with a **Phase** column:',
-    '',
-    '```',
-    '| # | Goal | Description | Priority | Phase |',
-    '|---|------|-------------|----------|-------|',
-    '| 1 | Project Foundation | Set up project structure, deps, base scaffold | high | 1 |',
-    '| 2 | Recipe Management | Recipe CRUD API + UI | high | 2 |',
-    '| 3 | Search & Favorites | Search API + search UI + favorites | medium | 2 |',
-    '```',
-    '',
-    '**Phase** controls execution order: Phase 1 goals run first. Phase 2 goals only start after ALL Phase 1 goals complete. Phase 3 waits for Phase 2, and so on.',
-    '',
-    'Then add per-goal task suggestions as subsections. Each goal MUST have tasks from multiple roles:',
-    '',
-    '```',
-    '#### 1. Goal Title',
-    '- Server/API setup for this feature (backend)',
-    '- UI components for this feature (frontend)',
-    '- Styling and design for this feature (designer)',
-    '- Tests for this feature (tester)',
-    '```',
-    '',
-    '### Project Intelligence',
-    'You may receive a Project Snapshot showing the workspace file tree and key config files.',
-    'Plan INCREMENTALLY — build on what already exists. Do NOT recreate existing structures.',
-    'Reference existing files, patterns, and conventions when planning tasks.',
+    '## Condo PM Session Context',
   ];
 
   if (condoId && condoName) {
-    header.push('');
-    header.push(`### Project: ${condoName} (${condoId})`);
+    header.push(`- **Project:** ${condoName} (${condoId})`);
   }
 
   if (typeof goalCount === 'number' && goalCount > 0) {
@@ -275,7 +233,7 @@ export function getCondoPmSkillContext(options = {}) {
 
   header.push('---', '');
 
-  // Append PM skill content for general PM coordination knowledge
+  // Append dedicated condo PM skill content (or fallback to generic PM)
   if (skillContent) {
     return header.join('\n') + skillContent;
   }
@@ -375,6 +333,8 @@ export function getWorkerSkillContext(taskContext = {}) {
 export function getSkillAvailability() {
   return {
     pm: existsSync(SKILL_PM_PATH),
+    pmCondo: existsSync(SKILL_PM_CONDO_PATH),
+    pmGoal: existsSync(SKILL_PM_GOAL_PATH),
     worker: existsSync(SKILL_WORKER_PATH),
     agent: existsSync(SKILL_AGENT_PATH),
   };

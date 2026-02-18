@@ -198,6 +198,49 @@ export function removeGoalWorktree(condoWs, goalId, storedBranch) {
 }
 
 /**
+ * Close a goal's worktree: merge branch into main (best-effort), remove worktree,
+ * but preserve the branch (unlike removeGoalWorktree which deletes it).
+ *
+ * @param {string} condoWs - Condo workspace root path
+ * @param {string} goalId - Goal ID
+ * @param {string} [storedBranch] - Stored branch name from goal.worktree.branch
+ * @returns {{ ok: boolean, merged?: boolean, conflict?: boolean, error?: string }}
+ */
+export function closeGoalWorktree(condoWs, goalId, storedBranch) {
+  const wtPath = goalWorktreePath(condoWs, goalId);
+  const branch = storedBranch || goalBranchName(goalId);
+
+  try {
+    // 1. Best-effort merge into main (abort on conflict)
+    const mergeResult = mergeGoalBranch(condoWs, branch);
+
+    // 2. Remove worktree directory
+    if (existsSync(wtPath)) {
+      execSync(`git worktree remove --force ${shellQuote(wtPath)}`, {
+        cwd: condoWs,
+        stdio: 'pipe',
+      });
+    }
+
+    // Prune stale worktree entries
+    try {
+      execSync('git worktree prune', { cwd: condoWs, stdio: 'pipe' });
+    } catch { /* non-critical */ }
+
+    // NOTE: branch is intentionally preserved (not deleted)
+
+    return {
+      ok: true,
+      merged: mergeResult.merged || false,
+      conflict: mergeResult.conflict || false,
+      error: mergeResult.conflict ? mergeResult.error : undefined,
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
  * Remove an entire condo workspace directory.
  *
  * @param {string} condoWs - Condo workspace root path

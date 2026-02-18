@@ -572,6 +572,7 @@
               </div>
               <div class="goal-right-actions">
                 <button class="ghost-btn" id="goalMarkDoneBtn" onclick="toggleGoalDone()">Mark done</button>
+                <button class="ghost-btn" id="goalCloseBtn" onclick="promptCloseGoal()" title="Close goal: stop agents, merge & archive">Close</button>
                 <button class="ghost-btn" onclick="showAttachSessionModal(null)">⛓</button>
                 <button class="ghost-btn danger" onclick="promptDeleteGoal()" title="Delete goal">Delete</button>
                 <button class="collapse-panel-btn" onclick="toggleGoalRightPanel()" title="Collapse panel">&#x25B6;</button>
@@ -1043,6 +1044,29 @@
       rejectInputVisible: {},  // Map<taskId, boolean> - track which reject inputs are visible
     };
     
+    // ═══════════════════════════════════════════════════════════════
+    // SESSION KEY HELPERS
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Check if a session is a task worker (spawned for goal task execution).
+     * Matches both legacy `subagent` format and new `webchat:task-` format.
+     * Excludes PM sessions.
+     */
+    function isWorkerSession(key) {
+      if (key.includes(':webchat:task-')) return true;
+      if (key.includes(':subagent:') && !key.includes(':subagent:pm-')) return true;
+      return false;
+    }
+
+    /**
+     * Check if a session should be hidden from main session lists.
+     * Matches task workers, PM sessions, and legacy subagent sessions.
+     */
+    function isNonMainSession(key) {
+      return key.includes(':subagent:') || key.includes(':webchat:task-') || key.includes(':webchat:pm-');
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // SESSION PIN & ARCHIVE
     // ═══════════════════════════════════════════════════════════════
@@ -1658,6 +1682,86 @@
         loadGoals();
         return;
       }
+
+      // Goal closed events
+      if (msg.type === 'event' && msg.event === 'goal.closed') {
+        const closedGoalId = msg.payload?.goalId;
+        loadGoals().then(function() {
+          if (closedGoalId && state.currentGoalOpenId === closedGoalId) {
+            renderGoalView();
+            showToast('Goal was closed', 'info');
+          }
+        });
+        return;
+      }
+
+      // Goal kickoff events — backend spawned sessions, frontend must send chat.send to start agents
+      if (msg.type === 'event' && msg.event === 'goal.kickoff') {
+        var kickoffPayload = msg.payload || {};
+        var sessions = kickoffPayload.spawnedSessions || [];
+        var kickoffGoalId = kickoffPayload.goalId;
+        if (sessions.length > 0) {
+          console.log('[auto-kickoff] Starting ' + sessions.length + ' agent(s) for goal ' + kickoffGoalId);
+          showToast('Auto-starting ' + sessions.length + ' agent(s)...', 'info');
+          sessions.forEach(function(s) {
+            if (!s.taskContext || !s.sessionKey) return;
+            if (s.headlessStarted) {
+              console.log('[auto-kickoff] Session ' + s.sessionKey + ' already started by backend');
+              return;
+            }
+            rpcCall('chat.send', {
+              sessionKey: s.sessionKey,
+              message: s.taskContext,
+              idempotencyKey: 'auto-kickoff-' + s.taskId + '-' + Date.now(),
+            }, 120000).then(function() {
+              console.log('[auto-kickoff] Started agent for task ' + s.taskId + ' on ' + s.sessionKey);
+            }).catch(function(err) {
+              console.error('[auto-kickoff] Failed to start agent for task ' + s.taskId, err);
+              showToast('Failed to auto-start agent: ' + (s.taskText || s.taskId), 'error');
+            });
+          });
+        }
+        // Refresh goals and sessions
+        loadGoals().then(function() {
+          loadSessions();
+          if (kickoffGoalId && state.currentGoalOpenId === kickoffGoalId) {
+            renderGoalView();
+          }
+        });
+        return;
+      }
+
+      // Goal task completed events — refresh UI
+      if (msg.type === 'event' && msg.event === 'goal.task_completed') {
+        loadGoals().then(function() {
+          if (msg.payload?.goalId && state.currentGoalOpenId === msg.payload.goalId) {
+            renderGoalView();
+          }
+        });
+        return;
+      }
+
+      // Goal completed events — refresh UI
+      if (msg.type === 'event' && msg.event === 'goal.completed') {
+        loadGoals().then(function() {
+          loadSessions();
+          if (msg.payload?.goalId && state.currentGoalOpenId === msg.payload.goalId) {
+            renderGoalView();
+            showToast('All tasks complete!', 'success');
+          }
+        });
+        return;
+      }
+
+      // Goals changed events (from serve.js file watcher)
+      if (msg.type === 'event' && msg.event === 'goals.changed') {
+        loadGoals().then(function() {
+          loadSessions();
+          renderCondoGoalsPane();
+          if (state.currentGoalOpenId) renderGoalView();
+        });
+        return;
+      }
     }
     
     function sendConnect() {
@@ -1992,6 +2096,13 @@
             updateStreamingMessage(runId, text);
           }
         }
+
+        // If a goal PM session started thinking, refresh goal chat to show indicator
+        if (sessionKey.includes(':webchat:pm-') && !sessionKey.includes(':webchat:pm-condo-')) {
+          if (state.goalChatMode === 'pm' && state.goalChatSessionKey === sessionKey) {
+            debouncePmThinkingRefresh();
+          }
+        }
       } else if (runState === 'final') {
         // Response complete
         clearActiveRun(sessionKey);
@@ -2074,15 +2185,38 @@
               var cascadeGoal = state.goals.find(function(g) {
                 return g.pmSessionKey === sessionKey && state.condoCascadePending.has(g.id);
               });
+              // Fallback: extract goalId from session key pattern (agent:X:webchat:pm-<goalId>)
+              if (!cascadeGoal) {
+                var cascadeKeyMatch = sessionKey.match(/:webchat:pm-(.+)$/);
+                if (cascadeKeyMatch) {
+                  cascadeGoal = state.goals.find(function(g) {
+                    return g.id === cascadeKeyMatch[1] && state.condoCascadePending.has(g.id);
+                  });
+                  if (cascadeGoal) {
+                    console.log('[Helix] Cascade fallback match for goal', cascadeGoal.id, '(pmSessionKey mismatch)');
+                  }
+                }
+              }
               if (cascadeGoal) {
                 state.condoCascadePending.delete(cascadeGoal.id);
 
                 if (state.condoCascadeMode === 'full') {
-                  // Auto-create tasks and then check dependencies before kickoff
-                  rpcCall('pm.createTasksFromPlan', {
+                  // Save the PM response to history first, then auto-create tasks
+                  rpcCall('pm.saveResponse', {
                     goalId: cascadeGoal.id,
-                    planContent: text,
-                  }, 30000).then(function(taskResult) {
+                    content: text,
+                  }, 10000).then(function() {
+                    // Refresh goal chat view if user is viewing this goal
+                    loadGoals().then(function() {
+                      if (state.currentGoalOpenId === cascadeGoal.id && state.goalChatMode === 'pm') {
+                        renderGoalChat();
+                      }
+                    });
+                    return rpcCall('pm.createTasksFromPlan', {
+                      goalId: cascadeGoal.id,
+                      planContent: text,
+                    }, 30000);
+                  }).then(function(taskResult) {
                     if (taskResult && taskResult.ok) {
                       showToast('Tasks created for "' + (cascadeGoal.title || cascadeGoal.id) + '"', 'success');
                       // Reload goals to get fresh state with dependsOn
@@ -2105,8 +2239,8 @@
                       });
                     }
                   }).then(function(kickoffResult) {
+                    // Start agents by sending taskContext via chat.send (creates sessions on gateway)
                     if (kickoffResult && kickoffResult.spawnedSessions && kickoffResult.spawnedSessions.length > 0) {
-                      // Start agents by sending taskContext via chat.send
                       var agentPromises = kickoffResult.spawnedSessions.map(function(s) {
                         if (!s.taskContext) return Promise.resolve();
                         return rpcCall('chat.send', {
@@ -2127,11 +2261,17 @@
                     showToast('Auto-execute failed for "' + (cascadeGoal.title || cascadeGoal.id) + '"', 'error');
                   });
                 } else {
-                  // Plan mode — just save the response for the goal PM
+                  // Plan mode — save the response and refresh goal chat view
                   rpcCall('pm.saveResponse', {
                     goalId: cascadeGoal.id,
                     content: text,
-                  }, 10000).catch(function(err) {
+                  }, 10000).then(function() {
+                    loadGoals().then(function() {
+                      if (state.currentGoalOpenId === cascadeGoal.id && state.goalChatMode === 'pm') {
+                        renderGoalChat();
+                      }
+                    });
+                  }).catch(function(err) {
                     console.warn('Failed to save cascade PM response for goal', cascadeGoal.id, err);
                   });
                   showToast('Plan ready for "' + (cascadeGoal.title || cascadeGoal.id) + '"', 'info');
@@ -2145,6 +2285,39 @@
                   state.condoCascadeMode = null;
                   showToast('All goal planning complete', 'success');
                 }
+              }
+            }
+            // Goal PM auto-response — save to history even when user isn't actively waiting
+            // This catches responses from auto-sent prompts (e.g., after condoCreateGoals)
+            else if (sessionKey.includes(':webchat:pm-') && !sessionKey.includes(':webchat:pm-condo-')) {
+              var autoGoal = state.goals.find(function(g) {
+                return g.pmSessionKey === sessionKey;
+              });
+              // Fallback: extract goalId from session key pattern
+              if (!autoGoal) {
+                var autoKeyMatch = sessionKey.match(/:webchat:pm-(.+)$/);
+                if (autoKeyMatch) {
+                  autoGoal = state.goals.find(function(g) {
+                    return g.id === autoKeyMatch[1];
+                  });
+                }
+              }
+              if (autoGoal) {
+                rpcCall('pm.saveResponse', {
+                  goalId: autoGoal.id,
+                  content: text,
+                }, 10000).then(function() {
+                  loadGoals().then(function() {
+                    // If user is viewing this goal's PM chat, re-render to show the response
+                    if (state.currentGoalOpenId === autoGoal.id && state.goalChatMode === 'pm') {
+                      renderGoalChat();
+                    }
+                    renderCondoGoalsPane();
+                  });
+                }).catch(function(err) {
+                  console.warn('Failed to auto-save goal PM response for', autoGoal.id, err);
+                });
+                showToast('Plan ready for "' + (autoGoal.title || autoGoal.id) + '"', 'info');
               }
             }
           }
@@ -2233,6 +2406,14 @@
       teamTabRefreshTimeout = setTimeout(() => {
         renderGoalChat();
       }, 500);
+    }
+
+    var pmThinkingRefreshTimeout = null;
+    function debouncePmThinkingRefresh() {
+      if (pmThinkingRefreshTimeout) clearTimeout(pmThinkingRefreshTimeout);
+      pmThinkingRefreshTimeout = setTimeout(() => {
+        renderGoalChat();
+      }, 1000);
     }
     
     // Typing indicator (bouncing dots)
@@ -2702,21 +2883,22 @@
     }
 
     function onCondoHeaderClick(condoId) {
-      // Expand sidebar dropdown
-      if (!state.condoExpanded[condoId]) {
-        state.condoExpanded[condoId] = true;
-        localStorage.setItem('sharp_condo_expanded', JSON.stringify(state.condoExpanded));
-        renderGoals();
+      // Toggle sidebar dropdown expand/collapse
+      var wasExpanded = !!state.condoExpanded[condoId];
+      state.condoExpanded[condoId] = !wasExpanded;
+      localStorage.setItem('sharp_condo_expanded', JSON.stringify(state.condoExpanded));
+      renderGoals();
+      // Open the condo panel only when expanding (not when collapsing)
+      if (!wasExpanded) {
+        openCondoPanel(condoId);
       }
-      // Open the condo view in the main content area
-      openCondoPanel(condoId);
     }
 
     function updateUncategorizedCount() {
       const el = document.getElementById('uncategorizedCount');
       if (!el) return;
       
-      const sessions = (state.sessions || []).filter(s => !s.key.includes(':subagent:'));
+      const sessions = (state.sessions || []).filter(s => !isNonMainSession(s.key));
       const goals = state.goals || [];
       
       const assignedSessions = new Set();
@@ -2758,7 +2940,7 @@
       
       if (elActive) elActive.textContent = activeSessions;
       if (elTrend) {
-        const totalSessions = sessions.filter(s => !s.key.includes(':subagent:')).length;
+        const totalSessions = sessions.filter(s => !isNonMainSession(s.key)).length;
         elTrend.textContent = totalSessions > 0 ? `${totalSessions} total` : '';
       }
       if (elPending) elPending.textContent = pendingGoals;
@@ -2940,6 +3122,7 @@
         const isActive = state.currentGoalOpenId === g.id;
         const attention = getGoalAttention(g);
         const isDone = g.status === 'done';
+        const isClosed = !!g.closedAtMs;
         const { done, total } = goalTaskStats(g);
         const activity = getGoalLatestActivity(g);
         const activityStr = activity > 0 ? timeAgo(activity) : '';
@@ -2952,7 +3135,8 @@
         const classes = ['goal-item', 'animate-in'];
         if (nested) classes.push('condo-nested');
         if (isActive) classes.push('active');
-        if (isDone) classes.push('goal-done');
+        if (isClosed) classes.push('goal-closed');
+        else if (isDone) classes.push('goal-done');
         if (isThinking) classes.push('goal-thinking');
 
         // Progress bar
@@ -2963,7 +3147,9 @@
 
         // Meta line: task count + time ago
         let metaParts = [];
-        if (isDone) {
+        if (isClosed) {
+          metaParts.push('closed');
+        } else if (isDone) {
           metaParts.push('done');
         } else if (total > 0) {
           metaParts.push(done + '/' + total + ' tasks');
@@ -3001,7 +3187,7 @@
       if (!el) return;
       const allSessionsInGoals = new Set();
       state.goals.forEach(g => (g.sessions || []).forEach(s => allSessionsInGoals.add(s)));
-      const uncatSessions = state.sessions.filter(s => !allSessionsInGoals.has(s.key) && !s.key.includes(':subagent:'));
+      const uncatSessions = state.sessions.filter(s => !allSessionsInGoals.has(s.key) && !isNonMainSession(s.key));
       if (uncatSessions.length > 0) {
         el.style.display = 'block';
         const countEl = document.getElementById('uncatSessionsCount');
@@ -3290,6 +3476,42 @@
             try {
               var pmResult = await rpcCall('pm.getHistory', { goalId: state.currentGoalOpenId, limit: 100 });
               messages = (pmResult && pmResult.messages) || [];
+
+              // If pmChatHistory has user messages but no assistant response,
+              // check the PM session's actual chat.history for responses.
+              // This handles cases where cascade/auto-send responses weren't saved to pmChatHistory.
+              var hasUserMsg = messages.some(function(m) { return m.role === 'user'; });
+              var hasAssistantMsg = messages.some(function(m) { return m.role === 'assistant'; });
+              if (hasUserMsg && !hasAssistantMsg && sessionKey) {
+                try {
+                  var sessionResult = await rpcCall('chat.history', { sessionKey: sessionKey, limit: 50 });
+                  var sessionMsgs = (sessionResult && sessionResult.messages) || [];
+                  // Extract only assistant responses from session history
+                  var assistantMsgs = sessionMsgs.filter(function(m) { return m.role === 'assistant'; });
+                  if (assistantMsgs.length > 0) {
+                    // Append assistant responses to the display messages
+                    for (var ai = 0; ai < assistantMsgs.length; ai++) {
+                      var aText = extractText(assistantMsgs[ai].content);
+                      if (aText) {
+                        messages.push({
+                          role: 'assistant',
+                          content: aText,
+                          timestamp: assistantMsgs[ai].timestamp || Date.now(),
+                        });
+                        // Also save to pmChatHistory for future loads
+                        rpcCall('pm.saveResponse', {
+                          goalId: state.currentGoalOpenId,
+                          content: aText,
+                        }, 10000).catch(function(e) {
+                          console.warn('Failed to backfill PM response to history:', e);
+                        });
+                      }
+                    }
+                  }
+                } catch (sessionErr) {
+                  console.warn('Failed to load PM session chat.history:', sessionErr);
+                }
+              }
             } catch (pmErr) {
               // Fallback to chat.history if pm.getHistory not available
               console.warn('pm.getHistory failed, falling back to chat.history:', pmErr);
@@ -3307,7 +3529,7 @@
           messages = (result && result.messages) || [];
         }
 
-        // Check if agents are working (for Team mode)
+        // Check if agents are working
         var workingIndicator = '';
         if (state.goalChatMode === 'team') {
           var workingAgents = getWorkingAgentsForGoal();
@@ -3319,6 +3541,15 @@
               '<div class="working-dots"><div class="working-dot"></div><div class="working-dot"></div><div class="working-dot"></div></div>' +
               '<span>Agents working...</span>' +
               '<div class="team-working-agents">' + agentEmojis + '</div>' +
+              '</div>';
+          }
+        } else if (state.goalChatMode === 'pm' && sessionKey) {
+          // Show thinking indicator if PM agent is currently processing
+          var pmStatus = getSessionStatus(sessionKey);
+          if (pmStatus === 'thinking') {
+            workingIndicator = '<div class="team-working-indicator">' +
+              '<div class="working-dots"><div class="working-dot"></div><div class="working-dot"></div><div class="working-dot"></div></div>' +
+              '<span>PM is planning...</span>' +
               '</div>';
           }
         }
@@ -3951,7 +4182,23 @@
     async function approvePlan(goalId, taskId) {
       try {
         await rpcCall('plans.approve', { goalId, taskId });
-        showToast('Plan approved', 'success');
+        showToast('Plan approved — starting implementation...', 'success');
+
+        // Send chat.send to wake up the agent and tell it to proceed
+        var goal = state.goals.find(function(g) { return g.id === goalId; });
+        var task = goal && (goal.tasks || []).find(function(t) { return t.id === taskId; });
+        if (task && task.sessionKey) {
+          try {
+            await rpcCall('chat.send', {
+              sessionKey: task.sessionKey,
+              message: '✅ Your plan has been approved. Please proceed with implementation now.',
+              idempotencyKey: 'plan-approve-' + taskId + '-' + Date.now(),
+            }, 120000);
+          } catch (sendErr) {
+            console.error('Failed to notify agent after plan approval:', sendErr);
+            showToast('Plan approved but failed to notify agent — you may need to manually start', 'warning');
+          }
+        }
       } catch (e) {
         console.error('Failed to approve plan:', e);
         showToast('Failed to approve plan: ' + (e.message || e), 'error');
@@ -3993,6 +4240,21 @@
         await rpcCall('plans.reject', { goalId, taskId, feedback });
         state.rejectInputVisible[taskId] = false;
         showToast('Plan rejected with feedback', 'info');
+
+        // Send chat.send to wake up the agent and tell it to revise
+        var goal = state.goals.find(function(g) { return g.id === goalId; });
+        var task = goal && (goal.tasks || []).find(function(t) { return t.id === taskId; });
+        if (task && task.sessionKey) {
+          try {
+            await rpcCall('chat.send', {
+              sessionKey: task.sessionKey,
+              message: '❌ Your plan has been rejected. Please revise based on this feedback:\n\n' + feedback,
+              idempotencyKey: 'plan-reject-' + taskId + '-' + Date.now(),
+            }, 120000);
+          } catch (sendErr) {
+            console.error('Failed to notify agent after plan rejection:', sendErr);
+          }
+        }
       } catch (e) {
         console.error('Failed to reject plan:', e);
         showToast('Failed to reject plan: ' + (e.message || e), 'error');
@@ -4528,9 +4790,10 @@
           }
 
           // Start agents by sending taskContext via chat.send for each spawned session
+          // chat.send creates the session on the gateway and starts the agent
           if (result.spawnedSessions && result.spawnedSessions.length > 0) {
             showToast('Starting ' + result.spawnedSessions.length + ' agent(s)...', 'info');
-            const sendPromises = result.spawnedSessions.map(function(s) {
+            var sendPromises = result.spawnedSessions.map(function(s) {
               if (!s.taskContext) return Promise.resolve();
               return rpcCall('chat.send', {
                 sessionKey: s.sessionKey,
@@ -5022,11 +5285,17 @@
         }, 30000);
 
         if (result && result.ok) {
-          showToast('Created ' + result.goalsCreated + ' goals', 'success');
+          showToast('Created ' + result.goalsCreated + ' goals — starting task planning...', 'success');
 
           // Refresh data and re-render
           await loadGoals();
           renderCondoPmView();
+
+          // Auto-trigger cascade in plan mode: goal PMs will propose task plans
+          // User reviews each plan and clicks "Create Tasks" + "Start Goal" manually
+          if (result.needsCascade) {
+            await startCondoCascade('plan');
+          }
         } else {
           throw new Error('Failed to create goals');
         }
@@ -5068,6 +5337,8 @@
 
         state.condoCascadeMode = mode;
         state.condoCascadePending = new Set(result.goals.map(function(g) { return g.goalId; }));
+
+        await loadGoals(); // Refresh so state.goals has pmSessionKey set by backend
 
         showToast('Planning ' + result.goals.length + ' goals...', 'info');
 
@@ -5697,6 +5968,9 @@
       var btn = document.getElementById('goalMarkDoneBtn');
       if (btn) btn.textContent = completed ? 'Mark active' : 'Mark done';
 
+      var closeBtn = document.getElementById('goalCloseBtn');
+      if (closeBtn) closeBtn.style.display = goal.closedAtMs ? 'none' : '';
+
       // Definition display
       var defDisplay = document.getElementById('goalDefDisplay');
       var notes = ((goal.notes || goal.description) || '').trim();
@@ -6078,13 +6352,45 @@
     async function promptDeleteGoal() {
       const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
       if (!goal) return;
-      if (!confirm(`Delete goal "${goal.title}"? This does not delete sessions.`)) return;
+      if (!confirm(`Delete goal "${goal.title}"?\n\nAll associated sessions will be stopped and hidden.`)) return;
       try {
-        await rpcCall('goals.delete', { id: goal.id });
-        await loadGoals();
+        var result = await rpcCall('goals.delete', { id: goal.id });
+
+        // Hide killed sessions from the UI
+        var killed = result && result.killedSessions;
+        if (Array.isArray(killed) && killed.length > 0) {
+          killed.forEach(function(sk) { state.killedSessions.add(sk); });
+          saveKilledSessions();
+        }
+
+        await Promise.all([loadGoals(), loadSessions()]);
         showOverview();
       } catch {
         showToast('Failed to delete goal', 'error');
+      }
+    }
+
+    async function promptCloseGoal() {
+      const goal = state.goals.find(g => g.id === state.currentGoalOpenId);
+      if (!goal) return;
+      if (!confirm(`Close goal "${goal.title}"?\n\nThis will stop all agents, merge the worktree branch, and archive the goal as done.`)) return;
+      try {
+        var result = await rpcCall('goals.close', { goalId: goal.id }, 30000);
+
+        // Hide killed sessions from the UI
+        var killed = result && result.killedSessions;
+        if (Array.isArray(killed) && killed.length > 0) {
+          killed.forEach(function(sk) { state.killedSessions.add(sk); });
+          saveKilledSessions();
+        }
+
+        await Promise.all([loadGoals(), loadSessions()]);
+        showToast('Goal closed', 'success');
+        if (state.currentGoalOpenId === goal.id) {
+          renderGoalView();
+        }
+      } catch (err) {
+        showToast('Failed to close goal: ' + (err.message || 'Unknown error'), 'error');
       }
     }
 
@@ -6451,7 +6757,7 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
     
     // Keep autoCategorize for bulk operations (optional)
     async function autoCategorize() {
-      const sessions = (state.sessions || []).filter(s => !s.key.includes(':subagent:'));
+      const sessions = (state.sessions || []).filter(s => !isNonMainSession(s.key));
       const goals = state.goals || [];
       
       // Find uncategorized sessions
@@ -6512,7 +6818,7 @@ If none fit well, include a suggestion with goalId:null and a proposed new goal 
     state.wizardCurrentProposal = null;
     
     function openOrganizeWizard() {
-      const sessions = (state.sessions || []).filter(s => !s.key.includes(':subagent:'));
+      const sessions = (state.sessions || []).filter(s => !isNonMainSession(s.key));
       const goals = state.goals || [];
       
       // Find uncategorized sessions
@@ -6917,13 +7223,20 @@ Response format:
     }
 
     async function deleteCondo(condoId, condoName) {
-      if (!confirm('Delete condo "' + condoName + '"?\n\nGoals inside will become uncategorized.')) {
+      if (!confirm('Delete condo "' + condoName + '"?\n\nAll goals and sessions inside will be removed.')) {
         return;
       }
       try {
-        await rpcCall('condos.delete', { id: condoId });
-        await loadCondos();
-        await loadGoals();
+        var result = await rpcCall('condos.delete', { id: condoId });
+
+        // Hide killed sessions from the UI (gateway has no sessions.delete)
+        var killed = result && result.killedSessions;
+        if (Array.isArray(killed) && killed.length > 0) {
+          killed.forEach(function(sk) { state.killedSessions.add(sk); });
+          saveKilledSessions();
+        }
+
+        await Promise.all([loadCondos(), loadGoals(), loadSessions()]);
         renderGoals();
         showToast('Condo deleted: ' + condoName);
       } catch (e) {
@@ -7096,7 +7409,7 @@ Response format:
         if (!m) continue;
         const agentId = m[1];
         if (!sessionsByAgent.has(agentId)) continue;
-        if (s.key.includes(':subagent:')) sessionsByAgent.get(agentId).subsessions.push(s);
+        if (isWorkerSession(s.key)) sessionsByAgent.get(agentId).subsessions.push(s);
         else sessionsByAgent.get(agentId).sessions.push(s);
       }
 
@@ -7795,7 +8108,7 @@ Response format:
                     title="Ask for full summary">
               📋
             </button>
-            ${!s.key.includes(':subagent:') ? `<button class="session-action-btn categorize-btn" 
+            ${!isNonMainSession(s.key) ? `<button class="session-action-btn categorize-btn"
                     onclick="showCategorizeSuggestions('${escapeHtml(s.key)}', event)" 
                     title="Suggest goal for this session">
               🏷️
@@ -7892,9 +8205,9 @@ Response format:
         return true;
       });
 
-      // Split out subagents - they render inline in parent chat, not in sidebar
-      const subagentSessions = displaySessions.filter(s => s.key.includes(':subagent:'));
-      const mainDisplaySessions = displaySessions.filter(s => !s.key.includes(':subagent:'));
+      // Split out workers - they render inline in parent chat, not in sidebar
+      const subagentSessions = displaySessions.filter(s => isWorkerSession(s.key));
+      const mainDisplaySessions = displaySessions.filter(s => !isWorkerSession(s.key));
 
       const { parentMap: subagentsByParent, unparented: unparentedSubagents } = buildSubagentParentMap(
         mainDisplaySessions,
@@ -8002,7 +8315,7 @@ Response format:
     }
     
     function getSessionIcon(s) {
-      if (s.key.includes(':subagent:')) return '⚡';
+      if (isWorkerSession(s.key)) return '⚡';
       if (s.key.includes(':app:')) return '🛠️';
       if (s.key.startsWith('cron:')) return '⏰';
       if (s.key.includes(':group:')) return '👥';
@@ -8023,7 +8336,7 @@ Response format:
       if (triggerAutoGen && !state.attemptedTitles.has(s.key)) {
         // Only auto-generate for sessions that have messages and aren't special
         const isSpecial = isPmSessionKey(s.key) ||
-                         s.key.includes(':subagent:') ||
+                         isNonMainSession(s.key) ||
                          s.key.includes(':app:') ||
                          s.key.startsWith('cron:');
         if (!isSpecial && s.totalTokens > 0) {
@@ -8057,7 +8370,7 @@ Response format:
         }
         return 'PM Session';
       }
-      if (s.key.includes(':subagent:')) return s.label || 'Sub-agent';
+      if (isWorkerSession(s.key)) return s.label || 'Sub-agent';
       if (s.key.includes(':app:')) return `App: ${s.key.split(':app:')[1]}`;
       if (s.key.startsWith('cron:')) return s.key.replace('cron:', 'Cron: ');
       // Telegram topics: show "Topic N" or channel info
@@ -8467,7 +8780,7 @@ Response format:
         if (block.type === 'toolResult' && block.content) {
           try {
             const result = typeof block.content === 'string' ? JSON.parse(block.content) : block.content;
-            if (result.sessionKey && result.sessionKey.includes(':subagent:')) {
+            if (result.sessionKey && isWorkerSession(result.sessionKey)) {
               // Update corresponding card if we can find it
               const card = cards.find(c => c.id === block.toolCallId);
               if (card) {
@@ -9398,8 +9711,8 @@ Response format:
     }
     
     function toggleSelectAll() {
-      const mainSessions = state.sessions.filter(s => !s.key.includes(':subagent:'));
-      
+      const mainSessions = state.sessions.filter(s => !isNonMainSession(s.key));
+
       if (state.selectedSessions.size === mainSessions.length) {
         // Deselect all
         state.selectedSessions.clear();
@@ -9428,7 +9741,7 @@ Response format:
       });
       
       // Update select all checkbox
-      const mainSessions = state.sessions.filter(s => !s.key.includes(':subagent:'));
+      const mainSessions = state.sessions.filter(s => !isNonMainSession(s.key));
       const selectAllCheckbox = document.getElementById('selectAllCheckbox');
       if (selectAllCheckbox) {
         if (mainSessions.length > 0 && state.selectedSessions.size === mainSessions.length) {
@@ -9526,14 +9839,26 @@ Response format:
     }
 
     async function killGoalSessions(goalId) {
-      await rpcCall('sessions.killForGoal', { goalId: goalId });
-      await loadGoals();
+      var result = await rpcCall('sessions.killForGoal', { goalId: goalId });
+      // Hide killed sessions from the UI
+      var killed = result && result.killedSessions;
+      if (Array.isArray(killed) && killed.length > 0) {
+        killed.forEach(function(sk) { state.killedSessions.add(sk); });
+        saveKilledSessions();
+      }
+      await Promise.all([loadGoals(), loadSessions()]);
       renderGoalView();
     }
 
     async function killCondoSessions(condoId) {
-      await rpcCall('sessions.killForCondo', { condoId: condoId });
-      await loadGoals();
+      var result = await rpcCall('sessions.killForCondo', { condoId: condoId });
+      // Hide killed sessions from the UI
+      var killed = result && result.killedSessions;
+      if (Array.isArray(killed) && killed.length > 0) {
+        killed.forEach(function(sk) { state.killedSessions.add(sk); });
+        saveKilledSessions();
+      }
+      await Promise.all([loadGoals(), loadSessions()]);
       renderGoalView();
     }
 
@@ -9545,7 +9870,9 @@ Response format:
       var STALE_THRESHOLD_MS = 36 * 60 * 60 * 1000; // 36 hours
       var now = Date.now();
       var staleSessions = (state.sessions || []).filter(function(s) {
-        return s.updatedAt && (now - s.updatedAt) > STALE_THRESHOLD_MS;
+        // Use updatedAt, fall back to createdAt; sessions with no timestamp are considered stale
+        var ts = s.updatedAt || s.createdAt || 0;
+        return ts === 0 || (now - ts) > STALE_THRESHOLD_MS;
       });
 
       if (staleSessions.length === 0) {
@@ -9559,12 +9886,14 @@ Response format:
       for (var i = 0; i < staleSessions.length; i++) {
         var sk = staleSessions[i].key;
         try {
+          // Try sessions.delete first (if gateway supports it)
+          try { await rpcCall('sessions.delete', { sessionKey: sk }, 5000); } catch (e) { /* may not exist */ }
           // Abort any active run
           try { await rpcCall('chat.abort', { sessionKey: sk }, 5000); } catch (e) { /* ok if not running */ }
           state.killedSessions.add(sk);
           killed++;
         } catch (err) {
-          console.error('Failed to abort stale session', sk, err);
+          console.error('Failed to kill stale session', sk, err);
           // Still hide it even if abort fails — session is stale anyway
           state.killedSessions.add(sk);
           killed++;
@@ -9632,7 +9961,7 @@ Response format:
           if (t.sessionKey && t.status === 'in-progress') activeSessions++;
         }
       }
-      var idleSessions = sessions.filter(function(s) { return !s.key.includes(':subagent:'); }).length - activeSessions;
+      var idleSessions = sessions.filter(function(s) { return !isNonMainSession(s.key); }).length - activeSessions;
       if (idleSessions < 0) idleSessions = 0;
 
       var tasksInProgress = goals.reduce(function(n, g) {
@@ -10107,9 +10436,9 @@ Response format:
       const countEl = document.getElementById('recentSessionCount');
       if (!container || !section) return;
 
-      // Show ALL recent sessions (top 20), sorted by updatedAt, excluding subagents
+      // Show ALL recent sessions (top 20), sorted by updatedAt, excluding workers/PMs
       const recentSessions = state.sessions
-        .filter(s => !s.key.includes(':subagent:'))
+        .filter(s => !isNonMainSession(s.key))
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
         .slice(0, 20);
 
@@ -10217,7 +10546,7 @@ Response format:
     }
     
     function renderSubagentsGrid() {
-      const subagents = state.sessions.filter(s => s.key.includes(':subagent:'));
+      const subagents = state.sessions.filter(s => isWorkerSession(s.key));
       const section = document.getElementById('subagentsSection');
       const container = document.getElementById('subagentsGrid');
       if (!section || !container) return;
@@ -10483,7 +10812,12 @@ Response format:
 
     function getSessionParentKey(key) {
       var parts = key.split(':');
+      // Legacy subagent format: agent:main:subagent:xyz
       if (parts.length >= 4 && parts[2] === 'subagent') {
+        return parts[0] + ':' + parts[1] + ':main';
+      }
+      // New webchat task format: agent:main:webchat:task-xyz
+      if (parts.length >= 4 && parts[2] === 'webchat' && parts[3] && parts[3].startsWith('task-')) {
         return parts[0] + ':' + parts[1] + ':main';
       }
       return null;

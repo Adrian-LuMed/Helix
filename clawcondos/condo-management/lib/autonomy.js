@@ -57,7 +57,13 @@ export function buildAutonomyDirective(mode) {
       return `**Autonomy: Full** — You have full autonomy. Execute the task without waiting for approval. Use your best judgment.`;
     
     case 'plan':
-      return `**Autonomy: Plan Approval Required** — Before executing, create a detailed plan in PLAN.md and use goal_update with planStatus='awaiting_approval'. Wait for approval before proceeding. Do not execute significant actions until the plan is approved.`;
+      return `**⚠️ Autonomy: Plan Approval Required ⚠️**\n` +
+        `STOP — Do NOT execute any code or make any changes yet.\n` +
+        `1. First, read your assignment and create a detailed plan in your PLAN.md file\n` +
+        `2. Call \`goal_update\` with \`planStatus="awaiting_approval"\` to submit for review\n` +
+        `3. WAIT for the PM to approve or provide feedback\n` +
+        `4. Only after approval: call \`goal_update\` with \`planStatus="executing"\` and proceed\n` +
+        `Do not execute significant actions until the plan is explicitly approved.`;
     
     case 'step':
       return `**Autonomy: Step-by-Step Approval** — Create a plan and get it approved. After approval, pause after completing each major step and update the step status. Wait for confirmation before proceeding to the next step if it involves significant changes.`;

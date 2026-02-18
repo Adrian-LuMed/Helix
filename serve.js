@@ -9,7 +9,7 @@
 import { createServer, request as httpRequest } from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync } from 'fs';
-import { join, extname, resolve as resolvePath } from 'path';
+import { join, dirname, extname, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
@@ -442,6 +442,53 @@ function initGoalsWatcher() {
 }
 initGoalsWatcher();
 
+// ── Kickoff event relay: plugin writes events to a file, serve.js broadcasts to clients ──
+const KICKOFF_FILE = join(__dirname, 'clawcondos/condo-management/.data/kickoff-events.json');
+let lastKickoffMtime = 0;
+
+function broadcastKickoffEvents() {
+  try {
+    const raw = readFileSync(KICKOFF_FILE, 'utf-8').trim();
+    if (!raw) return;
+    const events = JSON.parse(raw);
+    if (!Array.isArray(events) || events.length === 0) return;
+    for (const evt of events) {
+      const msg = JSON.stringify({ type: 'event', event: evt.event || 'goal.kickoff', payload: evt });
+      let count = 0;
+      for (const ws of connectedClients) {
+        try {
+          if (ws.readyState === WebSocket.OPEN) { ws.send(msg); count++; }
+        } catch {}
+      }
+      console.log(`[kickoff-relay] Broadcast ${evt.event || 'goal.kickoff'} to ${count} clients (goal=${evt.goalId})`);
+    }
+    // Clear the file after broadcasting
+    writeFileSync(KICKOFF_FILE, '[]', 'utf-8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.error(`[kickoff-relay] Error: ${err.message}`);
+  }
+}
+
+function initKickoffWatcher() {
+  // Create file if missing
+  const dir = dirname(KICKOFF_FILE);
+  if (!existsSync(dir)) return;
+  if (!existsSync(KICKOFF_FILE)) writeFileSync(KICKOFF_FILE, '[]', 'utf-8');
+  try {
+    lastKickoffMtime = statSync(KICKOFF_FILE).mtimeMs;
+    watchFile(KICKOFF_FILE, { interval: 300 }, (curr) => {
+      if (curr.mtimeMs !== lastKickoffMtime) {
+        lastKickoffMtime = curr.mtimeMs;
+        broadcastKickoffEvents();
+      }
+    });
+    console.log(`[kickoff-relay] Watching ${KICKOFF_FILE} for events`);
+  } catch (err) {
+    console.error(`[kickoff-relay] Failed to watch: ${err.message}`);
+  }
+}
+initKickoffWatcher();
+
 function getGatewayWsUrl() {
   const host = process.env.GATEWAY_HTTP_HOST || '127.0.0.1';
   const port = Number(process.env.GATEWAY_HTTP_PORT || 18789);
@@ -704,12 +751,13 @@ const server = createServer(async (req, res) => {
       if (goalsRes.status === 'rejected') console.error('[search] goals.list failed:', goalsRes.reason?.message);
       if (sessionsRes.status === 'rejected') console.error('[search] sessions.list failed:', sessionsRes.reason?.message);
 
-      // Enrich sessions with goal/condo info and subagent detection
+      // Enrich sessions with goal/condo info and worker/subagent detection
       function enrichSession(s) {
-        s.isSubagent = s.key.includes(':subagent:');
+        // Match both legacy subagent format and new webchat:task- format
+        s.isSubagent = s.key.includes(':subagent:') || s.key.includes(':webchat:task-');
         if (s.isSubagent) {
           const parts = s.key.split(':');
-          if (parts.length >= 4 && parts[2] === 'subagent') {
+          if (parts.length >= 4 && (parts[2] === 'subagent' || (parts[2] === 'webchat' && parts[3]?.startsWith('task-')))) {
             s.parentKey = parts[0] + ':' + parts[1] + ':main';
           }
         }

@@ -247,7 +247,7 @@ describe('PM Handlers - Condo PM', () => {
       expect(condoGoals[0].priority).toBe('high');
     });
 
-    it('creates goals with embedded tasks', async () => {
+    it('creates goals without tasks (tasks stored as description context for goal PMs)', async () => {
       const planContent = `## Goals
 
 | # | Goal | Description | Priority |
@@ -266,13 +266,17 @@ describe('PM Handlers - Condo PM', () => {
       expect(result.ok).toBe(true);
       expect(result.goalsCreated).toBe(1);
       expect(result.goals[0].title).toBe('Auth system');
-      expect(result.goals[0].taskCount).toBeGreaterThanOrEqual(1);
+      expect(result.goals[0].taskCount).toBe(0);
+      expect(result.needsCascade).toBe(true);
 
-      // Verify tasks were created on the goal
+      // Verify tasks were NOT created on the goal, but suggestions are in description
       const data = store.getData();
       const authGoal = data.goals.find(g => g.title === 'Auth system' && g.condoId === 'condo_1' && g.id.startsWith('goal_test'));
       expect(authGoal).toBeDefined();
-      expect(authGoal.tasks.length).toBeGreaterThanOrEqual(1);
+      expect(authGoal.tasks).toHaveLength(0);
+      expect(authGoal.description).toContain('Suggested tasks from project plan');
+      expect(authGoal.description).toContain('Implement JWT middleware');
+      expect(authGoal.description).toContain('Create login form');
     });
 
     it('uses last assistant message from history when no planContent provided', async () => {

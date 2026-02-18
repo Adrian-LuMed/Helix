@@ -1,6 +1,6 @@
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { watch, existsSync } from 'fs';
+import { watch, existsSync, readFileSync, writeFileSync } from 'fs';
 import { createGoalsStore } from './lib/goals-store.js';
 import { createGoalHandlers } from './lib/goals-handlers.js';
 import { createCondoHandlers } from './lib/condos-handlers.js';
@@ -50,6 +50,39 @@ export default function register(api) {
 
   if (wsOps) {
     api.logger.info(`clawcondos-goals: workspaces enabled at ${workspacesDir}`);
+  }
+
+  // Shared RPC helper — calls gateway methods with proper fallback chain
+  async function gatewayRpcCall(method, params) {
+    if (api.callMethod) return api.callMethod(method, params);
+    return new Promise((resolve, reject) => {
+      const respond = (ok, data, err) => ok ? resolve(data) : reject(new Error(err?.message || err || 'RPC failed'));
+      api.handleMessage?.({ type: 'req', method, params, respond }) || reject(new Error('No RPC mechanism available'));
+    });
+  }
+
+  /**
+   * Start spawned sessions by calling chat.send directly.
+   * Used for auto-kickoffs (task completion cascade, retry, phase cascade).
+   * Manual kickoff via goals.kickoff RPC does NOT use this — frontend handles it.
+   * @param {Array} spawnedSessions - Sessions from internalKickoff()
+   * @returns {Promise<void>}
+   */
+  async function startSpawnedSessions(spawnedSessions) {
+    for (const s of spawnedSessions) {
+      if (!s.sessionKey || !s.taskContext) continue;
+      try {
+        await gatewayRpcCall('chat.send', {
+          sessionKey: s.sessionKey,
+          message: s.taskContext,
+        });
+        s.headlessStarted = true;
+        api.logger.info(`clawcondos-goals: backend chat.send OK for ${s.sessionKey}`);
+      } catch (err) {
+        api.logger.error(`clawcondos-goals: backend chat.send FAILED for ${s.sessionKey}: ${err.message}`);
+        s.headlessStarted = false;
+      }
+    }
   }
 
   const handlers = createGoalHandlers(store, { wsOps, logger: api.logger });
@@ -131,13 +164,29 @@ export default function register(api) {
   }
 
   // ── WebSocket broadcasting for real-time plan updates ──
+  // Dual-path: use api.broadcast (gateway internal) + write to kickoff file (serve.js relay)
+  const kickoffEventsFile = join(dataDir, 'kickoff-events.json');
+
   const broadcastPlanUpdate = (payload) => {
+    const eventName = payload.event || 'plan.update';
+
+    // Path 1: api.broadcast (may or may not work depending on gateway version)
     if (api.broadcast) {
-      api.broadcast({
-        type: 'event',
-        event: payload.event || 'plan.update',
-        payload,
-      });
+      api.broadcast({ type: 'event', event: eventName, payload });
+    }
+
+    // Path 2: Write to kickoff file for serve.js relay (reliable for goal.* events)
+    if (eventName.startsWith('goal.')) {
+      try {
+        let existing = [];
+        try { existing = JSON.parse(readFileSync(kickoffEventsFile, 'utf-8')); } catch {}
+        if (!Array.isArray(existing)) existing = [];
+        existing.push(payload);
+        writeFileSync(kickoffEventsFile, JSON.stringify(existing), 'utf-8');
+        api.logger.info(`clawcondos-goals: wrote ${eventName} to kickoff-events.json`);
+      } catch (err) {
+        api.logger.error(`clawcondos-goals: failed to write kickoff event: ${err.message}`);
+      }
     }
   };
 
@@ -211,16 +260,7 @@ export default function register(api) {
 
   // Session lifecycle handlers
   const sessionLifecycleHandlers = createSessionLifecycleHandlers(store, {
-    rpcCall: async (method, params) => {
-      // Use api.callMethod if available, otherwise try direct gateway call
-      if (api.callMethod) {
-        return api.callMethod(method, params);
-      }
-      return new Promise((resolve, reject) => {
-        const respond = (ok, data, err) => ok ? resolve(data) : reject(new Error(err?.message || err || 'RPC failed'));
-        api.handleMessage?.({ type: 'req', method, params, respond }) || reject(new Error('No RPC mechanism available'));
-      });
-    },
+    rpcCall: gatewayRpcCall,
     logger: api.logger,
   });
   for (const [method, handler] of Object.entries(sessionLifecycleHandlers)) {
@@ -368,24 +408,14 @@ export default function register(api) {
       try {
         const result = await internalKickoff(goal.id);
         if (result.spawnedSessions.length > 0) {
-          api.logger.info(`clawcondos-goals: kickoffUnblockedGoals: started goal "${goal.title}" (phase ${goal.phase || '?'})`);
+          await startSpawnedSessions(result.spawnedSessions);
           broadcastPlanUpdate({
             event: 'goal.kickoff',
             goalId: goal.id,
             spawnedCount: result.spawnedSessions.length,
             spawnedSessions: result.spawnedSessions,
           });
-
-          // Start agents by sending taskContext via chat.send
-          for (const s of result.spawnedSessions) {
-            if (s.taskContext && api.sendToSession) {
-              try {
-                api.sendToSession(s.sessionKey, s.taskContext);
-              } catch (err) {
-                api.logger.error(`clawcondos-goals: kickoffUnblockedGoals: failed to send taskContext to ${s.sessionKey}: ${err.message}`);
-              }
-            }
-          }
+          api.logger.info(`clawcondos-goals: kickoffUnblockedGoals: started ${result.spawnedSessions.length} session(s) for goal "${goal.title}" (phase ${goal.phase || '?'})`);
         }
       } catch (err) {
         api.logger.error(`clawcondos-goals: kickoffUnblockedGoals: failed for goal ${goal.id}: ${err.message}`);
@@ -411,9 +441,89 @@ export default function register(api) {
           spawnedCount: result.spawnedSessions.length,
           spawnedSessions: result.spawnedSessions,
         });
+
+        // Manual kickoff: frontend gets spawnedSessions in the response and
+        // calls chat.send. Auto-kickoffs (cascade) call startSpawnedSessions()
+        // directly so they don't depend on the frontend relay.
       }
 
       respond(true, result);
+    } catch (err) {
+      respond(false, null, err.message);
+    }
+  });
+
+  // goals.close — Kill sessions, close worktree, archive goal
+  api.registerGatewayMethod('goals.close', async ({ params, respond }) => {
+    const { goalId } = params || {};
+    if (!goalId) {
+      return respond(false, null, 'goalId is required');
+    }
+
+    try {
+      const data = store.load();
+      const goal = data.goals.find(g => g.id === goalId);
+      if (!goal) {
+        return respond(false, null, 'Goal not found');
+      }
+
+      // 1. Kill all sessions (goal + task + PM) — best-effort
+      const sessionKeys = new Set([
+        ...(goal.sessions || []),
+        ...(goal.tasks || []).filter(t => t.sessionKey).map(t => t.sessionKey),
+      ]);
+      if (goal.pmSessionKey) sessionKeys.add(goal.pmSessionKey);
+
+      for (const sk of sessionKeys) {
+        try { await gatewayRpcCall('sessions.delete', { sessionKey: sk }); } catch { /* may not exist */ }
+        try { await gatewayRpcCall('chat.abort', { sessionKey: sk }); } catch { /* best-effort */ }
+      }
+
+      // 2. Close worktree (merge + remove, preserve branch)
+      if (wsOps && goal.worktree?.path && goal.condoId) {
+        const condo = data.condos.find(c => c.id === goal.condoId);
+        if (condo?.workspace?.path) {
+          const closeResult = wsOps.closeGoalWorktree(condo.workspace.path, goalId, goal.worktree?.branch);
+          if (!closeResult.ok) {
+            api.logger.warn(`goals.close: worktree close failed for ${goalId}: ${closeResult.error}`);
+          } else {
+            api.logger.info(`goals.close: worktree closed for ${goalId} (merged: ${closeResult.merged}, conflict: ${closeResult.conflict})`);
+          }
+        }
+      }
+
+      // 3. Clear task session assignments for non-done tasks
+      for (const task of goal.tasks || []) {
+        if (task.status !== 'done' && task.sessionKey) {
+          delete data.sessionIndex[task.sessionKey];
+          task.sessionKey = null;
+        }
+      }
+
+      // 4. Mark goal as done + closed
+      goal.status = 'done';
+      goal.completed = true;
+      goal.closedAtMs = Date.now();
+      goal.updatedAtMs = Date.now();
+
+      // 5. Null out worktree
+      goal.worktree = null;
+
+      store.save(data);
+
+      // 6. Broadcast goal.closed event
+      if (api.broadcast) {
+        api.broadcast({
+          type: 'event',
+          event: 'goal.closed',
+          payload: {
+            goalId,
+            timestamp: Date.now(),
+          },
+        });
+      }
+
+      respond(true, { ok: true, goalId, killedSessions: [...sessionKeys] });
     } catch (err) {
       respond(false, null, err.message);
     }
@@ -674,7 +784,60 @@ export default function register(api) {
         unwatchPlanFile(sessionKey);
         planLogBuffer.clear(sessionKey);
       } else if (task && task.status === 'in-progress') {
-        // Task was in progress but agent ended without completing — error recovery
+        // Check if agent completed normally (just didn't call goal_update)
+        if (event.success !== false) {
+          // Agent ended normally — auto-mark task as done
+          task.status = 'done';
+          task.done = true;
+          task.summary = task.summary || 'Completed (auto-marked on session end)';
+          task.updatedAtMs = Date.now();
+          store.save(data);
+
+          api.logger.info(`clawcondos-goals: auto-completed task ${task.id} on normal agent_end for goal "${goal.title}"`);
+
+          // Broadcast completion event
+          broadcastPlanUpdate({
+            event: 'goal.task_completed',
+            goalId: goal.id,
+            taskId: task.id,
+            allTasksDone: goal.tasks.every(t => t.status === 'done'),
+            autoCompleted: true,
+            timestamp: Date.now(),
+          });
+
+          // Trigger cascading kickoff
+          const allDone = goal.tasks.every(t => t.status === 'done');
+          if (!allDone) {
+            setTimeout(async () => {
+              try {
+                const kickoffResult = await internalKickoff(goal.id);
+                if (kickoffResult.spawnedSessions?.length > 0) {
+                  await startSpawnedSessions(kickoffResult.spawnedSessions);
+                  broadcastPlanUpdate({
+                    event: 'goal.kickoff',
+                    goalId: goal.id,
+                    spawnedCount: kickoffResult.spawnedSessions.length,
+                    spawnedSessions: kickoffResult.spawnedSessions,
+                  });
+                  api.logger.info(`clawcondos-goals: auto-kickoff after auto-complete started ${kickoffResult.spawnedSessions.length} session(s) for goal "${goal.title}"`);
+                }
+              } catch (err) {
+                api.logger.error(`auto-kickoff after auto-complete failed: ${err.message}`);
+              }
+            }, 1000);
+          } else if (goal.condoId) {
+            // All tasks done — kick off unblocked goals
+            setTimeout(() => kickoffUnblockedGoals(goal.condoId).catch(err =>
+              api.logger.error(`kickoffUnblockedGoals after auto-complete failed: ${err.message}`)
+            ), 2000);
+          }
+
+          unwatchPlanFile(sessionKey);
+          planLogBuffer.clear(sessionKey);
+          return; // Skip retry logic
+        }
+
+        // Agent ended with error — error recovery
         const retryCount = task.retryCount || 0;
         const maxRetries = goal.maxRetries ?? 1;
 
@@ -683,9 +846,7 @@ export default function register(api) {
           task.sessionKey = null;
           task.status = 'pending';
           task.retryCount = retryCount + 1;
-          task.lastError = event.success === false
-            ? 'Agent failed while working on task'
-            : 'Agent ended without completing task';
+          task.lastError = 'Agent failed while working on task';
           task.updatedAtMs = Date.now();
           store.save(data);
 
@@ -704,8 +865,17 @@ export default function register(api) {
           // Auto re-kickoff after a delay
           setTimeout(async () => {
             try {
-              await internalKickoff(goal.id);
-              api.logger.info(`clawcondos-goals: auto re-kickoff for goal ${goal.id} after retry`);
+              const kickoffResult = await internalKickoff(goal.id);
+              if (kickoffResult.spawnedSessions?.length > 0) {
+                await startSpawnedSessions(kickoffResult.spawnedSessions);
+                broadcastPlanUpdate({
+                  event: 'goal.kickoff',
+                  goalId: goal.id,
+                  spawnedCount: kickoffResult.spawnedSessions.length,
+                  spawnedSessions: kickoffResult.spawnedSessions,
+                });
+                api.logger.info(`clawcondos-goals: auto re-kickoff for goal ${goal.id} after retry — started ${kickoffResult.spawnedSessions.length} session(s)`);
+              }
             } catch (err) {
               api.logger.error(`clawcondos-goals: auto re-kickoff failed for goal ${goal.id}: ${err.message}`);
             }
@@ -841,6 +1011,7 @@ export default function register(api) {
   api.registerTool(
     (ctx) => {
       if (!ctx.sessionKey) return null;
+      if (isPmSession(ctx.sessionKey)) return null; // PMs plan, don't mutate goals directly
 
       // Always expose the tool for any session with a key.  The executor validates
       // that the session is actually assigned to a goal at call time, which avoids
@@ -942,7 +1113,21 @@ export default function register(api) {
             if (!result._meta.allTasksDone) {
               setTimeout(async () => {
                 try {
-                  await internalKickoff(result._meta.goalId);
+                  const kickoffResult = await internalKickoff(result._meta.goalId);
+
+                  if (kickoffResult.spawnedSessions?.length > 0) {
+                    // Backend starts agents directly — no frontend relay needed
+                    await startSpawnedSessions(kickoffResult.spawnedSessions);
+
+                    // Broadcast for UI updates (frontend skips chat.send via headlessStarted flag)
+                    broadcastPlanUpdate({
+                      event: 'goal.kickoff',
+                      goalId: result._meta.goalId,
+                      spawnedCount: kickoffResult.spawnedSessions.length,
+                      spawnedSessions: kickoffResult.spawnedSessions,
+                    });
+                    api.logger.info(`clawcondos-goals: auto-kickoff started ${kickoffResult.spawnedSessions.length} session(s) for goal ${result._meta.goalId}`);
+                  }
                 } catch (err) {
                   api.logger.error(`clawcondos-goals: auto-kickoff after task completion failed: ${err.message}`);
                 }
@@ -981,6 +1166,11 @@ export default function register(api) {
     { names: ['goal_update'] }
   );
 
+  // PM sessions should not have creation/spawn tools — PMs plan, users click buttons to execute
+  function isPmSession(sessionKey) {
+    return sessionKey && sessionKey.includes(':webchat:pm-');
+  }
+
   // Tool: condo_bind for agents to bind their session to a condo
   const condoBindExecute = createCondoBindExecutor(store, wsOps);
 
@@ -1017,6 +1207,7 @@ export default function register(api) {
   api.registerTool(
     (ctx) => {
       if (!ctx.sessionKey) return null;
+      if (isPmSession(ctx.sessionKey)) return null; // PMs plan, don't create
       const data = store.load();
       if (!data.sessionCondoIndex[ctx.sessionKey]) return null;
 
@@ -1057,6 +1248,7 @@ export default function register(api) {
   api.registerTool(
     (ctx) => {
       if (!ctx.sessionKey) return null;
+      if (isPmSession(ctx.sessionKey)) return null; // PMs plan, don't create
       const data = store.load();
       if (!data.sessionCondoIndex[ctx.sessionKey]) return null;
 
@@ -1088,6 +1280,7 @@ export default function register(api) {
   api.registerTool(
     (ctx) => {
       if (!ctx.sessionKey) return null;
+      if (isPmSession(ctx.sessionKey)) return null; // PMs plan, don't create
       const data = store.load();
       if (!data.sessionCondoIndex[ctx.sessionKey]) return null;
 
@@ -1106,7 +1299,36 @@ export default function register(api) {
           required: ['goalId', 'taskId'],
         },
         async execute(toolCallId, params) {
-          return condoSpawnTaskExecute(toolCallId, { ...params, sessionKey: ctx.sessionKey });
+          const result = await condoSpawnTaskExecute(toolCallId, { ...params, sessionKey: ctx.sessionKey });
+
+          // Start agent directly
+          if (result.taskContext && result.spawnRequest?.sessionKey) {
+            try {
+              await gatewayRpcCall('chat.send', {
+                sessionKey: result.spawnRequest.sessionKey,
+                message: result.taskContext,
+              });
+              result.headlessStarted = true;
+            } catch (err) {
+              api.logger.error(`clawcondos-goals: condo_spawn_task chat.send failed: ${err.message}`);
+              result.headlessStarted = false;
+            }
+
+            broadcastPlanUpdate({
+              event: 'goal.kickoff',
+              goalId: params.goalId,
+              spawnedCount: 1,
+              spawnedSessions: [{
+                taskId: params.taskId,
+                taskText: result.spawnRequest.taskText || params.taskId,
+                sessionKey: result.spawnRequest.sessionKey,
+                taskContext: result.taskContext,
+                headlessStarted: result.headlessStarted,
+              }],
+            });
+          }
+
+          return result;
         },
       };
     },

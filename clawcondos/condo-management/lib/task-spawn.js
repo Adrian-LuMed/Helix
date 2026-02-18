@@ -96,10 +96,12 @@ export function createTaskSpawnHandler(store) {
         return;
       }
 
-      // Generate a session key for the spawned subagent
+      // Generate a session key for the spawned task worker
+      // Uses `webchat` session type so chat.send auto-creates the session on the gateway.
+      // (subagent sessions require the parent agent to already be running.)
       const suffix = store.newId('spawn').replace('spawn_', '');
       const agent = agentId || 'main';
-      const sessionKey = `agent:${agent}:subagent:${suffix}`;
+      const sessionKey = `agent:${agent}:webchat:task-${suffix}`;
 
       // Initialize plan with workspace path convention
       const planFilePath = buildPlanFilePath(agent, goalId, taskId);
@@ -148,10 +150,13 @@ export function createTaskSpawnHandler(store) {
       const pmPlan = goal.pmPlanContent || null;
 
       const taskContext = [
-        // Start with worker skill if available
+        // CRITICAL: completion instruction first — agents must see this
+        `⚠️ **REQUIRED: When you finish this task, you MUST call \`goal_update\` with \`status: "done"\` and \`taskId: "${task.id}"\`. Your work is not recorded until you do this.**`,
+        '',
+        // Worker skill context
         workerSkillContext || null,
         '',
-        // Then project/goal context
+        // Project/goal context
         projectPrefix + goalContext,
         '',
         // PM's full plan for context
@@ -170,9 +175,10 @@ export function createTaskSpawnHandler(store) {
         autonomyDirective,
         '',
         `**Plan File:** If you need to create a plan, write it to: \`${planFilePath}\``,
-        'Use \`goal_update\` with \`planStatus="awaiting_approval"\` when your plan is ready for review.',
+        'Use `goal_update` with `planStatus="awaiting_approval"` when your plan is ready for review.',
         '',
-        'When you complete this task, use the goal_update tool to mark it done.',
+        // Repeat at the end for emphasis
+        `⚠️ **REMINDER: When done, call \`goal_update({ taskId: "${task.id}", status: "done", summary: "..." })\`**`,
       ].filter(line => line != null).join('\n');
 
       // Link session to goal and update task

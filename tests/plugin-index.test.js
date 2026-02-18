@@ -84,6 +84,8 @@ describe('Plugin index.js', () => {
         'sessions.killForGoal', 'sessions.killForCondo', 'sessions.cleanupStale', 'sessions.listForCondo',
         // Conflict detection
         'goals.checkConflicts',
+        // Close goal
+        'goals.close',
       ];
       for (const name of expected) {
         expect(api._methods).toHaveProperty(name);

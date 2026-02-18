@@ -5291,6 +5291,19 @@ a:focus-visible {
   opacity: 0.6;
 }
 
+/* Closed goals — archived, visually distinct from done */
+.goal-item.goal-closed .goal-item-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted);
+}
+.goal-item.goal-closed .goal-meta-line {
+  color: var(--text-muted);
+}
+.goal-item.goal-closed {
+  opacity: 0.5;
+}
+
 /* Thinking indicator — subtle left glow */
 .goal-item.goal-thinking {
   border-left-color: var(--green);

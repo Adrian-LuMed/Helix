@@ -10,6 +10,8 @@
  */
 function collectGoalSessionKeys(goal) {
   const keys = new Set();
+  // Goal PM session
+  if (goal.pmSessionKey) keys.add(goal.pmSessionKey);
   // Goal-level sessions
   for (const sk of goal.sessions || []) {
     keys.add(sk);
@@ -31,6 +33,9 @@ function collectGoalSessionKeys(goal) {
  */
 function collectCondoSessionKeys(data, condoId) {
   const keys = new Set();
+  // Condo PM session
+  const condo = data.condos?.find(c => c.id === condoId);
+  if (condo?.pmCondoSessionKey) keys.add(condo.pmCondoSessionKey);
   // Sessions from sessionCondoIndex
   for (const [sk, cId] of Object.entries(data.sessionCondoIndex || {})) {
     if (cId === condoId) keys.add(sk);
@@ -57,10 +62,12 @@ export function createSessionLifecycleHandlers(store, options = {}) {
   const { rpcCall, logger } = options;
 
   /**
-   * Abort a single session (best-effort).
+   * Abort and attempt to delete a single session (best-effort).
    */
   async function abortSession(sessionKey) {
     try {
+      // Try sessions.delete first (if gateway supports it)
+      try { await rpcCall('sessions.delete', { sessionKey }); } catch { /* may not exist */ }
       await rpcCall('chat.abort', { sessionKey });
       return { sessionKey, aborted: true };
     } catch (err) {
@@ -99,7 +106,7 @@ export function createSessionLifecycleHandlers(store, options = {}) {
         const abortedCount = results.filter(r => r.aborted).length;
         if (logger) logger.info(`sessions.killForGoal: aborted ${abortedCount}/${sessionKeys.length} for goal ${goalId}`);
 
-        respond(true, { goalId, total: sessionKeys.length, aborted: abortedCount, results });
+        respond(true, { goalId, total: sessionKeys.length, aborted: abortedCount, killedSessions: sessionKeys, results });
       } catch (err) {
         respond(false, null, err.message);
       }
@@ -138,7 +145,7 @@ export function createSessionLifecycleHandlers(store, options = {}) {
         const abortedCount = results.filter(r => r.aborted).length;
         if (logger) logger.info(`sessions.killForCondo: aborted ${abortedCount}/${sessionKeys.length} for condo ${condoId}`);
 
-        respond(true, { condoId, total: sessionKeys.length, aborted: abortedCount, results });
+        respond(true, { condoId, total: sessionKeys.length, aborted: abortedCount, killedSessions: sessionKeys, results });
       } catch (err) {
         respond(false, null, err.message);
       }

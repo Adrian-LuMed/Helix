@@ -175,19 +175,26 @@ export function createCondoHandlers(store, options = {}) {
         }
         const deletedCondo = data.condos[idx];
 
-        // Kill all running sessions for this condo (best-effort)
+        // Collect ALL sessions associated with this condo (for abort + frontend cleanup)
+        const allSessionKeys = new Set();
+        // Condo PM session
+        if (deletedCondo.pmCondoSessionKey) allSessionKeys.add(deletedCondo.pmCondoSessionKey);
+        // Sessions from sessionCondoIndex
+        for (const [sk, cId] of Object.entries(data.sessionCondoIndex || {})) {
+          if (cId === params.id) allSessionKeys.add(sk);
+        }
+        // Goal sessions, task sessions, and goal PM sessions
+        for (const goal of data.goals.filter(g => g.condoId === params.id)) {
+          if (goal.pmSessionKey) allSessionKeys.add(goal.pmSessionKey);
+          for (const sk of goal.sessions || []) allSessionKeys.add(sk);
+          for (const task of goal.tasks || []) {
+            if (task.sessionKey) allSessionKeys.add(task.sessionKey);
+          }
+        }
+        // Kill all running sessions (best-effort)
         if (rpcCall) {
-          const allSessionKeys = new Set();
-          for (const [sk, cId] of Object.entries(data.sessionCondoIndex || {})) {
-            if (cId === params.id) allSessionKeys.add(sk);
-          }
-          for (const goal of data.goals.filter(g => g.condoId === params.id)) {
-            for (const sk of goal.sessions || []) allSessionKeys.add(sk);
-            for (const task of goal.tasks || []) {
-              if (task.sessionKey) allSessionKeys.add(task.sessionKey);
-            }
-          }
           for (const sk of allSessionKeys) {
+            try { await rpcCall('sessions.delete', { sessionKey: sk }); } catch { /* may not exist */ }
             try { await rpcCall('chat.abort', { sessionKey: sk }); } catch { /* best-effort */ }
           }
         }
@@ -230,7 +237,7 @@ export function createCondoHandlers(store, options = {}) {
         }
         data.condos.splice(idx, 1);
         saveData(data);
-        respond(true, { ok: true });
+        respond(true, { ok: true, killedSessions: [...allSessionKeys] });
       } catch (err) {
         respond(false, undefined, { message: String(err) });
       }

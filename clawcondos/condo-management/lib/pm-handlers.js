@@ -952,30 +952,21 @@ export function createPmHandlers(store, options = {}) {
 
       for (const goalData of parsedGoals) {
         const goalId = goalData.id;
-        const tasks = (goalData.tasks || []).map(t => ({
-          id: store.newId('task'),
-          text: t.text,
-          description: t.description || '',
-          status: 'pending',
-          done: false,
-          priority: null,
-          sessionKey: null,
-          assignedAgent: t.agent || null,
-          model: null,
-          dependsOn: [],
-          summary: '',
-          estimatedTime: t.time || null,
-          createdAtMs: now,
-          updatedAtMs: now,
-        }));
 
-        // Set sequential dependencies so tasks run in order
-        setSequentialDependencies(tasks);
+        // Don't create task objects — let goal PMs plan them via cascade.
+        // Store the condo PM's task suggestions as description context for the goal PM.
+        const tasks = [];
+        const taskContext = (goalData.tasks || [])
+          .map(t => `- ${t.text}${t.description ? ': ' + t.description : ''}`)
+          .join('\n');
+
+        const goalDescription = (goalData.description || '') +
+          (taskContext ? '\n\n### Suggested tasks from project plan:\n' + taskContext : '');
 
         const goal = {
           id: goalId,
           title: goalData.title,
-          description: goalData.description || '',
+          description: goalDescription,
           condoId,
           status: 'active',
           completed: false,
@@ -1021,11 +1012,16 @@ export function createPmHandlers(store, options = {}) {
         logger.info(`pm.condoCreateGoals: created ${createdGoals.length} goals for condo "${condo.name}"`);
       }
 
+      // NOTE: We do NOT auto-send to goal PMs here. The frontend will call
+      // pm.condoCascade which saves prompts to pmChatHistory and sends via chat.send.
+      // This avoids double-sending and ensures the cascade tracking mechanism works.
+
       respond(true, {
         ok: true,
         goalsCreated: createdGoals.length,
         goals: createdGoals,
         condoId,
+        needsCascade: true,
       });
     } catch (err) {
       if (logger) {
@@ -1069,22 +1065,76 @@ export function createPmHandlers(store, options = {}) {
         return respond(false, null, 'No goals need planning (all already have tasks)');
       }
 
+      // Build shared context once — roles, skill, project snapshot
+      const allTasks = goals.flatMap(g => g.tasks || []);
+      const pendingTasks = allTasks.filter(t => t.status !== 'done');
+
+      const configuredRoles = data.config?.agentRoles || {};
+      const roleDescriptions = data.config?.roles || {};
+      const defaultRoles = getDefaultRoles();
+      const allRoleNames = new Set([...Object.keys(defaultRoles), ...Object.keys(configuredRoles), ...Object.keys(roleDescriptions)]);
+      const availableRoles = {};
+      for (const role of allRoleNames) {
+        if (role === 'pm') continue;
+        const agentId = configuredRoles[role] || defaultRoles[role] || role;
+        const description = roleDescriptions[role]?.description || null;
+        availableRoles[role] = { agentId, ...(description ? { description } : {}) };
+      }
+
+      const pmSkillContext = getPmSkillContext({
+        condoId,
+        condoName: condo.name,
+        activeGoals: goals.filter(g => !g.completed).length,
+        totalTasks: allTasks.length,
+        pendingTasks: pendingTasks.length,
+        roles: availableRoles,
+      });
+
+      let projectSnapshotContext = null;
+      if (wsOps && condo?.workspace?.path) {
+        try {
+          const { snapshot } = buildProjectSnapshot(condo.workspace.path);
+          if (snapshot) projectSnapshotContext = snapshot;
+        } catch (e) {
+          if (logger) logger.warn(`pm.condoCascade: project snapshot failed: ${e.message}`);
+        }
+      }
+
       const cascadeGoals = [];
 
       for (const goal of goalsNeedingPlanning) {
         // Create a PM session for this goal
         const { pmSessionKey } = getOrCreatePmSessionForGoal(store, goal.id);
 
-        // Build a prompt for the goal PM
-        const prompt = `Plan tasks for this goal: "${goal.title}"` +
-          (goal.description ? `\n\nDescription: ${goal.description}` : '') +
+        // Build user-facing prompt (what shows in the goal chat)
+        const userPrompt = `Plan tasks for this goal: "${goal.title}"` +
+          (goal.description ? `\n\nDescription:\n${goal.description}` : '') +
           `\n\nThis goal is part of the "${condo.name}" project. Break it into actionable tasks with agent assignments.`;
+
+        // Build enriched prompt with PM skill context + project snapshot (same as pm.chat)
+        const contextPrefix = [
+          pmSkillContext || null,
+          projectSnapshotContext || null,
+          '',
+          `[PM Mode Context]`,
+          `Condo: ${condo.name}`,
+          `Goal: ${goal.title}`,
+          `Active Goals: ${goals.filter(g => !g.completed).length}`,
+          '',
+          'User Message:',
+        ].filter(line => line != null).join('\n');
+
+        const enrichedPrompt = `${contextPrefix}\n${userPrompt}`;
+
+        // Save the clean prompt to goal's pmChatHistory (for display in goal chat)
+        addToHistory(goal, 'user', userPrompt);
 
         cascadeGoals.push({
           goalId: goal.id,
           title: goal.title,
           pmSessionKey,
-          prompt,
+          prompt: enrichedPrompt,        // Enriched prompt sent to agent
+          userPrompt,                     // Clean prompt for display
         });
       }
 

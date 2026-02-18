@@ -111,7 +111,7 @@ export function createGoalHandlers(store, options = {}) {
         }
 
         // Whitelist allowed patch fields (prevent overwriting internal fields)
-        const allowed = ['title', 'description', 'status', 'completed', 'condoId', 'priority', 'deadline', 'notes', 'tasks', 'nextTask', 'dropped', 'droppedAtMs', 'files', 'plan', 'autonomyMode', 'phase', 'dependsOn'];
+        const allowed = ['title', 'description', 'status', 'completed', 'condoId', 'priority', 'deadline', 'notes', 'tasks', 'nextTask', 'dropped', 'droppedAtMs', 'files', 'plan', 'autonomyMode', 'phase', 'dependsOn', 'closedAtMs'];
         for (const f of allowed) {
           if (f in params) goal[f] = params[f];
         }
@@ -142,13 +142,18 @@ export function createGoalHandlers(store, options = {}) {
         }
         const deletedGoal = data.goals[idx];
 
-        // Kill running sessions for this goal (best-effort)
+        // Collect ALL sessions for this goal (for abort + frontend cleanup)
+        const sessionKeys = new Set([
+          ...(deletedGoal.sessions || []),
+          ...(deletedGoal.tasks || []).filter(t => t.sessionKey).map(t => t.sessionKey),
+        ]);
+        // Include goal PM session
+        if (deletedGoal.pmSessionKey) sessionKeys.add(deletedGoal.pmSessionKey);
+
+        // Kill running sessions (best-effort) — try delete first, then abort
         if (rpcCall) {
-          const sessionKeys = new Set([
-            ...(deletedGoal.sessions || []),
-            ...(deletedGoal.tasks || []).filter(t => t.sessionKey).map(t => t.sessionKey),
-          ]);
           for (const sk of sessionKeys) {
+            try { await rpcCall('sessions.delete', { sessionKey: sk }); } catch { /* may not exist */ }
             try { await rpcCall('chat.abort', { sessionKey: sk }); } catch { /* best-effort */ }
           }
         }
@@ -170,7 +175,7 @@ export function createGoalHandlers(store, options = {}) {
         }
         data.goals.splice(idx, 1);
         saveData(data);
-        respond(true, { ok: true });
+        respond(true, { ok: true, killedSessions: [...sessionKeys] });
       } catch (err) {
         respond(false, undefined, { message: String(err) });
       }

@@ -93,6 +93,10 @@ export function createCondoCreateGoalExecutor(store, wsOps) {
         const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId, title.trim());
         if (wtResult.ok) {
           goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
+          // Push new branch to remote so it's visible on GitHub
+          if (condo.workspace.repoUrl && wsOps.pushGoalBranch) {
+            wsOps.pushGoalBranch(wtResult.path, wtResult.branch);
+          }
         }
       }
     }

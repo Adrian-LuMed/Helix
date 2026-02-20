@@ -449,6 +449,13 @@ export default function register(api) {
         );
         if (commitResult.committed) {
           api.logger.info(`clawcondos-goals: auto-committed changes in worktree for goal ${goalId}`);
+          // Push the goal branch so commits are visible on GitHub before merge
+          if (mergeCondo.workspace.repoUrl && wsOps.pushGoalBranch) {
+            const branchPush = wsOps.pushGoalBranch(mergeGoal.worktree.path, mergeGoal.worktree.branch);
+            if (branchPush.pushed) {
+              api.logger.info(`clawcondos-goals: pushed goal branch ${mergeGoal.worktree.branch} to remote`);
+            }
+          }
         } else if (!commitResult.ok) {
           api.logger.warn(`clawcondos-goals: auto-commit failed for goal ${goalId}: ${commitResult.error}`);
         }

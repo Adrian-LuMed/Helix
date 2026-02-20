@@ -1000,6 +1000,15 @@ export function createPmHandlers(store, options = {}) {
           const wtResult = wsOps.createGoalWorktree(condo.workspace.path, goalId, goalData.title);
           if (wtResult.ok) {
             goal.worktree = { path: wtResult.path, branch: wtResult.branch, createdAtMs: now };
+            // Push the new branch to remote so it's visible on GitHub
+            if (condo.workspace.repoUrl && wsOps.pushGoalBranch) {
+              const pushResult = wsOps.pushGoalBranch(wtResult.path, wtResult.branch);
+              if (pushResult.pushed) {
+                if (logger) logger.info(`pm.condoCreateGoals: pushed branch ${wtResult.branch} to remote for goal ${goalId}`);
+              } else if (!pushResult.ok && logger) {
+                logger.warn(`pm.condoCreateGoals: failed to push branch ${wtResult.branch}: ${pushResult.error}`);
+              }
+            }
           } else if (logger) {
             logger.error(`pm.condoCreateGoals: worktree creation failed for goal ${goalId}: ${wtResult.error}`);
           }

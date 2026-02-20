@@ -344,6 +344,44 @@ export function commitWorktreeChanges(worktreePath, message) {
 }
 
 /**
+ * Push a goal branch to the remote (best-effort).
+ * Works from either the worktree path or the condo workspace root.
+ * No-op if no remote is configured.
+ *
+ * @param {string} gitDir - Path to run git from (worktree or condo workspace)
+ * @param {string} branch - Branch name to push
+ * @returns {{ ok: boolean, pushed?: boolean, error?: string }}
+ */
+export function pushGoalBranch(gitDir, branch) {
+  try {
+    if (!existsSync(gitDir)) {
+      return { ok: false, error: 'Git directory does not exist' };
+    }
+
+    // Check if remote exists
+    const remotes = execSync('git remote', {
+      cwd: gitDir,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    if (!remotes) {
+      return { ok: true, pushed: false }; // No remote configured
+    }
+
+    execSync(`git push -u origin ${shellQuote(branch)}`, {
+      cwd: gitDir,
+      stdio: 'pipe',
+      timeout: 60_000,
+    });
+
+    return { ok: true, pushed: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
  * Merge a goal branch into the main branch.
  * @param {string} condoWs - Condo workspace root path
  * @param {string} branch - Branch name to merge

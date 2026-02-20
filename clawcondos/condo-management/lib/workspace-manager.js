@@ -211,10 +211,15 @@ export function closeGoalWorktree(condoWs, goalId, storedBranch) {
   const branch = storedBranch || goalBranchName(goalId);
 
   try {
-    // 1. Best-effort merge into main (abort on conflict)
+    // 1. Auto-commit any uncommitted changes in the worktree
+    if (existsSync(wtPath)) {
+      commitWorktreeChanges(wtPath, `Goal closed: ${goalId}`);
+    }
+
+    // 2. Best-effort merge into main (abort on conflict)
     const mergeResult = mergeGoalBranch(condoWs, branch);
 
-    // 2. Remove worktree directory
+    // 3. Remove worktree directory
     if (existsSync(wtPath)) {
       execSync(`git worktree remove --force ${shellQuote(wtPath)}`, {
         cwd: condoWs,
@@ -284,6 +289,57 @@ export function getMainBranch(repoPath) {
     return head || 'main';
   } catch {
     return 'main';
+  }
+}
+
+/**
+ * Auto-commit any uncommitted changes in a goal worktree.
+ * Stages all changes (new, modified, deleted) and creates a commit.
+ * No-op if the worktree has no changes.
+ *
+ * @param {string} worktreePath - Path to the goal worktree directory
+ * @param {string} [message] - Optional commit message
+ * @returns {{ ok: boolean, committed?: boolean, error?: string }}
+ */
+export function commitWorktreeChanges(worktreePath, message) {
+  try {
+    if (!existsSync(worktreePath)) {
+      return { ok: false, error: 'Worktree path does not exist' };
+    }
+
+    // Check if there are any changes to commit
+    const status = execSync('git status --porcelain', {
+      cwd: worktreePath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    if (!status) {
+      return { ok: true, committed: false }; // Nothing to commit
+    }
+
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Helix',
+      GIT_AUTHOR_EMAIL: 'clawcondos@localhost',
+      GIT_COMMITTER_NAME: 'Helix',
+      GIT_COMMITTER_EMAIL: 'clawcondos@localhost',
+    };
+
+    // Stage all changes
+    execSync('git add -A', { cwd: worktreePath, stdio: 'pipe', env: gitEnv });
+
+    // Commit
+    const commitMsg = message || 'Auto-commit goal work';
+    execSync(`git commit -m ${shellQuote(commitMsg)}`, {
+      cwd: worktreePath,
+      stdio: 'pipe',
+      env: gitEnv,
+    });
+
+    return { ok: true, committed: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 }
 

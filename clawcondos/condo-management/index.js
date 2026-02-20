@@ -441,6 +441,19 @@ export default function register(api) {
       const mergeCondo = mergeData.condos.find(c => c.id === mergeGoal.condoId);
       if (!mergeCondo?.workspace?.path) return;
 
+      // Auto-commit any uncommitted changes in the goal worktree before merging
+      if (mergeGoal.worktree?.path && wsOps.commitWorktreeChanges) {
+        const commitResult = wsOps.commitWorktreeChanges(
+          mergeGoal.worktree.path,
+          `Goal complete: ${mergeGoal.title || goalId}`
+        );
+        if (commitResult.committed) {
+          api.logger.info(`clawcondos-goals: auto-committed changes in worktree for goal ${goalId}`);
+        } else if (!commitResult.ok) {
+          api.logger.warn(`clawcondos-goals: auto-commit failed for goal ${goalId}: ${commitResult.error}`);
+        }
+      }
+
       const mergeResult = wsOps.mergeGoalBranch(mergeCondo.workspace.path, mergeGoal.worktree.branch);
       mergeGoal.mergeStatus = mergeResult.ok ? 'merged' : (mergeResult.conflict ? 'conflict' : 'error');
       mergeGoal.mergedAtMs = mergeResult.ok ? Date.now() : null;

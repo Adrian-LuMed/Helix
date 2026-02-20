@@ -1022,6 +1022,10 @@ export default function register(api) {
               api.logger.info(`clawcondos-goals: agent_end PM cascade for goal "${pmGoal.title}": state=${cascadeResult.cascadeState}, tasks=${cascadeResult.tasksCreated}`);
 
               if (cascadeResult.cascadeState === 'tasks_created' && pmGoal.cascadeMode === 'full') {
+                // Ensure goal autonomy mode is 'full' so spawned workers don't wait for approval
+                pmGoal.autonomyMode = 'full';
+                store.save(data);
+
                 // Broadcast tasks created event
                 broadcastPlanUpdate({
                   event: 'goal.cascade_tasks_created',

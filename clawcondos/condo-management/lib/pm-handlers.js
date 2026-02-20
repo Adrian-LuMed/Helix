@@ -1181,6 +1181,9 @@ export function createPmHandlers(store, options = {}) {
       for (const goal of goalsNeedingPlanning) {
         goal.cascadeState = 'awaiting_plan';
         goal.cascadeMode = mode;
+        if (mode === 'full') {
+          goal.autonomyMode = 'full';
+        }
       }
 
       // Store cascade mode + pending goals on condo for tracking
@@ -1358,6 +1361,9 @@ export function createPmHandlers(store, options = {}) {
       // Set cascade state
       goal.cascadeState = 'awaiting_plan';
       goal.cascadeMode = mode;
+      if (mode === 'full') {
+        goal.autonomyMode = 'full';
+      }
       goal.updatedAtMs = Date.now();
       store.save(data);
 
